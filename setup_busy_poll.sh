@@ -27,7 +27,7 @@ for IFACE in "${INTERFACES[@]}"; do
     fi
 
     # 1. Defer Hardware Interrupts (Wait for user-space poll)
-    echo 1000 > "/sys/class/net/$IFACE/napi_defer_hard_irqs"
+    echo 16 > "/sys/class/net/$IFACE/napi_defer_hard_irqs"
     echo " -> napi_defer_hard_irqs set"
 
     # 2. Set the Flush Timeout (200 microseconds safety net)
