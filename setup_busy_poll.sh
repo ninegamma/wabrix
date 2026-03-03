@@ -15,7 +15,7 @@ fi
 #sysctl -w net.core.busy_read=50
 
 # Define your interfaces
-INTERFACES=("enp114s0f0np0" "enp114s0f1np1")
+INTERFACES=("enp2s0f0np0" "enp2s0f1np1")
 
 for IFACE in "${INTERFACES[@]}"; do
     echo "=== Configuring Interface: $IFACE ==="
