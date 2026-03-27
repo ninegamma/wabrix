@@ -5,6 +5,7 @@
       <sourceFolder url="file://$MODULE_DIR$/ipblower/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/xbricks/examples" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/xbricks/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/wasm plugins/wasm_filter/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/ipblower/target" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
       <excludeFolder url="file://$MODULE_DIR$/xbricks/target" />
