@@ -1,0 +1,37 @@
+package xbricks:router@0.1.0;
+
+/*
+/// Common types used across all xbricks plugins
+interface types {
+    /// A representation of the packet metadata and raw bytes
+    record packet {
+        /// Unique identifier for the packet within the local pipeline
+        id: u64,
+        /// The raw Ethernet frame.
+        /// In xbricks, this points directly to the AF_XDP UMEM.
+        payload: list<u8>,
+        /// Arrival timestamp in nanoseconds
+        timestamp: u64,
+    }
+
+    /// The decision the plugin makes for each packet
+    variant verdict {
+        /// Allow the packet to continue to the next block or NIC
+        forward,
+        /// Silently discard the packet
+        drop,
+        /// Drop and send an ICMP destination unreachable (handled by xbricks_lib)
+        reject,
+        /// Divert to a specific egress interface index
+        redirect(u32),
+    }
+}
+*/
+/// The definition of a standard xbricks filter plugin
+world inspector {
+    //use types.{packet, verdict};
+
+    /// The main entry point the host calls for every incoming packet
+    //export process-packet: func(p: packet) -> verdict;
+    export inspect-batch: func(ports: list<u32>) -> list<u32>;
+}

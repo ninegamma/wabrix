@@ -2,6 +2,7 @@
 members = [
     "ipblower",
     "xbricks",
+    "plugins/*"
 ]
 resolver = "2"
 
@@ -10,3 +11,6 @@ resolver = "2"
 libbpf-rs = "=0.26.0-beta.1"
 #libbpf-sys = "=1.6.1+v1.6.1"
 libbpf-sys = { version = "1.6", default-features = false }
+# Add these for the Wasm side of the house:
+wit-bindgen = "0.54"
+wasmtime = { version = "43.0", features = ["component-model"] }

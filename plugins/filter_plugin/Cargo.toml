@@ -1,0 +1,13 @@
+[package]
+name = "filter_plugin"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+# This is crucial for Wasm components
+crate-type = ["cdylib"]
+
+[dependencies]
+# Pull this from your workspace.dependencies
+wit-bindgen = { workspace = true }
+
