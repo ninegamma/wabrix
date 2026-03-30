@@ -3,6 +3,11 @@ name = "filter_plugin"
 version = "0.1.0"
 edition = "2024"
 
+[target.wasm32-wasip2]
+rustflags = [
+    "-C", "target-feature=+memory64",
+]
+
 [lib]
 # This is crucial for Wasm components
 crate-type = ["cdylib"]
