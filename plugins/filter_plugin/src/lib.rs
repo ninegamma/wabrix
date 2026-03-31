@@ -1,4 +1,8 @@
-use std::slice;
+#![no_std]
+extern crate alloc;
+
+use alloc::vec::Vec;
+use core::slice;
 use crate::exports::xbricks::router::inspector::{Guest, Verdict};
 
 // 1. Tell the macro to read the .wit file and generate the bindings

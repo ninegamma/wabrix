@@ -6,6 +6,11 @@ edition = "2024"
 [target.wasm32-wasip2]
 rustflags = [
     "-C", "target-feature=+memory64",
+    # Force the stack size to be exactly 256 KB 
+    "-C", "link-arg=-zstack-size=262144",
+    # Optional: Tell the linker to export the stack pointer so you can monitor it!
+    "-C", "link-arg=--export=__global_base",
+    "-C", "link-arg=--export=__heap_base",
 ]
 
 [lib]
