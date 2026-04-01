@@ -20,4 +20,5 @@ crate-type = ["cdylib"]
 [dependencies]
 # Pull this from your workspace.dependencies
 wit-bindgen = { workspace = true }
+xbricks_protocol = { path = "../../xbricks_protocol" }
 

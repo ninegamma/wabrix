@@ -4,3 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# We set default-features = false to force these crates into strictly no_std mode!
+macaddr = { version = "1.0.1", default-features = false }
+byteorder = { version = "1.5.0", default-features = false }
+fnv = { version = "1.0.7", default-features = false }
+
+# If this is aya's network-types, it is no_std by default, but you can be safe:
+network-types = { version = "0.1.0", default-features = false }
+anyhow = "1.0.102"
+[lib]
+name="xbricks_protocol"
+path="src/lib.rs"

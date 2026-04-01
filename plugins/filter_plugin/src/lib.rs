@@ -3,7 +3,8 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use core::slice;
-use crate::exports::xbricks::router::inspector::{Guest, Verdict};
+use xbricks_protocol::wbatch::Pdu0;
+use crate::exports::xbricks::router::inspector::{Guest};
 
 // 1. Tell the macro to read the .wit file and generate the bindings
 wit_bindgen::generate!({
@@ -11,37 +12,39 @@ wit_bindgen::generate!({
     world: "filter-plugin",
 });
 
+// Constants mapping to your Verdicts
+const VERDICT_FORWARD: u8 = 0;
+const VERDICT_EXCEPTION: u8 = 1;
+const VERDICT_DROP: u8 = 2;
+
 struct MyInspector;
 
 // 2. Implement the generated trait
 // 2. Implement the generated trait
 
 impl Guest for MyInspector {
-    fn inspect_batch(offsets: Vec<u64>, lengths: Vec<u32>) -> Vec<Verdict> {
-        let mut actions = Vec::with_capacity(offsets.len());
+    fn inspect_batch(mut batch_bytes: Vec<u8>) -> Vec<u8> {
+        // 1. ZERO-COPY CAST: Overlay our Pdu0 struct onto the raw bytes
+        let pdus = unsafe {
+            slice::from_raw_parts_mut(
+                batch_bytes.as_mut_ptr() as *mut Pdu0,
+                batch_bytes.len() / core::mem::size_of::<Pdu0>(),
+            )
+        };
 
-        for (offset, len) in offsets.iter().zip(lengths.iter()) {
-            let ptr = *offset as *const u8;
-            let packet_data: &[u8] = unsafe {
-                slice::from_raw_parts(ptr, *len as usize)
-            };
-
-            if packet_data.len() < 14 {
-                actions.push(Verdict::Drop);
-                continue;
-            }
-
-            // If IPv4, forward it. Otherwise, exception path.
-            if packet_data[12] == 0x08 && packet_data[13] == 0x00 {
-                actions.push(Verdict::Forward);
+        // 2. Iterate and inspect!
+        for pdu in pdus {
+            // Example Logic: IPv4 TCP gets forwarded
+            if pdu.is_ipv4() && pdu.is_tcp() {
+                pdu.flags = VERDICT_FORWARD;
             } else {
-                actions.push(Verdict::Exception);
+                pdu.flags = VERDICT_EXCEPTION;
             }
         }
 
-        actions
+        // 3. Return the mutated memory block back to the Host
+        batch_bytes
     }
 }
 
-// 3. Export the struct to the Wasm engine
 export!(MyInspector);
