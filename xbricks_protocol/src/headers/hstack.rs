@@ -8,7 +8,9 @@ const MAX_HEADERS: usize = 5;
 pub struct HeaderStack {
     /// The virtual address of the start of the UMEM frame
     /// we cannot use *mut u8, because we also want to use it in target wasm32-*
-    base_ptr: u64,
+    /// Note: this MUST be u64, not usize, because the struct must stay stable when
+    /// sending between target architectures, e.g. wasm32 and x86_64
+    base_addr: u64,
     /// Offsets relative to base_ptr
     pub offsets: [u16; MAX_HEADERS],
     /// The type of header (Mac, Ip, etc.)
@@ -17,20 +19,28 @@ pub struct HeaderStack {
     pub hc: u8,
 }
 
+// Exactly 24 bytes.
+const _: () = assert!(core::mem::size_of::<HeaderStack>() == 24);
+
 impl HeaderStack {
     #[inline]
-    pub fn new(base_ptr: *mut u8) -> Self {
+    pub fn new(base_addr: u64) -> Self {
         HeaderStack {
-            base_ptr: (base_ptr as u64),
+            base_addr,
             offsets: [0; MAX_HEADERS],
             kinds: [HeaderKind::Null; MAX_HEADERS],
             hc: 0,
         }
     }
 
+    /// Returns the base address as a numeric `usize` to safely bypass LLVM Null-Pointer UB.
     #[inline(always)]
-    pub fn base_ptr(&self) -> *mut u8 {
-        self.base_ptr as * mut u8
+    pub fn base_addr(&self) -> usize {
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.base_addr as usize }
+        
+        #[cfg(target_arch = "wasm32")]
+        { 0 } // Wasm memory always starts at 0
     }
 
     #[inline]
@@ -46,17 +56,21 @@ impl HeaderStack {
         }
         self.kinds[idx] = h.kind();
         // Calculate offset: Header pointer minus our base pointer
-        let h_ptr = h.as_ptr_u8().unwrap();
-        self.offsets[idx] = unsafe { h_ptr.offset_from(self.base_ptr()) as u16 };
+        // UB FIX: Convert to usize before doing math!
+        // This prevents `offset_from` from panicking if base_addr is 0.
+        let h_addr = h.as_ptr_u8().unwrap() as usize;
+        let base = self.base_addr();
+        self.offsets[idx] =(h_addr - base) as u16;
         self.hc += 1;
     }
 
     /// Internal helper to reconstruct the Header enum on the fly
     #[inline]
     fn reconstruct(&self, which: usize) -> Header {
-        let ptr = unsafe { self.base_ptr().add(self.offsets[which] as usize) };
+        // UB FIX: Add the integers, THEN cast to a pointer.
+        let ptr_addr = self.base_addr() + self.offsets[which] as usize;
         // This recreates the Header enum (which is just a tag + pointer)
-        Header::from_kind_and_ptr(self.kinds[which], ptr)
+        Header::from_kind_and_ptr(self.kinds[which], ptr_addr as *mut u8)
     }
 
     // --- API Compatibility Layer ---
@@ -79,72 +93,86 @@ impl HeaderStack {
 
     #[inline]
     pub fn tcp_mut(&mut self, which: usize) -> &mut TcpHeader {
-        unsafe { &mut *(self.base_ptr().add(self.offsets[which] as usize) as *mut TcpHeader) }
+        let addr = self.base_addr() + self.offsets[which] as usize;
+        unsafe { &mut *(addr as *mut TcpHeader) }
     }
 
     #[inline]
     pub fn ip_mut(&mut self, which: usize) -> &mut IpHeader {
-        unsafe { &mut *(self.base_ptr().add(self.offsets[which] as usize) as *mut IpHeader) }
+        let addr = self.base_addr() + self.offsets[which] as usize;
+        unsafe { &mut *(addr as *mut IpHeader) }
     }
 
     #[inline]
     pub fn mac_mut(&mut self, which: usize) -> &mut MacHeader {
-        unsafe { &mut *(self.base_ptr().add(self.offsets[which] as usize) as *mut MacHeader) }
+        let addr = self.base_addr() + self.offsets[which] as usize;
+        unsafe { &mut *(addr as *mut MacHeader) }
     }
 
     #[inline]
     pub fn arp_mut(&mut self, which: usize) -> &mut ArpIpv4Header {
-        unsafe { &mut *(self.base_ptr().add(self.offsets[which] as usize) as *mut ArpIpv4Header) }
+        let addr = self.base_addr() + self.offsets[which] as usize;
+        unsafe { &mut *(addr as *mut ArpIpv4Header) }
     }
 
     #[inline]
     pub fn ipv6_mut(&mut self, which: usize) -> &mut Ipv6Header {
-        unsafe { &mut *(self.base_ptr().add(self.offsets[which] as usize) as *mut Ipv6Header) }
+        let addr = self.base_addr() + self.offsets[which] as usize;
+        unsafe { &mut *(addr as *mut Ipv6Header) }
     }
 
     #[inline]
     pub fn udp_mut(&mut self, which: usize) -> &mut UdpHeader {
-        unsafe { &mut *(self.base_ptr().add(self.offsets[which] as usize) as *mut UdpHeader) }
+        let addr = self.base_addr() + self.offsets[which] as usize;
+        unsafe { &mut *(addr as *mut UdpHeader) }
     }
 
     #[inline]
     pub fn icmp_mut(&mut self, which: usize) -> &mut IcmpHeader {
-        unsafe { &mut *(self.base_ptr().add(self.offsets[which] as usize) as *mut IcmpHeader) }
+        let addr = self.base_addr() + self.offsets[which] as usize;
+        unsafe { &mut *(addr as *mut IcmpHeader) }
     }
 
     #[inline]
     pub fn tcp(&self, which: usize) -> &TcpHeader {
-        unsafe { &*(self.base_ptr().add(self.offsets[which] as usize) as *const TcpHeader) }
+        let addr = self.base_addr() + self.offsets[which] as usize;
+        unsafe { &*(addr as *const TcpHeader) }
     }
 
     #[inline]
     pub fn ip(&self, which: usize) -> &IpHeader {
-        unsafe { &*(self.base_ptr().add(self.offsets[which] as usize) as *const IpHeader) }
+        let addr = self.base_addr() + self.offsets[which] as usize;
+        unsafe { &*(addr as *const IpHeader) }
     }
 
     #[inline]
     pub fn mac(&self, which: usize) -> &MacHeader {
-        unsafe { &*(self.base_ptr().add(self.offsets[which] as usize) as *const MacHeader) }
+        let addr = self.base_addr() + self.offsets[which] as usize;
+        unsafe { &*(addr as *const MacHeader) }
     }
 
     #[inline]
     pub fn arp(&self, which: usize) -> &ArpIpv4Header {
-        unsafe { &*(self.base_ptr().add(self.offsets[which] as usize) as *const ArpIpv4Header) }
+        let addr = self.base_addr() + self.offsets[which] as usize;
+        unsafe { &*(addr as *const ArpIpv4Header) }
     }
 
     #[inline]
     pub fn ipv6(&self, which: usize) -> &Ipv6Header {
-        unsafe { &*(self.base_ptr().add(self.offsets[which] as usize) as *const Ipv6Header) }
+        let addr = self.base_addr() + self.offsets[which] as usize;
+        unsafe { &*(addr as *const Ipv6Header) }
     }
 
     #[inline]
     pub fn udp(&self, which: usize) -> &UdpHeader {
-        unsafe { &*(self.base_ptr().add(self.offsets[which] as usize) as *const UdpHeader) }
+        let addr = self.base_addr() + self.offsets[which] as usize;
+        unsafe { &*(addr as *const UdpHeader) }
     }
 
     #[inline]
     pub fn icmp(&self, which: usize) -> &IcmpHeader {
-        unsafe { &*(self.base_ptr().add(self.offsets[which] as usize) as *const IcmpHeader) }
+        let addr = self.base_addr() + self.offsets[which] as usize;
+        unsafe { &*(addr as *const IcmpHeader) }
     }
 }
 

@@ -1,13 +1,17 @@
+use core::ops::Add;
 use core::ptr;
 use crate::headers::hstack::HeaderStack;
-use crate::headers::{ArpIpv4Header, EndOffset, Header, HeaderKind, IcmpHeader, IpHeader, Ipv6Header, MacHeader, TcpHeader, UdpHeader, MAC_HDR_SIZE};
+use crate::headers::{
+    ArpIpv4Header, EndOffset, Header, HeaderKind, IcmpHeader, IpHeader, Ipv6Header, MacHeader, TcpHeader, UdpHeader,
+    MAC_HDR_SIZE,
+};
 // Adjust imports as needed
 
 #[repr(C)]
 #[derive(Clone, Debug)]
 pub struct WPdu {
     /// [0..24] 24 Bytes: HeaderStack
-    pub header_stack: HeaderStack,
+    header_stack: HeaderStack,
 
     /// [24..32] 8 Bytes: The data pointer (absolute UMEM offset)
     /// Corresponds to FrameDesc.addr
@@ -22,24 +26,46 @@ pub struct WPdu {
     pub desc_options: u32,
 
     /// [40..48] 8 Bytes: Metadata
-    pub global_frame_idx: u32, // 4 bytes, identifies the frame over all UMEM instances and partitions
-    pub frame_size_log2: u8,     // 1 byte - log2(frame_size) for bit-shift calculations
-    pub owner_id: u8, // 1 byte
-    pub flags: u8,               // 1 byte
-    pub _padding: u8,            // 1 byte
+    global_frame_idx: u32, // 4 bytes, identifies the frame over all UMEM instances and partitions
+    pub frame_size_log2: u8, // 1 byte - log2(frame_size) for bit-shift calculations
+    owner_id: u8,            // 1 byte
+    pub flags: u8,           // 1 byte
+    pub _padding: u8,        // 1 byte
 
     /// [48..56] 8 Bytes: Telemetry
     pub timestamp: u64,
 }
 
+impl WPdu {
+    pub fn new(
+        frame_base_addr: u64,
+        desc_addr: u64,
+        desc_len: u32,
+        desc_options: u32,
+        global_frame_idx: u32,
+        frame_size_log2: u8,
+        owner_id: u8,
+    ) -> WPdu {
+        WPdu {
+            header_stack: HeaderStack::new(frame_base_addr),
+            desc_addr,
+            desc_len,
+            desc_options,
+            global_frame_idx,
+            frame_size_log2,
+            owner_id,
+            ..Default::default()
+        }
+    }
+}
+
 const _: () = assert!(core::mem::size_of::<WPdu>() == 56);
 const _: () = assert!(core::mem::size_of::<HeaderStack>() == 24);
-
 
 impl Default for WPdu {
     fn default() -> Self {
         WPdu {
-            header_stack: HeaderStack::new(core::ptr::null_mut()),
+            header_stack: HeaderStack::new(0),
             desc_addr: 0,
             desc_len: 0,
             desc_options: 0,
@@ -54,6 +80,25 @@ impl Default for WPdu {
 }
 
 impl WPdu {
+    /// 1-CYCLE CROSS-UMEM CHECK: Reconstructs the UMEM base pointer on the fly.
+    #[inline(always)]
+    fn umem_addr(&self) -> usize {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // HOST MATH: Frame Base Address - Frame Offset = UMEM Base Pointer
+            let offset = self.local_frame_offset();
+
+            // We do safe integer math, then cast the result to a raw pointer.
+            (self.header_stack.base_addr() - offset)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            // WASM MATH: The UMEM is mapped at the exact start of Wasm's linear memory.
+            // Therefore, the UMEM Base is always exactly address 0.
+            0
+        }
+    }
+
     /// Helper: Get the frame size in bytes
     #[inline(always)]
     fn frame_size(&self) -> usize {
@@ -71,8 +116,6 @@ impl WPdu {
     fn local_frame_idx(&self) -> u32 {
         (self.local_frame_offset() >> self.frame_size_log2) as u32
     }
-
-
 
     /// Accessors for logic compatibility
     #[inline]
@@ -114,15 +157,56 @@ impl WPdu {
     /// frame_start_ptr (from HeaderStack) + (desc_addr - absolute_frame_offset)
     #[inline(always)]
     pub fn data_address(&self, offset: usize) -> *mut u8 {
-        // 1. Calculate the absolute offset of the frame start in the UMEM
-        let local_frame_start = self.local_frame_offset();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // 1. Calculate the absolute offset of the frame start in the UMEM
+            let local_frame_start = self.local_frame_offset();
+            // 2. Calculate where the data is relative to the frame start and add offset argument
+            //    (e.g., Data starts at offset 256 in frame, plus additional offset)
+            let offset_in_frame = self.desc_addr - local_frame_start as u64 + offset as u64;
+            // 3. Add that offset to the virtual memory pointer of the frame
+            (self.header_stack.base_addr() + offset_in_frame as usize) as *mut u8
+        }
 
-        // 2. Calculate where the data is relative to the frame start and add offset argument
-        //    (e.g., Data starts at offset 256 in frame, plus additional offset)
-        let offset_in_frame = self.desc_addr - local_frame_start as u64 + offset as u64;
+        #[cfg(target_arch = "wasm32")]
+        {
+            // WASM MATH: Wasm Address 0 + umem offset to packet data (desc.addr) + Manual Offset
+            let absolute_offset = self.desc_addr as u32 + offset as u32;
+            absolute_offset as *mut u8
+        }
+    }
 
-        // 3. Add that offset to the virtual memory pointer of the frame
-        unsafe { self.header_stack.base_ptr().add(offset_in_frame as usize) }
+    #[inline]
+    pub fn headers(&self) -> &HeaderStack {
+        &self.header_stack
+    }
+
+
+    #[inline]
+    pub fn headers_mut(&mut self) -> &mut HeaderStack {
+        &mut self.header_stack
+    }
+
+    #[inline]
+    pub fn replace_header(&mut self, which: usize, hdr: &Header) {
+        unsafe {
+            // HeaderStack calculates headers on the fly. We get a view (pointer wrapper).
+            let mut pdu_header = self.header_stack.get(which);
+            assert_eq!(hdr.kind(), pdu_header.kind());
+
+            match pdu_header {
+                Header::Null => (),
+                Header::Mac(ref mut p) => ptr::copy_nonoverlapping(hdr.as_mac().unwrap() as *const MacHeader, *p, 1),
+                Header::Ip(ref mut p) => ptr::copy_nonoverlapping(hdr.as_ip().unwrap() as *const IpHeader, *p, 1),
+                Header::Ipv6(ref mut p) => ptr::copy_nonoverlapping(hdr.as_ipv6().unwrap() as *const Ipv6Header, *p, 1),
+                Header::Tcp(ref mut p) => ptr::copy_nonoverlapping(hdr.as_tcp().unwrap() as *const TcpHeader, *p, 1),
+                Header::Udp(ref mut p) => ptr::copy_nonoverlapping(hdr.as_udp().unwrap() as *const UdpHeader, *p, 1),
+                Header::Icmp(ref mut p) => ptr::copy_nonoverlapping(hdr.as_icmp().unwrap() as *const IcmpHeader, *p, 1),
+                Header::ArpIpv4(ref mut p) => {
+                    ptr::copy_nonoverlapping(hdr.as_arpipv4().unwrap() as *const ArpIpv4Header, *p, 1)
+                }
+            };
+        }
     }
 
     /// Assumes an Ethernet frame and parses up to L4
@@ -446,16 +530,16 @@ impl WPdu {
         unsafe {
             // 4. Calculate the write pointer
             // header_stack.base_ptr() points to the Frame Start (Physical Address)
-            let frame_start_ptr = self.header_stack.base_ptr();
+            let frame_start_addr = self.header_stack.base_addr();
 
             // Calculate the offset relative to the Frame Start
             let offset_in_frame = new_desc_addr - local_frame_base as u64;
 
             // Get the destination address
-            let dst_ptr = frame_start_ptr.add(offset_in_frame as usize);
+            let dst_addr = frame_start_addr + offset_in_frame as usize;
 
             // 5. Write the header data
-            ptr::copy_nonoverlapping(header as *const T as *const u8, dst_ptr, header_size);
+            ptr::copy_nonoverlapping(header as *const T as *const u8, dst_addr as *mut u8, header_size);
         }
 
         // 6. Update PDU State
@@ -532,4 +616,3 @@ impl WPdu {
         None
     }
 }
-

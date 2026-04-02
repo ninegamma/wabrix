@@ -19,8 +19,7 @@ const VERDICT_DROP: u8 = 2;
 
 struct MyInspector;
 
-// 2. Implement the generated trait
-// 2. Implement the generated trait
+// Implement the generated trait
 
 impl Guest for MyInspector {
     fn inspect_batch(mut batch_bytes: Vec<u8>) -> Vec<u8> {
