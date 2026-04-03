@@ -44,6 +44,44 @@ export default function App() {
     const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
     const [error, setError] = useState<string | null>(null);
 
+    const handleSave = async () => {
+        try {
+            // We need to reconstruct the full config object.
+            // For now, let's assume we are just updating the ifaces and umems
+            // inside the existing config structure.
+
+            const updatedIfaces = nodes
+                .filter(n => n.type === 'iface')
+                .map(n => n.data);
+
+            const updatedUmems = nodes
+                .filter(n => n.type === 'umem')
+                .map(n => n.data);
+
+            // Fetch current full config from state (you might want to store the
+            // full original config in a useRef or state)
+            // For this example, we'll send the updated parts.
+            // In a production app, you'd merge this with the 'pipelines' etc.
+
+            // Simplest approach: Send a request to a "Partial Update" endpoint
+            // or fetch the full state first.
+
+            // Let's assume we have a way to get the full original config:
+            const response = await axios.get('/api/topology');
+            const fullConfig = response.data.full_config_structure; // Hypothetical
+
+            // Update the relevant parts
+            fullConfig.xbricks.ifaces = updatedIfaces;
+            fullConfig.xbricks.umem = updatedUmems;
+
+            await axios.post('/api/save-config', fullConfig);
+            alert("Configuration saved to hardware and disk!");
+        } catch (err) {
+            console.error(err);
+            alert("Failed to save configuration.");
+        }
+    };
+
     useEffect(() => {
         axios.get('/api/topology')
             .then((response) => {
@@ -160,6 +198,22 @@ export default function App() {
                                     );
                                 })}
                         </div>
+                        <button
+                            onClick={handleSave}
+                            style={{
+                                marginTop: '30px',
+                                width: '100%',
+                                padding: '12px',
+                                background: '#10b981', // Green
+                                color: 'white',
+                                border: 'none',
+                                borderRadius: '4px',
+                                cursor: 'pointer',
+                                fontWeight: 'bold'
+                            }}
+                        >
+                            💾 SAVE TO DISK
+                        </button>
                     </div>
                 )}
             </div>
