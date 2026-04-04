@@ -4,7 +4,7 @@ import type { Node, Edge } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import axios from 'axios';
 import dagre from 'dagre';
-import { IfaceNode, UmemNode } from './CustomNodes';
+import { IfaceNode, UmemNode } from './components/CustomNodes.tsx';
 import { TerminalWindow } from './TerminalWindow';
 
 const nodeTypes = {

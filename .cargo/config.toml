@@ -3,6 +3,17 @@
 # however, we keep it here, just in case we need it again
 TS_RS_EXPORT_DIR = { value = "xbricks-ui/src/types", relative = true }
 
-# Optimization: Since you are doing AF_XDP, you might want to force
-# native CPU instructions for the whole workspace
-RUSTFLAGS = "-C target-cpu=native"
+[build]
+# Optimization: Since you are doing AF_XDP, force native CPU instructions
+# for the whole workspace. (This acts as the default).
+rustflags = ["-C", "target-cpu=native"]
+
+[target.wasm32-wasip2]
+
+rustflags = [
+    # Force the stack size to be exactly 256 KB
+    "-C", "link-arg=-zstack-size=262144",
+    # Optional: Tell the linker to export the stack pointer so you can monitor it!
+    "-C", "link-arg=--export=__global_base",
+    "-C", "link-arg=--export=__heap_base",
+]
