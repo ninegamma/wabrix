@@ -44,7 +44,7 @@ export default function App() {
     const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
     const [error, setError] = useState<string | null>(null);
 
-    const handleSave = async () => {
+    const handleHardwareSave = async () => {
         try {
             // We need to reconstruct the full config object.
             // For now, let's assume we are just updating the ifaces and umems
@@ -58,29 +58,67 @@ export default function App() {
                 .filter(n => n.type === 'umem')
                 .map(n => n.data);
 
-            // Fetch current full config from state (you might want to store the
-            // full original config in a useRef or state)
-            // For this example, we'll send the updated parts.
-            // In a production app, you'd merge this with the 'pipelines' etc.
-
-            // Simplest approach: Send a request to a "Partial Update" endpoint
-            // or fetch the full state first.
-
-            // Let's assume we have a way to get the full original config:
-            const response = await axios.get('/api/topology');
-            const fullConfig = response.data.full_config_structure; // Hypothetical
+            // Fetch the raw configuration object from the backend
+            const configResponse = await axios.get('/api/config');
+            const fullConfig = configResponse.data;
 
             // Update the relevant parts
             fullConfig.xbricks.ifaces = updatedIfaces;
             fullConfig.xbricks.umem = updatedUmems;
 
-            await axios.post('/api/save-config', fullConfig);
-            alert("Configuration saved to hardware and disk!");
+            await axios.post('/api/hardware/update', fullConfig);
+            alert("Configuration saved! Data plane is restarting...");
         } catch (err) {
             console.error(err);
             alert("Failed to save configuration.");
         }
     };
+
+    // Inside your App component
+
+    const handleLiveUpdate = async () => {
+        if (!selectedNode) return;
+
+        // 1. Ensure we know which pipeline this node belongs to.
+        // NOTE: Make sure your `/api/topology` endpoint includes `pipeline_name`
+        // inside the `data` object for each pipeline node!
+        const pipelineName = selectedNode.data.pipeline_name as string;
+
+        if (!pipelineName) {
+            alert("Cannot hot-swap: Pipeline name missing from node data.");
+            return;
+        }
+
+        // 2. Format the routes.
+        // If the user typed "route_A, route_B" into the text input, we split it into an array.
+        let parsedRoutes: string[] | undefined = undefined;
+        if (typeof selectedNode.data.routes === 'string') {
+            parsedRoutes = selectedNode.data.routes
+                .split(',')
+                .map((s: string) => s.trim())
+                .filter((s: string) => s.length > 0);
+        } else if (Array.isArray(selectedNode.data.routes)) {
+            parsedRoutes = selectedNode.data.routes;
+        }
+
+        // 3. Construct the payload matching our Rust `NodeUpdatePayload`
+        const payload = {
+            pipeline_name: pipelineName,
+            node_id: selectedNode.id,
+            routes: parsedRoutes,
+            // UI might store it as 'default' or 'default_route' depending on your topology JSON
+            default_route: (selectedNode.data.default_route || selectedNode.data.default) as string | undefined,
+        };
+
+        try {
+            await axios.post('/api/pipeline/update', payload); // Adjust endpoint if needed
+            alert("⚡ Live update applied instantly with zero dropped packets!");
+        } catch (err: any) {
+            console.error(err);
+            alert(`Failed to apply live update: ${err.response?.data || err.message}`);
+        }
+    };
+
 
     useEffect(() => {
         axios.get('/api/topology')
@@ -185,35 +223,51 @@ export default function App() {
                                 .filter(([_, value]) => value !== null && value !== undefined)
                                 .map(([key, value]) => {
                                     const isNumber = typeof value === 'number';
+                                    // Format arrays to strings for easy text-box editing
+                                    const displayValue = Array.isArray(value) ? value.join(', ') : (value as string | number);
+
                                     return (
                                         <div key={key} style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
                                             <label style={{ fontSize: '12px', color: '#aaa', textTransform: 'uppercase' }}>{key}</label>
                                             <input
                                                 type={isNumber ? 'number' : 'text'}
-                                                value={value as string | number}
-                                                onChange={(e) => updateNodeData(selectedNode.id, key, isNumber ? Number(e.target.value) : e.target.value)}
+                                                value={displayValue}
+                                                onChange={(e) => updateNodeData(
+                                                    selectedNode.id,
+                                                    key,
+                                                    isNumber ? Number(e.target.value) : e.target.value
+                                                )}
                                                 style={{ padding: '8px', background: '#2a2a2a', border: '1px solid #555', borderRadius: '4px', color: 'white', fontFamily: 'monospace' }}
                                             />
                                         </div>
                                     );
                                 })}
                         </div>
-                        <button
-                            onClick={handleSave}
-                            style={{
-                                marginTop: '30px',
-                                width: '100%',
-                                padding: '12px',
-                                background: '#10b981', // Green
-                                color: 'white',
-                                border: 'none',
-                                borderRadius: '4px',
-                                cursor: 'pointer',
-                                fontWeight: 'bold'
-                            }}
-                        >
-                            💾 SAVE TO DISK
-                        </button>
+                        {['iface', 'umem'].includes(selectedNode.type ?? '') ? (
+                            <button
+                                onClick={handleHardwareSave} // Your original full-save function
+                                style={{
+                                    marginTop: '30px', width: '100%', padding: '12px',
+                                    background: '#ef4444', // Red for dangerous/restarting actions
+                                    color: 'white', border: 'none', borderRadius: '4px',
+                                    cursor: 'pointer', fontWeight: 'bold'
+                                }}
+                            >
+                                🔄 SAVE & RESTART DATAPLANE
+                            </button>
+                        ) : (
+                            <button
+                                onClick={handleLiveUpdate}
+                                style={{
+                                    marginTop: '30px', width: '100%', padding: '12px',
+                                    background: '#10b981', // Green for fast/safe actions
+                                    color: 'white', border: 'none', borderRadius: '4px',
+                                    cursor: 'pointer', fontWeight: 'bold'
+                                }}
+                            >
+                                ⚡ APPLY LIVE UPDATE
+                            </button>
+                        )}
                     </div>
                 )}
             </div>
