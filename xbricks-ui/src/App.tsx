@@ -4,37 +4,68 @@ import type { Node, Edge } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import axios from 'axios';
 import dagre from 'dagre';
-import { IfaceNode, UmemNode, PipelineNode } from './components/CustomNodes.tsx';
+import { IfaceNode, UmemNode, XskNode, WorkerNode, PipelineNode } from './components/CustomNodes.tsx';
 import { TerminalWindow } from './TerminalWindow';
 
 const nodeTypes = {
     iface: IfaceNode,
     umem: UmemNode,
+    xsk: XskNode,
+    worker: WorkerNode,
     pipeline: PipelineNode,
 };
 
-const dagreGraph = new dagre.graphlib.Graph();
-dagreGraph.setDefaultEdgeLabel(() => ({}));
+const NODE_W = 200;
+const NODE_H = 100;
+const TOP_GAP = 300;    // vertical gap between top row and pipeline nodes
+const TOP_SPACING = 40; // horizontal gap between top-row nodes
+
+const ROW0_TYPES = new Set(['iface', 'umem']); // top row
+const ROW1_TYPES = new Set(['xsk']);              // second row
+const ROW2_TYPES = new Set(['worker']);           // third row
 
 const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'LR') => {
-    dagreGraph.setGraph({ rankdir: direction });
+    const row0 = nodes.filter(n => ROW0_TYPES.has(n.type ?? ''));
+    const row1 = nodes.filter(n => ROW1_TYPES.has(n.type ?? ''));
+    const row2 = nodes.filter(n => ROW2_TYPES.has(n.type ?? ''));
+    const pipelineNodes = nodes.filter(n =>
+        !ROW0_TYPES.has(n.type ?? '') && !ROW1_TYPES.has(n.type ?? '') && !ROW2_TYPES.has(n.type ?? ''));
 
-    nodes.forEach((node) => {
-        dagreGraph.setNode(node.id, { width: 200, height: 100 });
+    // Run Dagre only on pipeline nodes
+    const g = new dagre.graphlib.Graph();
+    g.setDefaultEdgeLabel(() => ({}));
+    g.setGraph({ rankdir: direction });
+
+    pipelineNodes.forEach(node => g.setNode(node.id, { width: NODE_W, height: NODE_H }));
+    edges.forEach(edge => {
+        if (g.hasNode(edge.source) && g.hasNode(edge.target)) {
+            g.setEdge(edge.source, edge.target);
+        }
     });
 
-    edges.forEach((edge) => {
-        dagreGraph.setEdge(edge.source, edge.target);
-    });
+    dagre.layout(g);
 
-    dagre.layout(dagreGraph);
+    const ROW_GAP = 40;
+    const row1Y = row1.length > 0 ? NODE_H + ROW_GAP : 0;
+    const row2Y = row2.length > 0 ? row1Y + (row1.length > 0 ? NODE_H + ROW_GAP : 0) : row1Y;
+    const pipelineOffsetY = row2Y + (row2.length > 0 ? NODE_H + TOP_GAP : row1.length > 0 ? NODE_H + TOP_GAP : row0.length > 0 ? NODE_H + TOP_GAP : 0);
 
-    nodes.forEach((node) => {
-        const nodeWithPosition = dagreGraph.node(node.id);
+    pipelineNodes.forEach(node => {
+        const pos = g.node(node.id);
         node.position = {
-            x: nodeWithPosition.x - 200 / 2,
-            y: nodeWithPosition.y - 100 / 2,
+            x: pos.x - NODE_W / 2,
+            y: pos.y - NODE_H / 2 + pipelineOffsetY,
         };
+    });
+
+    row0.forEach((node, i) => {
+        node.position = { x: i * (NODE_W + TOP_SPACING), y: 0 };
+    });
+    row1.forEach((node, i) => {
+        node.position = { x: i * (NODE_W + TOP_SPACING), y: row1Y };
+    });
+    row2.forEach((node, i) => {
+        node.position = { x: i * (NODE_W + TOP_SPACING), y: row2Y };
     });
 
     return { nodes, edges };
@@ -124,14 +155,16 @@ export default function App() {
     useEffect(() => {
         axios.get('/api/topology')
             .then((response) => {
-                const knownTypes = new Set(['iface', 'umem']);
+                const knownTypes = new Set(['iface', 'umem', 'xsk', 'worker']);
+
+                const hasSavedLayout = !!response.data?.has_saved_layout;
 
                 const initialNodes = (response.data?.nodes || []).map((n: any) => {
                     const isPipeline = !knownTypes.has(n.type);
                     return {
                         id: n.id,
                         type: isPipeline ? 'pipeline' : n.type,
-                        position: { x: 0, y: 0 },
+                        position: hasSavedLayout ? (n.position ?? { x: 0, y: 0 }) : { x: 0, y: 0 },
                         data: isPipeline ? { ...n.data, type: n.type } : n.data,
                     };
                 });
@@ -146,6 +179,49 @@ export default function App() {
                     animated: true,
                     style: edgeStyle,
                 }));
+
+                // XSK → iface and XSK → umem edges
+                const xskEdgeStyle = { stroke: '#38bdf8', strokeWidth: 4 };
+                const xskEdges: Edge[] = [];
+                initialNodes
+                    .filter((n: any) => n.type === 'xsk')
+                    .forEach((n: any) => {
+                        const ifaceTarget = `iface_${n.data.iface}`;
+                        const umemTarget = `umem_${n.data.umem}`;
+                        const nodeIds = new Set(initialNodes.map((x: any) => x.id));
+                        if (nodeIds.has(ifaceTarget)) {
+                            xskEdges.push({ id: `e-${n.id}-iface`, source: ifaceTarget, sourceHandle: 'bottom', target: n.id, targetHandle: 'top', animated: false, style: xskEdgeStyle });
+                        }
+                        if (nodeIds.has(umemTarget)) {
+                            xskEdges.push({ id: `e-${n.id}-umem`, source: umemTarget, sourceHandle: 'bottom', target: n.id, targetHandle: 'top', animated: false, style: xskEdgeStyle });
+                        }
+                    });
+
+                // Worker → UMEM partition edges (with count label)
+                const workerEdgeStyle = { stroke: '#f59e0b', strokeWidth: 3 };
+                const workerEdges: Edge[] = [];
+                const nodeIds2 = new Set(initialNodes.map((n: any) => n.id));
+                initialNodes
+                    .filter((n: any) => n.type === 'worker')
+                    .forEach((n: any) => {
+                        (n.data.partitions || []).forEach((p: any) => {
+                            const umemTarget = `umem_${p.umem}`;
+                            if (nodeIds2.has(umemTarget)) {
+                                workerEdges.push({
+                                    id: `e-${n.id}-umem${p.umem}`,
+                                    source: n.id,
+                                    sourceHandle: 'top',
+                                    target: umemTarget,
+                                    targetHandle: 'bottom-in',
+                                    animated: false,
+                                    label: String(p.count),
+                                    labelStyle: { fill: '#fcd34d', fontFamily: 'monospace', fontSize: 11, fontWeight: 'bold' },
+                                    labelBgStyle: { fill: '#1c1409', fillOpacity: 0.85 },
+                                    style: workerEdgeStyle,
+                                });
+                            }
+                        });
+                    });
 
                 const routeEdges: Edge[] = [];
                 const nodeIds = new Set(initialNodes.map((n: any) => n.id));
@@ -168,14 +244,29 @@ export default function App() {
                         }
                     });
 
-                const allEdges = [...backendEdges, ...routeEdges];
-                const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(initialNodes, allEdges, 'LR');
+                const allEdges = [...backendEdges, ...xskEdges, ...workerEdges, ...routeEdges];
 
-                setNodes(layoutedNodes);
-                setEdges(layoutedEdges);
+                if (hasSavedLayout) {
+                    setNodes(initialNodes);
+                    setEdges(allEdges);
+                } else {
+                    const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(initialNodes, allEdges, 'LR');
+                    setNodes(layoutedNodes);
+                    setEdges(layoutedEdges);
+                }
             })
             .catch((err) => setError(err.message));
     }, [setNodes, setEdges]);
+
+    // Save all node positions to /api/layout after any drag
+    const handleNodeDragStop = () => {
+        setNodes(currentNodes => {
+            const positions: Record<string, { x: number; y: number }> = {};
+            currentNodes.forEach(n => { positions[n.id] = n.position; });
+            axios.post('/api/layout', positions).catch(err => console.error('Failed to save layout:', err));
+            return currentNodes;
+        });
+    };
 
     // --- NEW: Function to update node data ---
     const updateNodeData = (nodeId: string, key: string, value: string | number) => {
@@ -229,6 +320,7 @@ export default function App() {
                         nodeTypes={nodeTypes}
                         onNodesChange={onNodesChange}
                         onEdgesChange={onEdgesChange}
+                        onNodeDragStop={handleNodeDragStop}
                         fitView
                         colorMode="dark"
                     >
@@ -275,7 +367,7 @@ export default function App() {
                                     );
                                 })}
                         </div>
-                        {['iface', 'umem'].includes(selectedNode.type ?? '') ? (
+                        {['iface', 'umem', 'xsk', 'worker'].includes(selectedNode.type ?? '') ? (
                             <button
                                 onClick={handleHardwareSave} // Your original full-save function
                                 style={{

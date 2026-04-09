@@ -8,6 +8,8 @@ import type { InterfaceConfig } from '../types/InterfaceConfig';
 // (Assuming you also exported UmemConfig from Rust! If not, keep your manual one for now)
 import type { UmemConfig } from '../types/UmemConfig';
 import type { NodeConfig } from '../types/NodeConfig';
+import type { XskMapping } from '../types/XskMapping';
+import type { WorkerConfig } from '../types/WorkerConfig';
 
 
 // ==========================================
@@ -18,6 +20,8 @@ export type IfaceNodeType = Node<InterfaceConfig, 'iface'>;
 export type UmemNodeType = Node<UmemConfig, 'umem'>;
 // Pipeline nodes carry the NodeConfig data plus an injected pipeline_name
 export type PipelineNodeData = NodeConfig & { pipeline_name?: string };
+export type XskNodeType = Node<XskMapping, 'xsk'>;
+export type WorkerNodeType = Node<WorkerConfig, 'worker'>;
 export type PipelineNodeType = Node<PipelineNodeData, 'pipeline'>;
 
 export function IfaceNode({ data }: NodeProps<IfaceNodeType>) {
@@ -43,6 +47,7 @@ export function IfaceNode({ data }: NodeProps<IfaceNodeType>) {
 
             <Handle type="target" position={Position.Left} style={{ background: '#3b82f6' }} />
             <Handle type="source" position={Position.Right} style={{ background: '#3b82f6' }} />
+            <Handle id="bottom" type="source" position={Position.Bottom} style={{ background: '#3b82f6', width: 12, height: 3, borderRadius: 1 }} />
         </div>
     );
 }
@@ -74,6 +79,63 @@ export function UmemNode({ data }: NodeProps<UmemNodeType>) {
 
             <Handle type="target" position={Position.Left} style={{ background: '#a855f7' }} />
             <Handle type="source" position={Position.Right} style={{ background: '#a855f7' }} />
+            <Handle id="bottom" type="source" position={Position.Bottom} style={{ background: '#a855f7', width: 12, height: 3, borderRadius: 1 }} />
+            <Handle id="bottom-in" type="target" position={Position.Bottom} style={{ background: '#f59e0b', width: 8, height: 8, borderRadius: '50%', bottom: -12 }} />
+        </div>
+    );
+}
+
+// ==========================================
+// 3b. XSK NODE
+// ==========================================
+
+export function XskNode({ data }: NodeProps<XskNodeType>) {
+    return (
+        <div style={{
+            background: '#0c1a2e', border: '2px solid #38bdf8', borderRadius: '8px',
+            padding: '12px', minWidth: '180px', color: '#f8fafc', fontFamily: 'monospace',
+            boxShadow: '0 4px 6px rgba(0,0,0,0.3)'
+        }}>
+            <div style={{ borderBottom: '1px solid #0369a1', paddingBottom: '8px', marginBottom: '8px' }}>
+                <strong style={{ fontSize: '14px', color: '#7dd3fc' }}>&#x26a1; XSK: {data.iface}</strong>
+            </div>
+            <div style={{ fontSize: '11px', lineHeight: '1.6', color: '#cbd5e1' }}>
+                <div><strong style={{ color: '#94a3b8' }}>queues:</strong> {data.queues.join(', ')}</div>
+                <div><strong style={{ color: '#94a3b8' }}>umem:</strong> {data.umem}</div>
+                <div><strong style={{ color: '#94a3b8' }}>rxq/txq:</strong> {data.rxq_size}/{data.txq_size}</div>
+                <div><strong style={{ color: '#94a3b8' }}>mode:</strong> {data.xdp_mode}</div>
+                {data.zerocopy && <div><strong style={{ color: '#38bdf8' }}>zerocopy</strong></div>}
+            </div>
+            <Handle id="top" type="target" position={Position.Top} style={{ background: '#38bdf8', width: 12, height: 3, borderRadius: 1 }} />
+            <Handle type="source" position={Position.Right} style={{ background: '#38bdf8' }} />
+        </div>
+    );
+}
+
+// ==========================================
+// 3c. WORKER NODE
+// ==========================================
+
+export function WorkerNode({ data }: NodeProps<WorkerNodeType>) {
+    return (
+        <div style={{
+            background: '#1c1409', border: '2px solid #f59e0b', borderRadius: '8px',
+            padding: '12px', minWidth: '180px', color: '#f8fafc', fontFamily: 'monospace',
+            boxShadow: '0 4px 6px rgba(0,0,0,0.3)'
+        }}>
+            <Handle id="top" type="source" position={Position.Top} style={{ background: '#f59e0b', width: 12, height: 3, borderRadius: 1 }} />
+            <div style={{ borderBottom: '1px solid #78350f', paddingBottom: '8px', marginBottom: '8px' }}>
+                <strong style={{ fontSize: '14px', color: '#fcd34d' }}>&#x1f9f5; Worker {data.id}</strong>
+            </div>
+            <div style={{ fontSize: '11px', lineHeight: '1.6', color: '#cbd5e1' }}>
+                <div><strong style={{ color: '#94a3b8' }}>core:</strong> {data.core}</div>
+                {data.partitions.length > 0 && (
+                    <div><strong style={{ color: '#94a3b8' }}>partitions:</strong>{' '}
+                        {data.partitions.map(p => `umem${p.umem}×${p.count}`).join(', ')}
+                    </div>
+                )}
+            </div>
+            <Handle type="source" position={Position.Bottom} style={{ background: '#f59e0b', width: 12, height: 3, borderRadius: 1 }} />
         </div>
     );
 }
