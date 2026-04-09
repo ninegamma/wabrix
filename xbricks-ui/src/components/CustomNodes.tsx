@@ -7,6 +7,7 @@ import type { InterfaceConfig } from '../types/InterfaceConfig';
 
 // (Assuming you also exported UmemConfig from Rust! If not, keep your manual one for now)
 import type { UmemConfig } from '../types/UmemConfig';
+import type { NodeConfig } from '../types/NodeConfig';
 
 
 // ==========================================
@@ -15,7 +16,9 @@ import type { UmemConfig } from '../types/UmemConfig';
 // Plug the Rust types directly into React Flow's Node type
 export type IfaceNodeType = Node<InterfaceConfig, 'iface'>;
 export type UmemNodeType = Node<UmemConfig, 'umem'>;
-// ^ If you don't have UmemConfig yet, just use your old UmemData here
+// Pipeline nodes carry the NodeConfig data plus an injected pipeline_name
+export type PipelineNodeData = NodeConfig & { pipeline_name?: string };
+export type PipelineNodeType = Node<PipelineNodeData, 'pipeline'>;
 
 export function IfaceNode({ data }: NodeProps<IfaceNodeType>) {
     return (
@@ -71,6 +74,98 @@ export function UmemNode({ data }: NodeProps<UmemNodeType>) {
 
             <Handle type="target" position={Position.Left} style={{ background: '#a855f7' }} />
             <Handle type="source" position={Position.Right} style={{ background: '#a855f7' }} />
+        </div>
+    );
+}
+
+// ==========================================
+// 4. PIPELINE NODE (generic for all node types)
+// ==========================================
+
+const PIPELINE_PALETTE: Array<{ bg: string; border: string; divider: string; title: string; handle: string }> = [
+    { bg: '#052e16', border: '#22c55e', divider: '#166534', title: '#4ade80', handle: '#22c55e' }, // green
+    { bg: '#083344', border: '#22d3ee', divider: '#164e63', title: '#67e8f9', handle: '#22d3ee' }, // cyan
+    { bg: '#431407', border: '#f97316', divider: '#7c2d12', title: '#fdba74', handle: '#f97316' }, // orange
+    { bg: '#2d0a20', border: '#ec4899', divider: '#831843', title: '#f9a8d4', handle: '#ec4899' }, // pink
+    { bg: '#1e1b4b', border: '#818cf8', divider: '#312e81', title: '#c7d2fe', handle: '#818cf8' }, // indigo
+    { bg: '#422006', border: '#eab308', divider: '#713f12', title: '#fde047', handle: '#eab308' }, // yellow
+    { bg: '#450a0a', border: '#ef4444', divider: '#7f1d1d', title: '#fca5a5', handle: '#ef4444' }, // red
+    { bg: '#0c0a1e', border: '#a855f7', divider: '#3b0764', title: '#d8b4fe', handle: '#a855f7' }, // violet
+];
+
+function pipelineColor(name: string | undefined) {
+    if (!name) return PIPELINE_PALETTE[0];
+    let hash = 0;
+    for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
+    return PIPELINE_PALETTE[hash % PIPELINE_PALETTE.length];
+}
+
+export function PipelineNode({ data }: NodeProps<PipelineNodeType>) {
+    const label = data.id;
+    const colors = pipelineColor(data.pipeline_name);
+    const routes: string[] = Array.isArray(data.routes) ? data.routes : [];
+    const defaultRoute = data.default ?? null;
+    const next = data.next ?? null;
+    const args = data.args && Object.keys(data.args).length > 0 ? data.args : null;
+
+    // Collect all outgoing connection points (deduplicated, preserving order)
+    const outgoing: { id: string; label: string }[] = [];
+    const seen = new Set<string>();
+    const addOut = (id: string, lbl: string) => {
+        if (id && !seen.has(id)) { seen.add(id); outgoing.push({ id, label: lbl }); }
+    };
+    routes.forEach(r => addOut(r, r));
+    if (next) addOut(next, `next: ${next}`);
+    if (defaultRoute) addOut(defaultRoute, `default: ${defaultRoute}`);
+
+    // Spread handles evenly along the right edge (as %)
+    const handleSpacing = outgoing.length > 1
+        ? outgoing.map((_, i) => `${((i + 1) / (outgoing.length + 1)) * 100}%`)
+        : ['50%'];
+
+    return (
+        <div style={{
+            background: colors.bg, border: `2px solid ${colors.border}`, borderRadius: '8px',
+            padding: '12px', minWidth: '180px', color: '#f8fafc', fontFamily: 'monospace',
+            boxShadow: '0 4px 6px rgba(0,0,0,0.3)', position: 'relative',
+        }}>
+            <Handle type="target" position={Position.Left} style={{ background: colors.handle }} />
+
+            <div style={{ borderBottom: `1px solid ${colors.divider}`, paddingBottom: '8px', marginBottom: '8px' }}>
+                <strong style={{ fontSize: '13px', color: colors.title }}>&#x2699; {label}</strong>
+                <div style={{ fontSize: '10px', color: colors.border, marginTop: '2px' }}>{data.type}</div>
+            </div>
+
+            <div style={{ fontSize: '11px', lineHeight: '1.6', color: '#cbd5e1' }}>
+                {defaultRoute && (
+                    <div><strong style={{ color: '#94a3b8' }}>default:</strong> {defaultRoute}</div>
+                )}
+                {data.queues && data.queues.length > 0 && (
+                    <div><strong style={{ color: '#94a3b8' }}>queues:</strong> {data.queues.join(', ')}</div>
+                )}
+                {data.umem && data.umem.length > 0 && (
+                    <div><strong style={{ color: '#94a3b8' }}>umem:</strong> {data.umem.join(', ')}</div>
+                )}
+                {args && Object.entries(args).map(([k, v]) => (
+                    <div key={k}>
+                        <strong style={{ color: '#94a3b8' }}>{k === 'wasm_file_path' ? 'wasm_file' : k}:</strong>{' '}
+                        {k === 'wasm_file_path' ? v.split('/').pop() : v}
+                    </div>
+                ))}
+            </div>
+
+            {outgoing.length > 0
+                ? outgoing.map((o, i) => (
+                    <Handle
+                        key={o.id}
+                        id={o.id}
+                        type="source"
+                        position={Position.Right}
+                        style={{ background: colors.handle, top: handleSpacing[i] }}
+                    />
+                ))
+                : <Handle type="source" position={Position.Right} style={{ background: colors.handle }} />
+            }
         </div>
     );
 }

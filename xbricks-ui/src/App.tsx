@@ -4,12 +4,13 @@ import type { Node, Edge } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import axios from 'axios';
 import dagre from 'dagre';
-import { IfaceNode, UmemNode } from './components/CustomNodes.tsx';
+import { IfaceNode, UmemNode, PipelineNode } from './components/CustomNodes.tsx';
 import { TerminalWindow } from './TerminalWindow';
 
 const nodeTypes = {
     iface: IfaceNode,
     umem: UmemNode,
+    pipeline: PipelineNode,
 };
 
 const dagreGraph = new dagre.graphlib.Graph();
@@ -123,21 +124,52 @@ export default function App() {
     useEffect(() => {
         axios.get('/api/topology')
             .then((response) => {
-                const initialNodes = (response.data?.nodes || []).map((n: any) => ({
-                    id: n.id,
-                    type: n.type,
-                    position: { x: 0, y: 0 },
-                    data: n.data,
-                }));
+                const knownTypes = new Set(['iface', 'umem']);
 
-                const initialEdges = (response.data?.edges || []).map((e: any) => ({
+                const initialNodes = (response.data?.nodes || []).map((n: any) => {
+                    const isPipeline = !knownTypes.has(n.type);
+                    return {
+                        id: n.id,
+                        type: isPipeline ? 'pipeline' : n.type,
+                        position: { x: 0, y: 0 },
+                        data: isPipeline ? { ...n.data, type: n.type } : n.data,
+                    };
+                });
+
+                // Build edges from backend + derive from pipeline node routes
+                const edgeStyle = { stroke: '#61da5c', strokeWidth: 3 };
+
+                const backendEdges = (response.data?.edges || []).map((e: any) => ({
                     id: e.id,
                     source: e.source,
                     target: e.target,
                     animated: true,
+                    style: edgeStyle,
                 }));
 
-                const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(initialNodes, initialEdges, 'LR');
+                const routeEdges: Edge[] = [];
+                const nodeIds = new Set(initialNodes.map((n: any) => n.id));
+                initialNodes
+                    .filter((n: any) => n.type === 'pipeline')
+                    .forEach((n: any) => {
+                        const routes: string[] = Array.isArray(n.data.routes) ? n.data.routes : [];
+                        routes.forEach((target: string) => {
+                            if (nodeIds.has(target)) {
+                                routeEdges.push({ id: `e-${n.id}-${target}`, source: n.id, sourceHandle: target, target, animated: true, style: edgeStyle });
+                            }
+                        });
+                        const def: string | null = n.data.default ?? null;
+                        if (def && nodeIds.has(def) && !routes.includes(def)) {
+                            routeEdges.push({ id: `e-${n.id}-default-${def}`, source: n.id, sourceHandle: def, target: def, animated: true, style: { ...edgeStyle, strokeDasharray: '5,5' } });
+                        }
+                        const next: string | null = n.data.next ?? null;
+                        if (next && nodeIds.has(next) && !routes.includes(next) && next !== def) {
+                            routeEdges.push({ id: `e-${n.id}-next-${next}`, source: n.id, sourceHandle: next, target: next, animated: true, style: edgeStyle });
+                        }
+                    });
+
+                const allEdges = [...backendEdges, ...routeEdges];
+                const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(initialNodes, allEdges, 'LR');
 
                 setNodes(layoutedNodes);
                 setEdges(layoutedEdges);
@@ -216,7 +248,7 @@ export default function App() {
                         overflowY: 'auto' // Local scrollbar only
                     }}>
                         <h2 style={{ borderBottom: '1px solid #444', paddingBottom: '10px' }}>
-                            Edit {selectedNode.type === 'iface' ? 'Interface' : 'UMEM'}
+                            Edit {selectedNode.type === 'iface' ? 'Interface' : selectedNode.type === 'umem' ? 'UMEM' : (selectedNode.data as any).type || selectedNode.id}
                         </h2>
                         <div style={{ marginTop: '20px', display: 'flex', flexDirection: 'column', gap: '15px' }}>
                             {Object.entries(selectedNode.data)
