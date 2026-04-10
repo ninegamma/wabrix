@@ -6,9 +6,11 @@ import axios from 'axios';
 import dagre from 'dagre';
 import { IfaceNode, UmemNode, XskNode, WorkerNode, PipelineNode } from './components/CustomNodes.tsx';
 import { TerminalWindow } from './TerminalWindow';
+import { TelemetryNode } from './TelemetryNode';
 
 const nodeTypes = {
     iface: IfaceNode,
+    telemetry: TelemetryNode,
     umem: UmemNode,
     xsk: XskNode,
     worker: WorkerNode,
@@ -23,6 +25,11 @@ const TOP_SPACING = 40; // horizontal gap between top-row nodes
 const ROW0_TYPES = new Set(['iface', 'umem']); // top row
 const ROW1_TYPES = new Set(['xsk']);              // second row
 const ROW2_TYPES = new Set(['worker']);           // third row
+
+// Fields that should render as radio buttons instead of a text input
+const ENUM_OPTIONS: Record<string, string[]> = {
+    xdp_mode: ['auto', 'native', 'skb'],
+};
 
 const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'LR') => {
     const row0 = nodes.filter(n => ROW0_TYPES.has(n.type ?? ''));
@@ -71,42 +78,149 @@ const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'LR') => 
     return { nodes, edges };
 };
 
+
+// Styles for the main buttons in the top bar
+const topMenuBtnStyle: React.CSSProperties = {
+    background: 'transparent',
+    color: '#cbd5e1',
+    border: 'none',
+    padding: '6px 12px',
+    borderRadius: '4px',
+    cursor: 'pointer',
+    fontSize: '14px',
+    fontWeight: '500',
+    transition: 'background 0.2s',
+};
+
+// Style for when a menu is currently clicked/open
+const topMenuBtnActiveStyle: React.CSSProperties = {
+    ...topMenuBtnStyle,
+    background: '#1e293b',
+    color: '#ffffff',
+};
+
+// The dropdown container itself
+const dropdownMenuStyle: React.CSSProperties = {
+    position: 'absolute',
+    top: '100%',
+    left: 0,
+    marginTop: '4px',
+    background: '#1e293b',
+    border: '1px solid #333',
+    borderRadius: '6px',
+    minWidth: '200px',
+    display: 'flex',
+    flexDirection: 'column',
+    padding: '4px 0',
+    boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.5)',
+    zIndex: 1001, // Stays above the click-away overlay
+};
+
+// Individual items inside the dropdown
+const dropdownItemStyle: React.CSSProperties = {
+    background: 'transparent',
+    color: '#e2e8f0',
+    border: 'none',
+    padding: '10px 16px',
+    textAlign: 'left',
+    cursor: 'pointer',
+    fontSize: '14px',
+    display: 'flex',
+    gap: '10px',
+    alignItems: 'center',
+    width: '100%'
+};
+
+// A subtle horizontal line to separate menu items
+const menuSeparatorStyle: React.CSSProperties = {
+    height: '1px',
+    background: '#333',
+    margin: '4px 0'
+};
+
 export default function App() {
     const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
     const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
     const [error, setError] = useState<string | null>(null);
+    const [configPath, setConfigPath] = useState<string>('xbricks.toml');
+    const [showFileBrowser, setShowFileBrowser] = useState(false);
+    const [pendingRestart, setPendingRestart] = useState(true);
+    // Tracks which menu is currently open ('File', 'System', or null)
+    const [activeMenu, setActiveMenu] = useState<string | null>(null);
 
-    const handleHardwareSave = async () => {
+    const doHardwareSave = async (savePath: string) => {
+        setShowFileBrowser(false);
         try {
-            // We need to reconstruct the full config object.
-            // For now, let's assume we are just updating the ifaces and umems
-            // inside the existing config structure.
-
-            const updatedIfaces = nodes
-                .filter(n => n.type === 'iface')
-                .map(n => n.data);
-
-            const updatedUmems = nodes
-                .filter(n => n.type === 'umem')
-                .map(n => n.data);
-
-            // Fetch the raw configuration object from the backend
             const configResponse = await axios.get('/api/config');
             const fullConfig = configResponse.data;
 
-            // Update the relevant parts
-            fullConfig.xbricks.ifaces = updatedIfaces;
-            fullConfig.xbricks.umem = updatedUmems;
+            fullConfig.xbricks.ifaces = nodes
+                .filter(n => n.type === 'iface')
+                .map(n => n.data);
+            fullConfig.xbricks.umem = nodes
+                .filter(n => n.type === 'umem')
+                .map(n => n.data);
+            fullConfig.xbricks.xsk = nodes
+                .filter(n => n.type === 'xsk')
+                .sort((a, b) => parseInt(a.id.split('_')[1]) - parseInt(b.id.split('_')[1]))
+                .map(n => n.data);
+            fullConfig.xbricks.workers = nodes
+                .filter(n => n.type === 'worker')
+                .sort((a, b) => (a.data.id as number) - (b.data.id as number))
+                .map(n => n.data);
 
-            await axios.post('/api/hardware/update', fullConfig);
-            alert("Configuration saved! Data plane is restarting...");
+            const params: Record<string, string | boolean> = { save_path: savePath };
+            if (!pendingRestart) params.restart = false;
+
+            await axios.post('/api/hardware/update', fullConfig, { params });
+            setConfigPath(savePath);
+            alert(pendingRestart
+                ? "Configuration saved! Data plane is restarting..."
+                : "Configuration saved to disk.");
         } catch (err) {
             console.error(err);
             alert("Failed to save configuration.");
         }
     };
 
-    // Inside your App component
+    // Opens the file browser; restart=true for sidebar button, false for File→Save to Disk
+    const handleHardwareSave = (restart = true) => {
+        setPendingRestart(restart);
+        setShowFileBrowser(true);
+    };
+
+    // Pushes the current UI node state into the backend's in-memory config
+    // without writing to disk or restarting the dataplane.
+    const syncConfigToBackend = async () => {
+        const configResponse = await axios.get('/api/config');
+        const fullConfig = configResponse.data;
+        fullConfig.xbricks.ifaces = nodes.filter(n => n.type === 'iface').map(n => n.data);
+        fullConfig.xbricks.umem   = nodes.filter(n => n.type === 'umem').map(n => n.data);
+        fullConfig.xbricks.xsk    = nodes
+            .filter(n => n.type === 'xsk')
+            .sort((a, b) => parseInt(a.id.split('_')[1]) - parseInt(b.id.split('_')[1]))
+            .map(n => n.data);
+        fullConfig.xbricks.workers = nodes
+            .filter(n => n.type === 'worker')
+            .sort((a, b) => (a.data.id as number) - (b.data.id as number))
+            .map(n => n.data);
+        await axios.post('/api/hardware/update', fullConfig, {
+            params: { restart: false, save_to_disk: false },
+        });
+    };
+
+    const sendDataplaneCommand = async (command: 'start' | 'stop' | 'restart' | 'check' | 'shutdown') => {
+        setActiveMenu(null);
+        try {
+            if (command === 'check') {
+                await syncConfigToBackend();
+            }
+            await axios.post('/api/dataplane/command', { command });
+        } catch (err) {
+            console.error(err);
+            alert(`Failed to send ${command} command.`);
+        }
+    };
 
     const handleLiveUpdate = async () => {
         if (!selectedNode) return;
@@ -158,15 +272,36 @@ export default function App() {
                 const knownTypes = new Set(['iface', 'umem', 'xsk', 'worker']);
 
                 const hasSavedLayout = !!response.data?.has_saved_layout;
+                if (response.data?.config_path) {
+                    setConfigPath(response.data.config_path);
+                }
 
-                const initialNodes = (response.data?.nodes || []).map((n: any) => {
+                const initialNodes: any[] = [];
+
+                (response.data?.nodes || []).forEach((n: any) => {
                     const isPipeline = !knownTypes.has(n.type);
-                    return {
+
+                    // 1. Push the standard node (Iface, Umem, Worker, etc.)
+                    initialNodes.push({
                         id: n.id,
                         type: isPipeline ? 'pipeline' : n.type,
                         position: hasSavedLayout ? (n.position ?? { x: 0, y: 0 }) : { x: 0, y: 0 },
                         data: isPipeline ? { ...n.data, type: n.type } : n.data,
-                    };
+                    });
+
+                    // 2. If the node we just pushed was an Interface, inject a companion Telemetry node!
+                    if (n.type === 'iface') {
+                        initialNodes.push({
+                            id: `telemetry_${n.data.name}`,
+                            type: 'telemetry',
+                            // If we have a saved layout, put it exactly where the user saved it.
+                            // If not, offset it slightly below the Interface node so they don't overlap.
+                            position: hasSavedLayout
+                                ? (response.data.layout?.[`telemetry_${n.data.name}`] ?? { x: n.position?.x || 0, y: (n.position?.y || 0) + 200 })
+                                : { x: 0, y: 0 },
+                            data: n.data, // Pass the exact same interface config data so it knows what to monitor
+                        });
+                    }
                 });
 
                 // Build edges from backend + derive from pipeline node routes
@@ -258,6 +393,7 @@ export default function App() {
             .catch((err) => setError(err.message));
     }, [setNodes, setEdges]);
 
+
     // Save all node positions to /api/layout after any drag
     const handleNodeDragStop = () => {
         setNodes(currentNodes => {
@@ -268,19 +404,11 @@ export default function App() {
         });
     };
 
-    // --- NEW: Function to update node data ---
-    const updateNodeData = (nodeId: string, key: string, value: string | number) => {
+    const updateNodeData = (nodeId: string, key: string, value: string | number | number[] | boolean) => {
         setNodes((nds) =>
             nds.map((node) => {
                 if (node.id === nodeId) {
-                    // Create a completely new object for React to detect the change
-                    return {
-                        ...node,
-                        data: {
-                            ...node.data,
-                            [key]: value,
-                        },
-                    };
+                    return { ...node, data: { ...node.data, [key]: value } };
                 }
                 return node;
             })
@@ -289,11 +417,13 @@ export default function App() {
 
     if (error) return <div style={{ color: 'red', padding: '20px' }}>Failed to load graph: {error}</div>;
 
+
     // --- NEW: Find the currently selected node ---
     const selectedNode = nodes.find((n) => n.selected);
 
     return (
-        // MAIN WRAPPER: Top to Bottom Column
+        <>
+        {/* MAIN WRAPPER: Top to Bottom Column */}
         <div style={{
             position: 'absolute',
             top: 0,
@@ -304,7 +434,94 @@ export default function App() {
             flexDirection: 'column',
             overflow: 'hidden'
         }}>
-            {/* TOP: The Graph and Sidebar area */}
+            {/* ========================================== */}
+            {/* 1. TOP MENU BAR (Dropdown Navigation)        */}
+            {/* ========================================== */}
+            <div style={{
+                height: '50px',
+                background: '#0f172a',
+                borderBottom: '1px solid #333',
+                padding: '0 20px',
+                display: 'flex',
+                alignItems: 'center',
+                flexShrink: 0,
+                position: 'relative', // CRITICAL: So dropdowns anchor to this bar
+                zIndex: 1000 // CRITICAL: Keeps menus on top of the graph
+            }}>
+                <h3 style={{ color: '#60a5fa', margin: 0, marginRight: '25px', fontSize: '18px' }}>
+                    🧱 XBricks DataPlane
+                </h3>
+
+                {/* Menu Buttons Area */}
+                <div style={{ display: 'flex', gap: '5px' }}>
+
+                    {/* --- FILE MENU --- */}
+                    <div style={{ position: 'relative' }}>
+                        <button
+                            onClick={() => setActiveMenu(activeMenu === 'File' ? null : 'File')}
+                            style={activeMenu === 'File' ? topMenuBtnActiveStyle : topMenuBtnStyle}
+                        >
+                            File
+                        </button>
+
+                        {activeMenu === 'File' && (
+                            <div style={dropdownMenuStyle}>
+                                <button onClick={() => { setActiveMenu(null); alert("Load Action"); }} style={dropdownItemStyle}>📂 Load Config</button>
+                                <button onClick={() => { setActiveMenu(null); handleHardwareSave(false); }} style={dropdownItemStyle}>💾 Save to Disk</button>
+                                <div style={menuSeparatorStyle} />
+                                <button onClick={() => sendDataplaneCommand('check')} style={dropdownItemStyle}>✅ Check Config</button>
+                            </div>
+                        )}
+                    </div>
+
+                    {/* --- DATAPLANE MENU --- */}
+                    <div style={{ position: 'relative' }}>
+                        <button
+                            onClick={() => setActiveMenu(activeMenu === 'Dataplane' ? null : 'Dataplane')}
+                            style={activeMenu === 'Dataplane' ? topMenuBtnActiveStyle : topMenuBtnStyle}
+                        >
+                            Dataplane
+                        </button>
+
+                        {activeMenu === 'Dataplane' && (
+                            <div style={dropdownMenuStyle}>
+                                <button onClick={() => sendDataplaneCommand('start')}    style={dropdownItemStyle}>▶ Start</button>
+                                <button onClick={() => sendDataplaneCommand('restart')}  style={dropdownItemStyle}>🔄 Restart</button>
+                                <button onClick={() => sendDataplaneCommand('stop')}     style={dropdownItemStyle}>⏹ Stop</button>
+                                <div style={menuSeparatorStyle} />
+                                <button onClick={() => sendDataplaneCommand('shutdown')} style={{ ...dropdownItemStyle, color: '#ef4444' }}>⏻ Shutdown</button>
+                            </div>
+                        )}
+                    </div>
+
+                    {/* --- SYSTEM MENU --- */}
+                    <div style={{ position: 'relative' }}>
+                        <button
+                            onClick={() => setActiveMenu(activeMenu === 'System' ? null : 'System')}
+                            style={activeMenu === 'System' ? topMenuBtnActiveStyle : topMenuBtnStyle}
+                        >
+                            System
+                        </button>
+
+                        {activeMenu === 'System' && (
+                            <div style={dropdownMenuStyle}>
+                                <button onClick={() => { setActiveMenu(null); alert("Status"); }} style={dropdownItemStyle}>📊 View Status</button>
+                                <button onClick={() => { setActiveMenu(null); alert("Settings"); }} style={dropdownItemStyle}>⚙️ Settings</button>
+                            </div>
+                        )}
+                    </div>
+
+                </div>
+
+                {/* INVISIBLE OVERLAY: Closes menus if you click anywhere else on the screen */}
+                {activeMenu && (
+                    <div
+                        onClick={() => setActiveMenu(null)}
+                        style={{ position: 'fixed', top: '50px', left: 0, right: 0, bottom: 0, zIndex: 999 }}
+                    />
+                )}
+            </div>
+            {/* MIDDLE: The Graph and Sidebar area */}
             <div style={{
                 flex: 1,
                 minHeight: 0, // CRITICAL: Allows flex child to shrink below content size
@@ -344,11 +561,89 @@ export default function App() {
                         </h2>
                         <div style={{ marginTop: '20px', display: 'flex', flexDirection: 'column', gap: '15px' }}>
                             {Object.entries(selectedNode.data)
-                                .filter(([_, value]) => value !== null && value !== undefined)
+                                .filter(([_, value]) => {
+                                    if (value === null || value === undefined) return false;
+                                    // Skip array-of-objects (e.g. partitions) — not safely inline-editable
+                                    if (Array.isArray(value) && value.length > 0 && typeof value[0] === 'object') return false;
+                                    // Skip plain objects
+                                    if (!Array.isArray(value) && typeof value === 'object') return false;
+                                    return true;
+                                })
                                 .map(([key, value]) => {
+                                    const isNumArr = Array.isArray(value) && (value.length === 0 || typeof value[0] === 'number');
                                     const isNumber = typeof value === 'number';
-                                    // Format arrays to strings for easy text-box editing
-                                    const displayValue = Array.isArray(value) ? value.join(', ') : (value as string | number);
+                                    const displayValue = isNumArr
+                                        ? (value as number[]).join(', ')
+                                        : (value as string | number);
+
+                                    // Boolean fields: Yes / No radio buttons
+                                    if (typeof value === 'boolean') {
+                                        return (
+                                            <div key={key} style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                                                <label style={{ fontSize: '12px', color: '#aaa', textTransform: 'uppercase' }}>{key}</label>
+                                                <div style={{ display: 'flex', gap: '20px' }}>
+                                                    {[true, false].map(opt => (
+                                                        <label key={String(opt)} style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '13px', color: '#e2e8f0' }}>
+                                                            <input
+                                                                type="radio"
+                                                                name={`${selectedNode.id}-${key}`}
+                                                                checked={value === opt}
+                                                                onChange={() => updateNodeData(selectedNode.id, key, opt)}
+                                                            />
+                                                            {opt ? 'Yes' : 'No'}
+                                                        </label>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        );
+                                    }
+
+                                    // Enum fields: inline radio buttons
+                                    const enumOpts = ENUM_OPTIONS[key];
+                                    if (enumOpts) {
+                                        return (
+                                            <div key={key} style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                                                <label style={{ fontSize: '12px', color: '#aaa', textTransform: 'uppercase' }}>{key}</label>
+                                                <div style={{ display: 'flex', gap: '14px', flexWrap: 'wrap' }}>
+                                                    {enumOpts.map(opt => (
+                                                        <label key={opt} style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '13px', color: '#e2e8f0' }}>
+                                                            <input
+                                                                type="radio"
+                                                                name={`${selectedNode.id}-${key}`}
+                                                                checked={value === opt}
+                                                                onChange={() => updateNodeData(selectedNode.id, key, opt)}
+                                                            />
+                                                            {opt}
+                                                        </label>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        );
+                                    }
+
+                                    // Array-of-number fields: uncontrolled input, commit on blur.
+                                    // Using defaultValue + key lets the user type freely (commas,
+                                    // spaces) without the input snapping back on every keystroke.
+                                    if (isNumArr) {
+                                        return (
+                                            <div key={key} style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                                                <label style={{ fontSize: '12px', color: '#aaa', textTransform: 'uppercase' }}>{key}</label>
+                                                <input
+                                                    key={`${selectedNode.id}-${key}-${JSON.stringify(value)}`}
+                                                    type="text"
+                                                    defaultValue={displayValue}
+                                                    onBlur={(e) => {
+                                                        const parsed = e.target.value
+                                                            .split(/[\s,]+/)
+                                                            .map(s => parseInt(s.trim(), 10))
+                                                            .filter(n => !isNaN(n));
+                                                        updateNodeData(selectedNode.id, key, parsed);
+                                                    }}
+                                                    style={{ padding: '8px', background: '#2a2a2a', border: '1px solid #555', borderRadius: '4px', color: 'white', fontFamily: 'monospace' }}
+                                                />
+                                            </div>
+                                        );
+                                    }
 
                                     return (
                                         <div key={key} style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
@@ -356,35 +651,20 @@ export default function App() {
                                             <input
                                                 type={isNumber ? 'number' : 'text'}
                                                 value={displayValue}
-                                                onChange={(e) => updateNodeData(
-                                                    selectedNode.id,
-                                                    key,
-                                                    isNumber ? Number(e.target.value) : e.target.value
-                                                )}
+                                                onChange={(e) => updateNodeData(selectedNode.id, key,
+                                                    isNumber ? Number(e.target.value) : e.target.value)}
                                                 style={{ padding: '8px', background: '#2a2a2a', border: '1px solid #555', borderRadius: '4px', color: 'white', fontFamily: 'monospace' }}
                                             />
                                         </div>
                                     );
                                 })}
                         </div>
-                        {['iface', 'umem', 'xsk', 'worker'].includes(selectedNode.type ?? '') ? (
-                            <button
-                                onClick={handleHardwareSave} // Your original full-save function
-                                style={{
-                                    marginTop: '30px', width: '100%', padding: '12px',
-                                    background: '#ef4444', // Red for dangerous/restarting actions
-                                    color: 'white', border: 'none', borderRadius: '4px',
-                                    cursor: 'pointer', fontWeight: 'bold'
-                                }}
-                            >
-                                🔄 SAVE & RESTART DATAPLANE
-                            </button>
-                        ) : (
+                        {!['iface', 'umem', 'xsk', 'worker'].includes(selectedNode.type ?? '') && (
                             <button
                                 onClick={handleLiveUpdate}
                                 style={{
                                     marginTop: '30px', width: '100%', padding: '12px',
-                                    background: '#10b981', // Green for fast/safe actions
+                                    background: '#10b981',
                                     color: 'white', border: 'none', borderRadius: '4px',
                                     cursor: 'pointer', fontWeight: 'bold'
                                 }}
@@ -409,5 +689,16 @@ export default function App() {
             </div>
 
         </div>
+
+        {/* FILE BROWSER DIALOG — rendered as portal-style overlay */}
+        {showFileBrowser && (
+            <FileBrowserDialog
+                initialPath={configPath}
+                restartOnSave={pendingRestart}
+                onConfirm={doHardwareSave}
+                onCancel={() => setShowFileBrowser(false)}
+            />
+        )}
+        </>
     );
 }
