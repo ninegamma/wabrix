@@ -88,7 +88,7 @@ impl WPdu {
             let offset = self.local_frame_offset();
 
             // We do safe integer math, then cast the result to a raw pointer.
-            (self.header_stack.base_addr() - offset)
+            self.header_stack.base_addr() - offset
         }
         #[cfg(target_arch = "wasm32")]
         {

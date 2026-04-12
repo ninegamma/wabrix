@@ -1,0 +1,1169 @@
+// src/xsocket.rs
+
+use std::ffi::CString;
+use crate::common::formatting::PreciseSeparator;
+use xbricks_base::interface::Pdu;
+use crate::{probe_kernel_fds, Batch, BatchRx, BatchTx, MAX_BATCH_SIZE};
+use log::{debug, trace, warn};
+use std::cell::Cell;
+use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
+use std::sync::{Arc};
+use xsk_rs::config::SocketConfig;
+use xsk_rs::socket::{XdpStatistics};
+use xsk_rs::umem::frame::Data;
+use xsk_rs::{CompQueue, FillQueue, FrameDesc, RxQueue, Socket, TxQueue, Umem};
+use xsk_rs::config::{BindFlags, Interface, LibxdpFlags, QueueSize, XdpFlags};
+use spin::Mutex;
+
+const LOG_INTERVAL_C_F_QUEUE_PACKETS: usize = 100;
+
+/// Configuration specific to a single socket/queue.
+#[derive(Debug, Clone)]
+pub struct XdpSocketConfig {
+    pub id_string: String,
+    pub interface: String,
+    pub queue_id: u32,
+    pub core_id: usize,   // Physical core this socket's worker runs on
+    pub worker_id: usize, // Worker thread that owns this socket
+    pub rx_queue_size: u32,
+    pub tx_queue_size: u32,
+    pub zerocopy: bool,
+    pub umem_config: Arc<RuntimeUmemConfig>,
+    pub xdp_mode: String, // "native", "skb", or "auto"
+}
+
+pub struct XSocket {
+    umem: Arc<Umem>,
+    // Shared Rings are wrapped in Arc<Mutex<>> to allow sharing across threads/managers
+    // rings are only shared between sockets bound to the same interface and queue
+    // maybe later we implement different XSockets for the case of shared and unshared fq/cq rings
+    fill_queue: Arc<Mutex<FillQueue>>,
+    comp_queue: Arc<Mutex<CompQueue>>,
+    pub(crate) rx_queue: Arc<Mutex<RxQueue>>,
+    pub(crate) tx_queue: Arc<Mutex<TxQueue>>,
+    fd: RawFd,
+    // Note: frame_registry removed - will be managed at worker level
+    pub bus: Arc<SystemBus>,
+    pub config: Arc<XdpSocketConfig>,
+}
+
+const MAX_FILL: usize = 4096;
+/// Split components for independent RX and TX access
+/// These DO NOT own the frame registry - it's accessed via thread-local storage
+pub struct XSocketRx {
+    umem: Arc<Umem>,
+    fill_queue: Arc<Mutex<FillQueue>>,
+    rx_queue: Arc<Mutex<RxQueue>>,
+    // THE ANCHOR: Keeps the TX side alive even if the TX node is never built
+    _tx_queue_keepalive: Arc<Mutex<TxQueue>>,
+    _comp_queue_keepalive: Arc<Mutex<CompQueue>>,
+    bus: Arc<SystemBus>,
+    config: Arc<XdpSocketConfig>,
+    scratch_descriptors: Vec<FrameDesc>,
+    scratch_descriptors_recv_batch: Vec<FrameDesc>,
+    scratch_frames: Vec<u32>,
+    total_produced: usize,
+    total_received: usize,
+    empty_spins: usize,
+    last_logged_block: usize, // helper for logging
+    fill_deficit: usize,      // for more targeted replenishing
+    fd: RawFd,                  // file descriptor of the AF_XDP socket
+    // Profiling fields
+    pub prof_reclaim_replenish_cycles: u64,
+    pub prof_replenish_cycles: u64,
+    pub prof_replenish_calls: u64,
+    pub prof_consume_cycles: u64,
+    pub prof_wakeup_cycles: u64,
+    pub prof_pdu_batch_cycles: u64,
+    pub prof_empty_spin_cycles: u64,
+    pub prof_total_packets: u64,
+    pub prof_max_replenish_cycles: u64,
+    pub prof_burst_start: u64,
+    pub prof_started: bool,
+}
+
+pub struct XSocketTx {
+    umem: Arc<Umem>,
+    comp_descs_helper: Vec<FrameDesc>,
+    comp_queue: Arc<Mutex<CompQueue>>,
+    tx_queue: Arc<Mutex<TxQueue>>,
+    // THE ANCHOR: Keeps the RX side alive even if the RX node is never built
+    _rx_queue_keepalive: Arc<Mutex<RxQueue>>,
+    _fill_queue_keepalive: Arc<Mutex<FillQueue>>,
+    bus: Arc<SystemBus>,
+    config: Arc<XdpSocketConfig>,
+    total_consumed: usize,
+    last_logged_block: usize,  // helper for logging
+    total_sent_packets: usize, // helper for logging
+    fd: RawFd,                   // file descriptor of the AF_XDP socket
+}
+
+impl XSocket {
+    pub(crate) fn new(
+        config: XdpSocketConfig,
+        bus: Arc<SystemBus>,
+        umem: Arc<Umem>,
+        // Shared rings are optional; if None, we expect Socket::new to return them
+        // these are only needed for sockets bound to the same interface and queue
+        shared_rings: Option<(Arc<Mutex<FillQueue>>, Arc<Mutex<CompQueue>>)>,
+        initial_descs: Vec<FrameDesc>,
+    ) -> Result<(Self, Arc<Mutex<FillQueue>>, Arc<Mutex<CompQueue>>), Box<dyn std::error::Error>> {
+
+
+        let mut bind_flags = BindFlags::XDP_USE_NEED_WAKEUP;
+        if config.zerocopy {
+            bind_flags |= BindFlags::XDP_ZEROCOPY;
+        }
+
+        // Determine XDP flags based on mode
+        let xdp_flags = match config.xdp_mode.as_str() {
+            "native" => {
+                log::debug!("Using native/driver XDP mode for {}", config.interface);
+                XdpFlags::XDP_FLAGS_DRV_MODE
+            }
+            "skb" | "generic" => {
+                log::info!("Using SKB/generic XDP mode for {}", config.interface);
+                XdpFlags::XDP_FLAGS_SKB_MODE
+            }
+            "auto" => {
+                // Auto-detect: use SKB mode for veth/virtual interfaces, native for physical
+                if config.interface.starts_with("veth")
+                    || config.interface.starts_with("tap")
+                    || config.interface.starts_with("tun")
+                {
+                    log::info!(
+                        "Auto-detected virtual interface {}, using SKB/generic XDP mode",
+                        config.interface
+                    );
+                    XdpFlags::XDP_FLAGS_SKB_MODE
+                } else {
+                    log::debug!("Using native/driver XDP mode for {}", config.interface);
+                    XdpFlags::XDP_FLAGS_DRV_MODE
+                }
+            }
+            _ => {
+                log::warn!("Unknown XDP mode '{}', defaulting to native/driver mode", config.xdp_mode);
+                XdpFlags::XDP_FLAGS_DRV_MODE
+            }
+        };
+
+        let socket_config = SocketConfig::builder()
+            .libxdp_flags(LibxdpFlags::XSK_LIBXDP_FLAGS_INHIBIT_PROG_LOAD)
+            .xdp_flags(xdp_flags)
+            .bind_flags(bind_flags)
+            .rx_queue_size(QueueSize::try_from(config.rx_queue_size)?)
+            .tx_queue_size(QueueSize::try_from(config.tx_queue_size)?)
+            .build();
+
+        let c_iface = CString::new(config.interface.as_str())?;
+        // 2. Bind the Interface to a named variable (NOT a temporary)
+        let iface_handle = Interface::new(c_iface);
+
+        probe_kernel_fds("PRE Socket::new");
+        let (tx_q, rx_q, queues_opt) =
+            unsafe { Socket::new(socket_config, &umem, &iface_handle, config.queue_id)? };
+        probe_kernel_fds("POST Socket::new");
+
+        // 3. Resolve Fill/Comp Queues
+        // If shared_rings is Some, we use them (this is a secondary socket bound to same i/f and queue in the group).
+        // If shared_rings is None, Socket::new MUST have returned them (this is the primary socket).
+        let (fq, cq) = if let Some((existing_fq, existing_cq)) = shared_rings {
+            // Verify that we didn't accidentally get new queues when we expected shared ones
+            if queues_opt.is_some() {
+                log::error!(
+                    "Worker {}: Socket returned queues despite shared UMEM config. Ignoring new queues.",
+                    config.worker_id
+                );
+            }
+            (existing_fq, existing_cq)
+        } else {
+            let (raw_fq, raw_cq) = queues_opt.ok_or("Primary socket failed to return Fill/Comp queues")?;
+            (Arc::new(Mutex::new(raw_fq)), Arc::new(Mutex::new(raw_cq)))
+        };
+
+        // ==========================================
+        //     IMMEDIATELY PRE-FILL THE QUEUE
+        // ==========================================
+        // We must push the allocated descriptors into the ring right now so the
+        // Intel driver can grab them the first time we call poll() in the RX loop!
+        if !initial_descs.is_empty() {
+            let mut fq_guard = fq.lock();
+            unsafe {
+                let produced = fq_guard.produce(&initial_descs);
+                log::info!(
+                    "Worker {}: Pre-filled FQ ring with {} empty frames.",
+                    config.worker_id,
+                    produced
+                );
+            }
+        }
+
+        let fd=rx_q.fd().as_raw_fd();
+        let xdp_fm = Self {
+            umem,
+            rx_queue: Arc::new(Mutex::new(rx_q)),
+            tx_queue: Arc::new(Mutex::new(tx_q)),
+            fill_queue: fq.clone(),
+            comp_queue: cq.clone(),
+            fd,
+            bus,
+            config: Arc::new(config)
+        };
+
+        debug!(
+            "Worker {}: Created XSocket for {} queue {}",
+            xdp_fm.config.worker_id, xdp_fm.config.interface, xdp_fm.config.queue_id
+        );
+        Ok((xdp_fm, fq, cq))
+    }
+
+    // NOTE: Old XSocket methods that directly accessed frame_registry have been removed.
+    // Frame management is now done at the worker level through XSocketRx/Tx.
+
+    // --- Accessors ---
+    #[inline(always)]
+    pub fn umem_ptr(&self) -> *mut u8 {
+        self.umem.as_ptr()
+    }
+
+    // Standard data access: desc.addr() is relative to UMEM start
+    #[inline(always)]
+    pub fn data(&self, desc: &FrameDesc) -> Data<'_> {
+        unsafe { self.umem.data(desc) }
+    }
+
+    /// Returns the raw file descriptor of the AF_XDP socket.
+    /// This is required to register the socket in the BPF XSKS-MAP.
+    #[inline]
+    pub fn socket_fd(&self) -> i32 {
+        self.fd
+    }
+
+    // IMPORTANT: Verify compatibility before TX
+    #[inline]
+    pub fn is_compatible(&self, other_group_id: usize) -> bool {
+        self.group_id() == other_group_id
+    }
+
+    /// Returns the logical Core ID assigned to this manager.
+    #[inline(always)]
+    pub fn core_id(&self) -> usize {
+        self.config.core_id
+    }
+
+    /// Returns the queue ID assigned to this manager.
+    #[inline(always)]
+    pub fn queue_id(&self) -> u32 {
+        self.config.queue_id
+    }
+
+    /// Returns the interface name assigned to this manager.
+    #[inline(always)]
+    pub fn interface(&self) -> &str {
+        &self.config.interface
+    }
+
+    // Helper to get group ID easily
+    #[inline(always)]
+    pub fn group_id(&self) -> usize {
+        self.config.umem_config.group_id
+    }
+
+    #[inline(always)]
+    pub fn frames_per_core(&self) -> u32 {
+        self.config.umem_config.frame_count
+    }
+
+    #[inline(always)]
+    pub fn umem_config(&self) -> &RuntimeUmemConfig {
+        &self.config.umem_config
+    }
+
+    pub fn xdp_rx_statistics(&self) -> std::io::Result<XdpStatistics> {
+        let rx_guard = self.rx_queue.lock();
+        rx_guard.fd().xdp_statistics()
+    }
+
+    /// Split this XSocket into separate RX and TX components
+    /// This allows independent ownership of RX and TX rings by different nodes
+    ///
+    /// Frame registry is accessed via thread-local storage set by the worker
+    pub fn split(self) -> (XSocketRx, XSocketTx) {
+        let fd = self.socket_fd();
+        let rx = XSocketRx {
+            umem: self.umem.clone(),
+            fill_queue: self.fill_queue.clone(),
+            rx_queue: self.rx_queue.clone(),
+            _tx_queue_keepalive: self.tx_queue.clone(),
+            _comp_queue_keepalive: self.comp_queue.clone(),
+            bus: self.bus.clone(),
+            config: self.config.clone(),
+            scratch_descriptors: vec![FrameDesc::default(); MAX_FILL],
+            scratch_descriptors_recv_batch: vec![FrameDesc::default(); MAX_FILL],
+            scratch_frames: vec![0u32; MAX_FILL],
+            total_produced: 0,
+            total_received: 0,
+            empty_spins: 0,
+            last_logged_block: 0,
+            fill_deficit: 0,
+            fd,
+            prof_reclaim_replenish_cycles: 0,
+            prof_replenish_cycles: 0,
+            prof_replenish_calls: 0,
+            prof_consume_cycles: 0,
+            prof_wakeup_cycles: 0,
+            prof_pdu_batch_cycles: 0,
+            prof_empty_spin_cycles: 0,
+            prof_total_packets: 0,
+            prof_max_replenish_cycles: 0,
+            prof_burst_start: 0,
+            prof_started: false,
+        };
+
+        let tx = XSocketTx {
+            umem: self.umem,
+            comp_descs_helper: vec![FrameDesc::default(); 4 * MAX_BATCH_SIZE],
+            comp_queue: self.comp_queue,
+            tx_queue: self.tx_queue,
+            _rx_queue_keepalive: self.rx_queue,
+            _fill_queue_keepalive: self.fill_queue,
+            bus: self.bus,
+            config: self.config,
+            total_consumed: 0,
+            last_logged_block: 0,
+            total_sent_packets: 0,
+            fd,
+        };
+
+        (rx, tx)
+    }
+}
+
+use xbricks_base::system::rdtsc_us;
+use rustix::event::{PollFd, PollFlags, poll};
+use rustix::io::Errno;
+use separator::Separatable;
+use xbricks_base::{BusCommand, RuntimeUmemConfig, SystemBus};
+use xbricks_base::frame_registry::{get_tsc_frequency, get_worker_frame_registry};
+
+impl XSocketRx {
+    /// Returns the UMEM group ID for this socket
+    #[inline]
+    pub fn umem_group_id(&self) -> usize {
+        self.config.umem_config.group_id
+    }
+
+    #[cfg(feature = "profiling")]
+    pub fn get_replenish_avg_cycles(&self) -> u64 {
+        if self.prof_replenish_calls > 0 {
+            self.prof_replenish_cycles / self.prof_replenish_calls
+        } else {
+            0
+        }
+    }
+
+    #[cfg(feature = "profiling")]
+    pub fn get_replenish_total_cycles(&self) -> u64 {
+        self.prof_replenish_cycles
+    }
+
+    #[cfg(feature = "profiling")]
+    pub fn get_replenish_calls(&self) -> u64 {
+        self.prof_replenish_calls
+    }
+
+    // Unconditional Wakeup
+    pub fn wakeup_fill_queue_force(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut pollfd = libc::pollfd {
+            fd: self.fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        unsafe {
+            libc::poll(&mut pollfd, 1, 0);
+        }
+        Ok(())
+    }
+
+    fn wakeup_rx_queue(&self) -> Result<(), Errno> {
+        // Create a poll structure asking for POLLIN (Read) events
+        // SAFETY: self.fd is a valid file descriptor for the lifetime of this call
+        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(self.fd) };
+        let mut poll_fds = [PollFd::new(&borrowed_fd, PollFlags::IN)];
+
+        // Call poll with 0 timeout (non-blocking check).
+        // This instantly kicks the kernel driver to check the Fill Queue.
+        use rustix::time::Timespec;
+        let timeout = Timespec { tv_sec: 0, tv_nsec: 0 };
+        poll(&mut poll_fds, Some(&timeout))?;
+
+        Ok(())
+    }
+
+    /// Replenishes the Fill Queue with available frames from the worker's frame registry.
+    fn replenish_fill_queue(&mut self, requested_count: usize) -> usize {
+        #[cfg(feature = "profiling")]
+        let start_cycles = unsafe { std::arch::x86_64::_rdtsc() };
+
+        if requested_count == 0 {
+            return 0;
+        }
+
+        if requested_count > MAX_FILL {
+            log::warn!(
+                "Requested {} frames to replenish Fill Queue, but max is {}",
+                requested_count,
+                MAX_FILL
+            );
+        }
+
+        // Idiomatic way to clamp an upper bound in Rust
+        let requested_count = requested_count.min(MAX_FILL);
+
+        let threshold = LOG_INTERVAL_C_F_QUEUE_PACKETS;
+
+        // Access Thread-Local Registry
+        let registry_ptr = get_worker_frame_registry();
+        if registry_ptr.is_null() {
+            // This happens if called before worker initialization is complete
+            return 0;
+        }
+        let frame_registry = unsafe { &mut *registry_ptr };
+
+        let available_count = frame_registry.total_free_frames();
+        let available = std::cmp::min(requested_count, available_count);
+        if available == 0 {
+            log::trace!(
+                "Worker {}: Cannot replenish {} queue {}, no free frames available!",
+                self.config.worker_id,
+                &self.config.interface,
+                self.config.queue_id
+            );
+            return 0;
+        }
+
+        //let t0 = unsafe { std::arch::x86_64::_rdtsc() };
+
+        // Acquire Lock on the Fill Queue
+        // (Shared because multiple sockets/queues might map to the same UMEM)
+        // If another thread/queue is currently replenishing this UMEM, we instantly
+        // give up and return to our RX loop. We will just try again on the next loop!
+        // This absolutely eliminates the 30,000 cycle OS context-switch penalty.
+        let mut fq = match self.fill_queue.try_lock() {
+            Some(guard) => guard,
+            None => return 0,
+        };
+
+        // Check Capacity
+        // nb_free() tells us how many slots are open in the ring
+        let nb_free = fq.nb_free(available as u32);
+        let batch_size = std::cmp::min(nb_free, available as u32);
+
+        if batch_size > 0 {
+            trace!(
+                "{}: Replenishing {} frames, available = {}, nb_free = {}",
+                self.source_id(),
+                batch_size,
+                available,
+                nb_free
+            );
+        }
+
+        if batch_size == 0 {
+            return 0; // Ring is full, nothing to do
+        }
+
+        // 1. Allocate Frames directly into our pre-allocated struct buffer (NO MEMSET!)
+        //let t1 = unsafe { std::arch::x86_64::_rdtsc() };
+
+        let umem_id = self.umem_group_id();
+        let actual_batch = frame_registry.allocate_batch_into(
+            umem_id,
+            &mut self.scratch_frames[..batch_size as usize], // Use persistent struct Vec
+        );
+
+        //let t2 = unsafe { std::arch::x86_64::_rdtsc() };
+
+        if actual_batch == 0 {
+            // No frames left! This implies the worker is processing too slowly
+            // or holding too many frames in buffers.
+            return 0;
+        }
+
+        // Translate & Fill
+        // Architecture Rule: Kernel expects PHYSICAL ADDRESSES (offsets), not indices.
+        // Address = (Local_Index * Frame_Size) + Headroom
+
+        let offset_idx = self.config.umem_config.group_start_frame_idx;
+        let frame_size_log2 = self.config.umem_config.frame_size_log2 as u64;
+        let headroom = self.config.umem_config.head_room as u64;
+
+        for i in 0..actual_batch {
+            let global_idx = self.scratch_frames[i] as u64;
+            let local_idx = global_idx - offset_idx as u64;
+            // Use a 1-cycle bitwise shift instead of multiplication
+            let addr = (local_idx << frame_size_log2) + headroom;
+            // Write directly to our persistent struct buffer
+            self.scratch_descriptors[i] = xsk_rs::FrameDesc::new(addr as usize);
+        }
+
+        //let t3 = unsafe { std::arch::x86_64::_rdtsc() };
+
+        // Produce unconditionally first
+        let produced = unsafe { fq.produce(&self.scratch_descriptors[..actual_batch]) };
+
+        // Check if kernel went to sleep and needs a nudge
+        let needs_wakeup = produced > 0 && fq.needs_wakeup();
+
+        // Drop the mutex guard before calling wakeup to avoid borrow conflict
+        drop(fq);
+
+        // THEN wake the kernel if needed
+        //let t4 = unsafe { std::arch::x86_64::_rdtsc() };
+
+        if needs_wakeup {
+            // NOTE: This syscall will still cost ~1,500 cycles when it triggers,
+            // but it is legally required by the Intel driver to wake it up.
+            self.wakeup_fill_queue_force().expect("wakeup_fill_queue_force() failed");
+        }
+
+        //let t5 = unsafe { std::arch::x86_64::_rdtsc() };
+
+        if produced > 0 {
+            // Return any frames that weren't produced back to the registry
+            // CRITICAL FIX: Only release un-pushed frames up to `actual_batch`
+            if produced < actual_batch {
+                for &frame_idx in &self.scratch_frames[produced..actual_batch] {
+                    frame_registry.release_local(frame_idx);
+                }
+            }
+            log::trace!(
+                "Worker {}: Replenished {} frames to {} queue {} Fill Ring, free frames remaining: {}",
+                self.config.worker_id,
+                produced,
+                &self.config.interface,
+                self.config.queue_id,
+                frame_registry.total_free_frames()
+            );
+
+            self.total_produced += produced;
+        }
+
+        //let t6 = unsafe { std::arch::x86_64::_rdtsc() };
+
+        // Log the breakdown (only occasionally to avoid log spam)
+        /*if self.prof_replenish_calls % 10000 == 0 {
+            log::info!(
+                "\n=== Replenish X-Ray (Cycles) ===\n\
+                 Lock      : {}\n\
+                 Allocator : {}\n\
+                 Math Loop : {}\n\
+                 FQ Produce: {}\n\
+                 Syscall   : {}\n\
+                 Release   : {}",
+                 t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4, t6 - t5
+            );
+        }
+        */
+        let current_block = self.total_produced / threshold;
+
+        if current_block > self.last_logged_block {
+            log::trace!(
+                "Worker {}, I/f {}, Queue {}: Replenished in total {} frames to fill queue, free frames remaining: {}",
+                self.config.worker_id,
+                self.config.interface,
+                self.config.queue_id,
+                &self.total_produced,
+                frame_registry.total_free_frames()
+            );
+
+            self.last_logged_block = current_block;
+        }
+        trace!(
+            "Worker {}: Replenished {} frames to {} queue {} Fill Ring, free frames remaining: {}",
+            self.config.worker_id,
+            produced,
+            &self.config.interface,
+            self.config.queue_id,
+            frame_registry.total_free_frames(),
+        );
+
+        #[cfg(feature = "profiling")]
+        {
+            let end_cycles = unsafe { std::arch::x86_64::_rdtsc() };
+            let duration = end_cycles - start_cycles;
+
+            self.prof_replenish_cycles += duration;
+            self.prof_replenish_calls += 1;
+
+            // Catch the Sledgehammer
+            if duration > self.prof_max_replenish_cycles {
+                self.prof_max_replenish_cycles = duration;
+
+                // Only print if the spike is absurdly high (e.g., > 50,000 cycles)
+                if duration > 50_000 {
+                    log::warn!("MONSTER SPIKE DETECTED: Replenish took {} cycles!", duration);
+                }
+            }
+        }
+
+        produced
+    }
+}
+
+// Implement BatchRx for XSocketRx
+impl BatchRx for XSocketRx {
+    fn receive_into_batch(&mut self, batch: &mut Batch, max_count: usize) -> anyhow::Result<usize> {
+        // Get the worker's frame registry from thread-local storage
+        let frame_registry_ptr = get_worker_frame_registry();
+
+        // Check if pointer is null (happens during shutdown)
+        if frame_registry_ptr.is_null() {
+            return Ok(0);
+        }
+
+        // SAFETY: The pointer is valid for the lifetime of the worker thread
+        let frame_registry = unsafe { &mut *frame_registry_ptr };
+
+        // ⏱️ START STAGE 1: Reclaim & Replenish
+
+        #[cfg(feature = "profiling")]
+        let t0 = unsafe { core::arch::x86_64::_rdtsc() };
+
+        // 1. Process returns from TX side (via SystemBus)
+        // This reclaims frames that TX completed
+        // THROTTLED RECLAIM
+        // Cross-thread communication is expensive. Only check for returned frames
+        // every 32 loops, OR if we are getting dangerously low on free frames.
+        if self.empty_spins % 32 == 0 || frame_registry.total_free_frames() < 8192 {
+            if frame_registry.total_free_frames() < 8192 {
+                log::warn!("total_free_frames is too low: {}", frame_registry.total_free_frames());
+            }
+            frame_registry.process_returns();
+        }
+
+        // 2. Replenish fill queue so NIC has buffers to write into
+        // AGGRESSIVE REPLENISHING
+        // Always try to keep the fill queue as full as possible.
+        // The kernel drops packets if the fill queue is empty when packets arrive.
+        //let fq_size = self.config.umem_config.fq_size as usize;
+        if self.fill_deficit >= 1024 {
+            let to_replenish = std::cmp::max(self.fill_deficit, 512);
+            let produced = self.replenish_fill_queue(to_replenish);
+            self.fill_deficit = self.fill_deficit.saturating_sub(produced);
+            if self.fill_deficit > 2048 {
+                log::warn!("Fill deficit is too high: {}", self.fill_deficit);
+            }
+        }
+
+        #[cfg(feature = "profiling")]
+        {
+            let t1 = unsafe { core::arch::x86_64::_rdtsc() };
+            if self.prof_started {
+                self.prof_reclaim_replenish_cycles += t1 - t0;
+            }
+            // ⏱️ END STAGE 1
+        }
+
+        // Determine how many we can actually pull safely
+        let batch_len = batch.len();
+        if batch_len != 0 {
+            warn!("Batch not empty on receive_into_batch");
+        }
+        let max_to_pull = std::cmp::min(max_count, MAX_BATCH_SIZE) - batch_len;
+        if max_to_pull == 0 {
+            return Ok(0);
+        }
+
+        // ⏱️ START STAGE 2: Lockless Consume
+        #[cfg(feature = "profiling")]
+        let t1 = unsafe { core::arch::x86_64::_rdtsc() };
+
+        // USING PRE-ALLOCATED STRUCT BUFFER
+        // We slice into the buffer we already own. Zero memory allocation, zero memset overhead!
+        // Lock the queue. It is uncontended, so it takes ~15 cycles.
+        let mut rx_guard = self.rx_queue.lock();
+        let mut rcvd = unsafe { rx_guard.consume(&mut self.scratch_descriptors_recv_batch[..max_to_pull]) };
+
+        #[cfg(feature = "profiling")]
+        let t2 = unsafe { core::arch::x86_64::_rdtsc() };
+
+        #[cfg(feature = "profiling")]
+        {
+            if self.prof_started {
+                self.prof_consume_cycles += t2 - t1;
+            }
+            // ⏱️ END STAGE 2
+        }
+
+        // ⏱️ START STAGE 3: Wakeup / Empty Path
+        // SMART KERNEL WAKEUP LOGIC
+        #[cfg(feature = "profiling")]
+        let mut t3 = 0;
+
+        if rcvd == 0 {
+            self.empty_spins += 1;
+            if self.prof_started {
+                if self.empty_spins >= 51200 {
+                    self.prof_started = false;
+                    let now = unsafe { core::arch::x86_64::_rdtsc() };
+                    log::debug!(
+                        "**** Traffic burst ended after ~ {} cycles ({} us)",
+                        (now - self.prof_burst_start).separated_string(),
+                        (((now - self.prof_burst_start) as f64 * (1_000_000.0 / get_tsc_frequency() as f64)) as u64)
+                            .separated_string()
+                    );
+                }
+            }
+
+            // LOCKLESS/FAST-PATH WAKEUP CHECK
+            // We only attempt to lock and check the Fill Queue if we've been spinning empty for a while.
+            // This prevents atomic Mutex contention on every single microscopic loop.
+            if self.empty_spins % 128 == 0 {
+                // Use try_lock! If another thread holds the lock, we just move on.
+                // Never block the hot path.
+                if let Some(fq) = self.fill_queue.try_lock() {
+                    if fq.needs_wakeup() {
+                        self.wakeup_rx_queue()?;
+                        rcvd = unsafe { rx_guard.consume(&mut self.scratch_descriptors_recv_batch[..max_to_pull]) };
+                    }
+                }
+            }
+
+            #[cfg(feature = "profiling")]
+            {
+                t3 = unsafe { core::arch::x86_64::_rdtsc() };
+            }
+
+            #[cfg(feature = "profiling")]
+            if self.prof_started {
+                self.prof_wakeup_cycles += t3 - t2;
+            }
+
+            if log::log_enabled!(log::Level::Debug) && self.prof_started && rcvd > 0 {
+                debug!(
+                    "{}: [{} us] After Wakeup: Received {} packets. Empty spins= {}. Total rx: {}, Free frames: {}",
+                    self.source_id(),
+                    rdtsc_us().separate_with_precision(3),
+                    rcvd,
+                    self.empty_spins,
+                    self.total_received + rcvd,
+                    frame_registry.total_free_frames()
+                );
+            }
+        } else {
+            if !self.prof_started {
+                self.prof_started = true;
+                self.prof_burst_start = unsafe { core::arch::x86_64::_rdtsc() };
+                self.empty_spins = 0;
+            }
+
+            self.fill_deficit += rcvd; // We owe the FILL_RING this many frames
+
+            #[cfg(feature = "profiling")]
+            let t3 = unsafe { core::arch::x86_64::_rdtsc() };
+
+            #[cfg(feature = "profiling")]
+            {
+                // Record the time it took just to check the condition when rcvd > 0
+                if self.prof_started {
+                    self.prof_wakeup_cycles += t3 - t2;
+                }
+            }
+
+            // 5. ZERO-OVERHEAD LOGGING
+            // By wrapping this in `log_enabled!`, Rust absolutely guarantees that `rdtsc_us()`
+            // and the string formatting will NEVER evaluate unless you are actively debugging.
+            if log::log_enabled!(log::Level::Trace) {
+                trace!(
+                    "{}: [{} us] Received {} packets. Empty spins= {}. Total rx: {}, Free frames: {}",
+                    self.source_id(),
+                    rdtsc_us().separate_with_precision(3),
+                    rcvd,
+                    self.empty_spins,
+                    self.total_received + rcvd,
+                    frame_registry.total_free_frames()
+                );
+            }
+            self.empty_spins = 0;
+        }
+        // ⏱️ END STAGE 3
+
+        self.total_received += rcvd;
+
+        // If the RX ring is STILL empty after the kick (or if no kick was needed),
+        // return Ok(0) instantly and spin in zero-overhead user-space.
+        if rcvd == 0 {
+            #[cfg(feature = "profiling")]
+            {
+                if self.prof_started {
+                    self.prof_empty_spin_cycles += t3 - t0;
+                }
+            }
+            return Ok(0);
+        } else {
+            self.empty_spins = 0;
+        }
+
+        // ⏱️ START STAGE 4: PDU Batching
+        #[cfg(feature = "profiling")]
+        let t3_for_stage4 = unsafe { core::arch::x86_64::_rdtsc() };
+
+        // 6. Process the received packets
+        let frame_size_log2 = self.config.umem_config.frame_size_log2;
+        let group_start_frame_idx = self.config.umem_config.group_start_frame_idx;
+        let umem_ptr = self.umem.as_ptr();
+        let bus_ptr = &*self.bus as *const _;
+        let worker_id = self.config.worker_id as u8;
+
+        // This guarantees zero bounds-checking overhead
+        let received_descriptors = &self.scratch_descriptors_recv_batch[..rcvd];
+        for desc in received_descriptors {
+            // BITWISE SHIFT INSTEAD OF DIVISION
+            // Replaces ~20 cycle division with a 1 cycle shift
+            let local_idx = (desc.addr() as u32) >> frame_size_log2; // local_idx is wrt. current Umem
+            let global_idx = local_idx + group_start_frame_idx; // global idx is used by the program to identify the frame within the entire combined Umem
+
+            let pdu = Pdu::new(*desc, global_idx, worker_id, umem_ptr, bus_ptr, frame_size_log2);
+
+            // Since we ALREADY calculated max_to_pull to guarantee capacity,
+            // we can confidently unwrap/ignore the error branch.
+            batch.push(pdu).expect("Failed to push PDU into batch");
+        }
+
+        #[cfg(feature = "profiling")]
+        {
+            let t4 = unsafe { core::arch::x86_64::_rdtsc() };
+            if self.prof_started {
+                self.prof_pdu_batch_cycles += t4 - t3_for_stage4;
+            }
+            // ⏱️ END STAGE 4
+
+            // 📊 PROFILING AGGREGATION & REPORTING
+            if self.prof_started {
+                self.prof_total_packets += rcvd as u64;
+            }
+            const PRINT_INTERVAL_PACKETS: u64 = 10_240_000;
+            // Print summary every PRINT_INTERVAL_PACKETS and reset counters
+            if self.prof_started && self.prof_total_packets >= PRINT_INTERVAL_PACKETS {
+                let total = self.prof_total_packets;
+
+                // Calculate cycles per packet for each stage
+                let s1_cpp = self.prof_reclaim_replenish_cycles / total;
+                let s2_cpp = self.prof_consume_cycles / total;
+                let s3_cpp = self.prof_wakeup_cycles / total;
+                let s4_cpp = self.prof_pdu_batch_cycles / total;
+                let total_cpp = s1_cpp + s2_cpp + s3_cpp + s4_cpp;
+
+                log::trace!(
+                    "\n=== CPU Cycle Breakdown (Per Packet Average over {} pkts) ===\n\
+                     1. Reclaim & Replenish : {:>4} cycles\n\
+                     2. Lockless Consume    : {:>4} cycles\n\
+                     3. Wakeup Logic        : {:>4} cycles\n\
+                     4. PDU Gen & Batch Push: {:>4} cycles\n\
+                     --------------------------------------------------\n\
+                     Total Active CPU Cost  : {:>4} cycles/packet\n\
+                     Total Empty Spins Cost : {:>10} cycles (Total for 1M period)\n\
+                     ==================================================",
+                    total,
+                    s1_cpp,
+                    s2_cpp,
+                    s3_cpp,
+                    s4_cpp,
+                    total_cpp,
+                    self.prof_empty_spin_cycles
+                );
+
+                // Reset counters
+                self.prof_reclaim_replenish_cycles = 0;
+                self.prof_consume_cycles = 0;
+                self.prof_wakeup_cycles = 0;
+                self.prof_pdu_batch_cycles = 0;
+                self.prof_empty_spin_cycles = 0;
+                self.prof_total_packets = 0;
+            }
+        }
+
+        Ok(rcvd)
+    }
+
+    fn replenish(&mut self, requested_count: usize) -> anyhow::Result<()> {
+        self.replenish_fill_queue(requested_count);
+        Ok(())
+    }
+
+    fn source_id(&self) -> &String {
+        &self.config.id_string
+    }
+
+    #[cfg(feature = "profiling")]
+    fn get_replenish_avg_cycles(&self) -> u64 {
+        self.get_replenish_avg_cycles()
+    }
+
+    #[cfg(feature = "profiling")]
+    fn get_replenish_total_cycles(&self) -> u64 {
+        self.get_replenish_total_cycles()
+    }
+
+    #[cfg(feature = "profiling")]
+    fn get_replenish_calls(&self) -> u64 {
+        self.get_replenish_calls()
+    }
+}
+
+// Implement BatchTx for XSocketTx
+impl BatchTx for XSocketTx {
+
+    fn transmit_batch(&mut self, batch: &mut Batch) -> anyhow::Result<usize> {
+        self.drain_completion_queue()?;
+
+        let original_batch_len = batch.len();
+        if original_batch_len == 0 {
+            return Ok(0);
+        }
+        let mut tx_guard = self.tx_queue.lock();
+        let free_slots = tx_guard.nb_free(original_batch_len as u32) as usize;
+
+        // ==========================================================
+        //  THE BURST THRESHOLD (Fixes the 21,000-cycle Syscall Storm)
+        // ==========================================================
+        // If the queue has very little room, do not send 1 packet at a time!
+        // The overhead of the system call outweighs the benefit.
+        // Return instantly, and the Sink node will `bulk_drop` the batch.
+        if free_slots < 16 {
+            return Ok(0);
+        }
+
+        let count_to_send = std::cmp::min(original_batch_len, free_slots);
+        let mut valid_to_send = 0;
+        let mut descs = [FrameDesc::default(); crate::pipeline::MAX_BATCH_SIZE];
+
+        let my_umem_ptr = self.umem.as_ptr() as *mut u8;
+        let my_umem_id = self.config.umem_config.group_id;
+        let registry_ptr = crate::xsocket::get_worker_frame_registry();
+
+        // ==========================================================
+        //  IN-PLACE CROSS-UMEM SWAP
+        // ==========================================================
+        if !registry_ptr.is_null() {
+            let frame_registry = unsafe { &mut *registry_ptr };
+
+            for i in 0..count_to_send {
+                let pdu_ref = batch.get_mut(i);
+
+                if pdu_ref.umem_ptr() != my_umem_ptr {
+                    // It's foreign memory, we must copy it
+                    let mut scratch = [Pdu::default(); 1];
+
+                    if frame_registry.allocate_pdus_into(my_umem_id, &mut scratch) == 1 {
+                        let mut new_pdu = std::mem::replace(&mut scratch[0], Pdu::default());
+                        new_pdu.reset_for_tx(pdu_ref.w.headroom());
+
+                        let len = pdu_ref.w.data_len();
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(pdu_ref.w.data_ptr(), new_pdu.w.data_ptr(), len);
+                        }
+                        new_pdu.w.set_data_length(len as u32);
+
+                        // MAGIC SWAP: Put the UMEM 1 packet into the batch,
+                        // and take ownership of the old UMEM 0 packet!
+                        let old_pdu = std::mem::replace(pdu_ref, new_pdu);
+
+                        // Drop the old packet immediately (returns it to UMEM 0)
+                        drop(old_pdu);
+
+                        descs[valid_to_send] = batch.get(i).to_frame_desc();
+                        valid_to_send += 1;
+                    } else {
+                        // UMEM 1 is exhausted. Stop processing this batch.
+                        // The remaining unprocessed packets stay in the batch for bulk_drop!
+                        break;
+                    }
+                } else {
+                    // Fast path: already local UMEM
+                    descs[valid_to_send] = pdu_ref.to_frame_desc();
+                    valid_to_send += 1;
+                }
+            }
+        } else {
+            // Fallback if no registry (just send what we can)
+            for i in 0..count_to_send {
+                descs[i] = batch.get(i).to_frame_desc();
+            }
+            valid_to_send = count_to_send;
+        }
+
+        // ==========================================================
+        //  TRANSMIT & CLEANUP
+        // ==========================================================
+        let mut sent = 0;
+        if valid_to_send > 0 {
+            // This is where the syscall happens, but now we guarantee it
+            // only fires if we have a worthwhile batch of packets!
+            // Lock the TX queue just for the burst
+            sent = unsafe { tx_guard.produce_and_wakeup(&descs[0..valid_to_send])? };
+            if sent > 0 {
+                self.total_sent_packets += sent;
+            }
+        }
+
+        // Remove ONLY the successfully transmitted packets from the batch.
+        for pdu in batch.drain(0..sent) {
+            std::mem::forget(pdu); // The NIC owns them now!
+        }
+
+        // Any packets left over (because free_slots < batch.len(), or allocation failed)
+        // are perfectly preserved in the batch.
+        // When this function returns, `BatchTxNode::process` will call `batch.bulk_drop()`
+        // and recycle all of them in 5 cycles!
+
+        Ok(sent)
+    }
+
+    fn sink_id(&self) -> String {
+        self.config.interface.clone()
+    }
+}
+
+// Add helper methods for XSocketTx
+impl XSocketTx {
+/*
+    /// Explicitly wakes up the kernel TX driver if it went to sleep
+    #[inline]
+    pub fn wakeup_tx_queue(&self) -> anyhow::Result<()> {
+        // Note: This requires access to the TX queue status
+        // In libxdp/xsk-rs, checking needs_wakeup usually happens on the ring struct.
+        // If the flag is set:
+        unsafe {
+            if self.tx_queue.needs_wakeup() {
+                //trace!("Worker {}: TX Queue needs wakeup! Triggering syscall...", self.config.worker_id);
+                // The sendto call with MSG_DONTWAIT and 0 len is the standard wakeup trigger
+                let ret = libc::sendto(self.fd, std::ptr::null(), 0, libc::MSG_DONTWAIT, std::ptr::null_mut(), 0);
+                if ret < 0 {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+            }
+        }
+        Ok(())
+    }
+*/
+    /// Consumes frames that the NIC has finished transmitting.
+    fn drain_completion_queue(&mut self) -> anyhow::Result<usize> {
+        let threshold = LOG_INTERVAL_C_F_QUEUE_PACKETS;
+
+        let consumed = {
+            let mut cq = self.comp_queue.lock();
+            let consumed = unsafe { cq.consume(&mut self.comp_descs_helper) };
+            drop(cq); // Free the lock immediately!
+            consumed
+        };
+
+        if consumed > 0 {
+            self.total_consumed += consumed;
+
+            let current_block = self.total_consumed / threshold;
+            if current_block > self.last_logged_block {
+                log::trace!(
+                    "Worker {}, I/f {}, Queue {}: Drained {} frames from completion queue",
+                    self.config.worker_id,
+                    self.config.interface,
+                    self.config.queue_id,
+                    &self.total_consumed
+                );
+                self.last_logged_block = current_block;
+            }
+
+            let frame_size_log2 = self.config.umem_config.frame_size_log2;
+
+            // CRITICAL FIX: Iterate by index instead of .iter()
+            for i in 0..consumed {
+                // 1. Immutably borrow `self` just to read the address.
+                // The borrow ends the exact microsecond this statement finishes!
+                let addr = self.comp_descs_helper[i].addr() as u32;
+                let global_idx = addr >> frame_size_log2;
+
+                // 2. Now `self` is completely free, so we can mutably borrow it!
+                self.release_frame(global_idx);
+            }
+        }
+        Ok(consumed)
+    }
+
+    fn release_frame(&mut self, frame_idx: u32) {
+        let owner = self.determine_owner(frame_idx);
+        /*
+        log::trace!(
+            "Worker {}: Releasing frame_idx={}, determined owner={}, my worker_id={}",
+            self.config.worker_id,
+            frame_idx,
+            owner,
+            self.config.worker_id
+        );
+        */
+        // FAST PATH: If the frame belongs to this worker, bypass the MPSC channel entirely!
+        if owner == self.config.worker_id {
+            unsafe {
+                let registry_ptr = xbricks_base::frame_registry::get_worker_frame_registry();
+                if !registry_ptr.is_null() {
+                    (*registry_ptr).release_local(frame_idx);
+                    log::trace!(
+                        "Worker {}: Released frame {} to local registry (fast path)",
+                        self.config.worker_id,
+                        frame_idx
+                    );
+                    return;
+                } else {
+                    log::warn!("Worker {}: Frame registry ptr is null!", self.config.worker_id);
+                }
+            }
+        }
+
+        // SLOW PATH: Only use the cross-thread bus for frames belonging to OTHER workers
+        log::trace!(
+            "Worker {}: Sending frame {} to owner {} via bus (slow path)",
+            self.config.worker_id,
+            frame_idx,
+            owner
+        );
+        let _ = self.bus.bus_senders[owner].send(BusCommand::Release(frame_idx));
+    }
+
+    fn determine_owner(&self, frame_idx: u32) -> usize {
+        for partition in &self.bus.umem_partitions {
+            if partition.owns(frame_idx) {
+                return partition.worker_id;
+            }
+        }
+        // Fallback: should never happen with a correctly configured system
+        log::warn!("determine_owner: no partition owns frame_idx={}, defaulting to worker 0", frame_idx);
+        0
+    }
+}
+impl Drop for XSocketRx {
+    fn drop(&mut self) {
+        // Assuming your fields are named fq, cq, rx, and tx.
+        // Adjust the variable names to match your actual struct definition!
+        log::debug!(
+            "RUST DROP: XSocketRx (Queue {}) dropping. Refs remaining -> FQ: {}, CQ: {}, RX: {}, TX: {}",
+            self.config.queue_id,
+            Arc::strong_count(&self.fill_queue),
+            Arc::strong_count(&self._comp_queue_keepalive),
+            Arc::strong_count(&self.rx_queue),
+            Arc::strong_count(&self._tx_queue_keepalive)
+        );
+    }
+}
+
+impl Drop for XSocketTx {
+    fn drop(&mut self) {
+        log::debug!(
+            "RUST DROP: XSocketTx (Queue {}) dropping. Refs remaining -> FQ: {}, CQ: {}, RX: {}, TX: {}",
+            self.config.queue_id,
+            Arc::strong_count(&self._fill_queue_keepalive),
+            Arc::strong_count(&self.comp_queue),
+            Arc::strong_count(&self._rx_queue_keepalive),
+            Arc::strong_count(&self.tx_queue)
+        );
+    }
+}

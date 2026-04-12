@@ -1,0 +1,58 @@
+[package]
+name = "xbricks_lib"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+xbricks_base = { path = "../xbricks_base" }
+
+# Standard Tools
+anyhow = "1.0"
+log = "0.4"
+libc = "0.2"
+rustix = { version = "1.1", features = ["event", "time"] } # Added features for networking
+spin = "0.10"
+
+# Networking & BPF
+xsk-rs = { workspace = true }
+libbpf-rs = { workspace = true }
+libbpf-sys = { workspace = true }
+network-types = "0.1"
+ipnet = "2.12"
+macaddr = { version = "1.0", default-features = false }
+
+# Serialization & Config
+serde = { version = "1.0", features = ["derive"] }
+ts-rs = "12.0"
+toml = "1.1"
+separator = "0.4"
+
+# Async & Concurrency
+tokio = { version = "1.40", features = ["full"] } # Note: 1.49 is very new, 1.40 is stable
+arc-swap = "1.7"
+crossbeam-channel = "0.5"
+
+core_affinity = "0.8"
+rand = "0.10"
+
+# Local Protocals
+xbricks_protocol = { path = "../xbricks_protocol" }
+
+# Wasm
+xbricks_wasm = { path = "../xbricks_wasm", optional = true }
+
+[build-dependencies]
+anyhow = "1.0"
+cargo_metadata = "0.18"
+libbpf-cargo = "0.24"
+
+[features]
+performance = []
+profiling = []
+# Create a 'wasm' feature that enables the dependency
+wasm = ["dep:xbricks_wasm"]
+default = ["profiling"]
+
+[lib]
+name = "xbricks_lib"
+path = "src/lib.rs"

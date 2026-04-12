@@ -1,0 +1,3 @@
+/home/rainer1956/rust/xbricks/src/bpf/cmake-build-debug/CMakeFiles/bpf.dir
+/home/rainer1956/rust/xbricks/src/bpf/cmake-build-debug/CMakeFiles/edit_cache.dir
+/home/rainer1956/rust/xbricks/src/bpf/cmake-build-debug/CMakeFiles/rebuild_cache.dir

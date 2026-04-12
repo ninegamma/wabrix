@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/rainer1956/rust/xbricks/src/bpf/cmake-build-debug/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
