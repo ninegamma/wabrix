@@ -8,6 +8,9 @@
       <sourceFolder url="file://$MODULE_DIR$/wasm plugins/wasm_filter/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/plugins/filter_plugin/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/xbricks_protocol/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/xbricks_base/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/xbricks_lib/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/xbricks_wasm/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/ipblower/target" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
       <excludeFolder url="file://$MODULE_DIR$/xbricks/target" />

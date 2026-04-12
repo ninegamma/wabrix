@@ -4,5 +4,7 @@
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/ipblower" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/xbricks" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/xdp-tools" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/xdp-tools/lib/libbpf" vcs="Git" />
   </component>
 </project>
