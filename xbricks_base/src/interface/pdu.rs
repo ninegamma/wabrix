@@ -1,5 +1,6 @@
 use core::{cmp, fmt, slice};
 use core::ptr;
+use log::{debug, trace};
 use xsk_rs::FrameDesc;
 use xsk_rs::umem::frame::SegmentLengths;
 use xbricks_protocol::headers::{
@@ -64,6 +65,11 @@ unsafe impl Send for Pdu {}
 impl Drop for Pdu {
     fn drop(&mut self) {
         unsafe {
+            // 0. Check if the PDU is an uninitialized Pdu::default(), e.g. happens in PacketGenNode
+            if self.system_bus.is_null() || self.umem_ptr().is_null() {
+                log::debug!("Ignoring drop of uninitialized PDU slot");
+                return;
+            }
             // 1. FAST PATH: Thread-Local Return
             // Check if we are currently executing on the worker thread that owns this frame.
             let registry_ptr = crate::frame_registry::get_worker_frame_registry();
@@ -73,6 +79,7 @@ impl Drop for Pdu {
                 if registry.worker_id == (self.owner_id() as usize) {
                     // We are on the owning thread! Bypass the crossbeam_channel entirely.
                     // Return the memory instantly to the local stash.
+                    trace!("Drop for Pdu: Returning frame {} to local stash", self.global_frame_idx());
                     registry.release_local(self.global_frame_idx());
                     return;
                 }

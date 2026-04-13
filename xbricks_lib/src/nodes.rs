@@ -257,7 +257,7 @@ impl Node for BatchTxNode {
 }
 
 use crossbeam_channel::Sender;
-use log::{info, warn};
+use log::{debug, info, warn};
 use macaddr::MacAddr6;
 use network_types::eth::EtherType;
 use crate::{BatchRx, BatchTx};
@@ -547,6 +547,7 @@ use rand::{TryRng};
 use rand::rngs::SmallRng;
 use core::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
 use core::fmt::Display;
+use std::mem::MaybeUninit;
 use separator::Separatable;
 use xbricks_base::frame_registry::get_worker_frame_registry;
 use xbricks_base::{Directive, Node, NodeId};
@@ -1144,7 +1145,7 @@ pub struct PacketGenNode {
     /// Destination MAC address
     dst_mac: MacAddr6,
     next_log_threshold: usize,
-    scratch_pdus: [Pdu; crate::MAX_BATCH_SIZE],
+    scratch_pdus: [core::mem::MaybeUninit<Pdu>; crate::MAX_BATCH_SIZE],
     #[cfg(feature = "profiling")]
     total_cycles: u64,
 }
@@ -1260,7 +1261,7 @@ impl PacketGenNode {
             dst_mac,
             dst_ip,
             next_log_threshold: 0,
-            scratch_pdus: std::array::from_fn(|_| Pdu::default()),
+            scratch_pdus: unsafe { MaybeUninit::uninit().assume_init() },
             #[cfg(feature = "profiling")]
             total_cycles: 0,
         }
@@ -1429,8 +1430,8 @@ impl Node for PacketGenNode {
         let mut generated = 0;
         // Process each allocated PDU
         for i in 0..allocated {
-            // Take ownership of the PDU, replacing it with a default
-            let mut pdu = std::mem::replace(&mut self.scratch_pdus[i], Pdu::default());
+            // Read the PDU out of the uninit slot (leaves the raw bytes behind, but Rust won't drop them)
+            let mut pdu = unsafe { self.scratch_pdus[i].assume_init_read() };
             let seq_num = self.total_generated as u32 + generated;
             let dst_port = self.worker_id as u16;
             if let Err(e) = self.initialize_pdu(&mut pdu, seq_num, dst_port) {

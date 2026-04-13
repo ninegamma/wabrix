@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use core::cell::Cell;
+use core::mem::MaybeUninit;
 use crossbeam_channel::Receiver;
 use xsk_rs::Umem;
-use log::debug;
+use log::{debug, trace};
 use xbricks_protocol::wbatch::MAX_BATCH_SIZE;
 use crate::{BusCommand, RuntimeUmemConfig, SystemBus, UmemPartition};
-
+use crate::interface::Pdu;
 
 // Thread-local storage for the worker's frame registry pointer
 // This allows XSocketRx/Tx to access the worker's registry without storing it in each socket
@@ -137,6 +138,7 @@ impl FrameRegistry {
             match cmd {
                 BusCommand::Release(frame_idx) => {
                     returned_count += 1;
+                    trace!("process_returns: Frame {} returned to registry", frame_idx);
                     self.release_local(frame_idx);
                 }
                 BusCommand::Retain(frame_idx) => {
@@ -185,7 +187,7 @@ impl FrameRegistry {
 
                 // THE SHIELD: If refcount is already 0, it is ALREADY in the free stash!
                 if partition_data.refcounts[offset] == 0 {
-                    log::error!("🔥 CRITICAL: Prevented Double-Free of UMEM frame {}!", frame_idx);
+                    log::error!("🔥 CRITICAL: Prevented Double-Free of UMEM frame {} in UMEM group {}!", frame_idx, umem_group_id);
                     return; // Ignore the duplicate release entirely
                 }
                 partition_data.refcounts[offset] -= 1;
@@ -366,7 +368,7 @@ impl FrameRegistry {
     ///
     /// # Notes
     /// Uses the RuntimeUmemConfig and SystemBus stored in the FrameRegistry
-    pub fn allocate_pdus_into(&mut self, umem_id: usize, dst: &mut [crate::interface::Pdu]) -> usize {
+    pub fn allocate_pdus_into(&mut self, umem_id: usize, dst: &mut [MaybeUninit<Pdu>]) -> usize {
         use xsk_rs::FrameDesc;
         use crate::interface::Pdu;
 
@@ -431,19 +433,19 @@ impl FrameRegistry {
         let dst_slice = &mut dst[..allocated];
         let src_slice = &global_frame_indices[..allocated];
 
-        for (pdu_slot, &global_frame_idx) in dst_slice.iter_mut().zip(src_slice.iter()) {
+        for (dst_slot, &global_frame_idx) in dst_slice.iter_mut().zip(src_slice.iter()) {
             let frame_addr = ((global_frame_idx - group_start_frame_idx) as usize) << frame_size_log2;
 
             let desc = FrameDesc::new(frame_addr + headroom);
 
-            *pdu_slot = Pdu::new(
+            dst_slot.write(Pdu::new(
                 desc,
                 global_frame_idx, // Must be GLOBAL frame index, not local!
                 self.worker_id as u8,
                 umem_base_ptr,
                 system_bus,
                 frame_size_log2,
-            );
+            ));
         }
 
         allocated

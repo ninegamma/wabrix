@@ -1,6 +1,7 @@
 use core::mem::MaybeUninit;
 use core::ops::{Bound, RangeBounds};
 use core::ptr;
+use log::{debug, trace};
 use xbricks_protocol::wbatch::MAX_BATCH_SIZE;
 use crate::frame_registry::get_worker_frame_registry;
 use crate::interface::Pdu;
@@ -315,6 +316,7 @@ impl Batch {
                 for i in 0..self.count {
                     let pdu = &*self.packets[i].as_ptr();
                     if registry.worker_id == pdu.owner_id() as usize {
+                        trace!("bulk_drop: Returning frame {} to local stash", pdu.w.global_frame_idx());
                         registry.release_local(pdu.w.global_frame_idx());
                     } else {
                         // Slow path: Individual cross-thread release

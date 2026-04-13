@@ -18,3 +18,8 @@ xbricks_base = { path = "../xbricks_base" }
 [lib]
 name = "xbricks_wasm"
 path = "src/lib.rs"
+
+[features]
+performance = []
+profiling = []
+default = ["profiling"]

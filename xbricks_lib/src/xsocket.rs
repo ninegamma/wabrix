@@ -6,6 +6,7 @@ use xbricks_base::interface::Pdu;
 use crate::{probe_kernel_fds, Batch, BatchRx, BatchTx, MAX_BATCH_SIZE};
 use log::{debug, trace, warn};
 use std::cell::Cell;
+use core::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::sync::{Arc};
 use xsk_rs::config::SocketConfig;
@@ -534,6 +535,7 @@ impl XSocketRx {
             // CRITICAL FIX: Only release un-pushed frames up to `actual_batch`
             if produced < actual_batch {
                 for &frame_idx in &self.scratch_frames[produced..actual_batch] {
+                    trace!("replenish_fill_queue: Returning frame {} to local stash", frame_idx);
                     frame_registry.release_local(frame_idx);
                 }
             }
@@ -954,10 +956,12 @@ impl BatchTx for XSocketTx {
 
                 if pdu_ref.umem_ptr() != my_umem_ptr {
                     // It's foreign memory, we must copy it
-                    let mut scratch = [Pdu::default(); 1];
+                    let mut scratch = [MaybeUninit::uninit()];
 
                     if frame_registry.allocate_pdus_into(my_umem_id, &mut scratch) == 1 {
-                        let mut new_pdu = std::mem::replace(&mut scratch[0], Pdu::default());
+                        // 2. Read the fully initialized PDU directly out of the memory slot.
+                        // No std::mem::replace needed, and absolutely nothing gets dropped!
+                        let mut new_pdu = unsafe { scratch[0].assume_init_read() };
                         new_pdu.reset_for_tx(pdu_ref.w.headroom());
 
                         let len = pdu_ref.w.data_len();
@@ -1075,15 +1079,19 @@ impl XSocketTx {
             }
 
             let frame_size_log2 = self.config.umem_config.frame_size_log2;
+            let group_start_idx = self.config.umem_config.group_start_frame_idx;
 
-            // CRITICAL FIX: Iterate by index instead of .iter()
+            // FIX: Iterate by index instead of .iter()
             for i in 0..consumed {
-                // 1. Immutably borrow `self` just to read the address.
-                // The borrow ends the exact microsecond this statement finishes!
                 let addr = self.comp_descs_helper[i].addr() as u32;
-                let global_idx = addr >> frame_size_log2;
 
-                // 2. Now `self` is completely free, so we can mutably borrow it!
+                // 1. Calculate the local index relative to this specific UMEM
+                let local_idx = addr >> frame_size_log2;
+
+                // 2. Translate to the absolute Global System Index
+                let global_idx = local_idx + group_start_idx;
+                trace!("drain_completion_queue: Worker {}: Releasing frame_idx={} (local_idx={}, group_start_idx={})",
+                    self.config.worker_id, global_idx, local_idx, group_start_idx);
                 self.release_frame(global_idx);
             }
         }
@@ -1106,12 +1114,12 @@ impl XSocketTx {
             unsafe {
                 let registry_ptr = xbricks_base::frame_registry::get_worker_frame_registry();
                 if !registry_ptr.is_null() {
-                    (*registry_ptr).release_local(frame_idx);
-                    log::trace!(
+                    trace!(
                         "Worker {}: Released frame {} to local registry (fast path)",
                         self.config.worker_id,
                         frame_idx
                     );
+                    (*registry_ptr).release_local(frame_idx);
                     return;
                 } else {
                     log::warn!("Worker {}: Frame registry ptr is null!", self.config.worker_id);
