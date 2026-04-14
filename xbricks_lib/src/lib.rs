@@ -1,7 +1,5 @@
 extern crate alloc;
-
 pub mod allocators;
-pub mod common;
 pub mod config;
 pub mod xsocket;
 pub mod system_builder;
@@ -11,6 +9,7 @@ pub mod pipeline;
 pub mod toml_parser;
 pub(crate) mod system_runner;
 mod telemetry_logger;
+pub mod telemetry;
 
 // Include the generated BPF skeleton code
 pub mod xscrubber_skel {
@@ -20,7 +19,7 @@ pub mod xscrubber_skel {
 // Re-export commonly used types
 pub(crate) use xsocket::XSocket;
 pub use xbricks_base::interface::batch::Batch;
-pub(crate) use crate::system_builder::{ XSocketRegistry};
+pub(crate) use crate::system_builder::XSocketRegistry;
 pub use crate::pipeline::{spawn_worker_pipelines, PipelineFactory, PipelineRunner, PipelineStats};
 pub const MAX_BATCH_SIZE: usize = 512;
 

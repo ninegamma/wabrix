@@ -644,9 +644,11 @@ mod tests {
         assert_eq!(registry.total_free_frames(), 91);
 
         // Release same frame again (refcount is 0, will add duplicate - this is a caller bug)
-        // In real usage, this shouldn't happen as the frame is already back in free_stash
+        // In real usage, this shouldn't happen as the frame is already back in free_stash.
+        // As double free is caught by release_local, we don't need to worry about it.
+
         registry.release_local(frames[0]);
-        assert_eq!(registry.total_free_frames(), 92); // Duplicated!
+        assert_eq!(registry.total_free_frames(), 91); // Double Free Caught
 
         // Note: The above is a bug scenario - callers should not release frames twice
         // The refcount mechanism is for tracking shallow copies (retain/release pairs)
@@ -655,7 +657,7 @@ mod tests {
         for &frame_idx in &frames[1..] {
             registry.release_local(frame_idx);
         }
-        assert_eq!(registry.total_free_frames(), 101); // 92 + 9 = 101 (one duplicate)
+        assert_eq!(registry.total_free_frames(), 100); // 91 + 9 = 100
     }
 
     /// Test merged partitions (worker requests multiple consecutive partitions)

@@ -10,7 +10,8 @@ crossbeam-channel = "0.5"
 log = "0.4.29"
 macaddr = "1.0.1"
 tokio = { version = "1.40", features = ["full"] }
-anyhow = "1.0" # Note: 1.49 is very new, 1.40 is stable
+anyhow = "1.0"
+separator = "0.4.1" # Note: 1.49 is very new, 1.40 is stable
 
 [features]
 performance = []

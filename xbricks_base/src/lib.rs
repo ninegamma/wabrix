@@ -4,6 +4,7 @@ extern crate core;
 pub mod interface;
 pub mod frame_registry;
 pub mod system;
+pub mod common;
 
 use core::fmt::Display;
 use crossbeam_channel::Sender;

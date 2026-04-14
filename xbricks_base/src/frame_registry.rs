@@ -195,7 +195,11 @@ impl FrameRegistry {
                 if partition_data.refcounts[offset] == 0 {
                     partition_data.free_stash.push(frame_idx);
                 }
+            } else {
+                log::error!("Worker {}: partition data not found for UMEM group {}!", self.worker_id, umem_group_id);
             }
+        } else {
+            log::error!("Worker {} tried to release frame {} from unknown UMEM group!", self.worker_id, frame_idx);
         }
     }
 
@@ -224,7 +228,7 @@ impl FrameRegistry {
             // and then truncate the stash to remove them.
             let start_idx = available - to_take;
             dst[..to_take].copy_from_slice(&stash[start_idx..]);
-            // NEW: Mark all allocated frames as actively owned (refcount = 1)
+            // Mark all allocated frames as actively owned (refcount = 1)
             for &frame_idx in &dst[..to_take] {
                 let offset = (frame_idx - registry.partition.start_idx) as usize;
                 registry.refcounts[offset] = 1;
@@ -246,14 +250,17 @@ impl FrameRegistry {
             let mut frames = Vec::with_capacity(count);
             let stash = &mut registry.free_stash;
 
-            // Move up to `count` frames from stash to result
-            // (Using extend + truncate or a loop is efficient here)
             let available = stash.len();
             let to_take = std::cmp::min(available, count);
 
             for _ in 0..to_take {
-                // Safety: we checked len()
-                frames.push(stash.pop().unwrap());
+                // Safety: we checked len() via to_take
+                let frame_idx = stash.pop().unwrap();
+                frames.push(frame_idx);
+
+                // Mark the allocated frame as actively owned (refcount = 1)
+                let offset = (frame_idx - registry.partition.start_idx) as usize;
+                registry.refcounts[offset] = 1;
             }
 
             // Optional: Trace if we are running low/empty

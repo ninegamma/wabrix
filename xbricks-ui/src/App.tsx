@@ -6,7 +6,8 @@ import axios from 'axios';
 import dagre from 'dagre';
 import { IfaceNode, UmemNode, XskNode, WorkerNode, PipelineNode } from './components/CustomNodes.tsx';
 import { TerminalWindow } from './TerminalWindow';
-import { TelemetryNode } from './TelemetryNode';
+import { TelemetryNode } from './components/TelemetryNode.tsx';
+import {FileBrowserDialog} from "./components/FileBrowserDialog.tsx";
 
 const nodeTypes = {
     iface: IfaceNode,
@@ -168,6 +169,10 @@ export default function App() {
                 .filter(n => n.type === 'worker')
                 .sort((a, b) => (a.data.id as number) - (b.data.id as number))
                 .map(n => n.data);
+
+            const layout: Record<string, { x: number; y: number }> = {};
+            nodes.forEach(n => { layout[n.id] = n.position; });
+            fullConfig.layout = layout;
 
             const params: Record<string, string | boolean> = { save_path: savePath };
             if (!pendingRestart) params.restart = false;
@@ -394,15 +399,8 @@ export default function App() {
     }, [setNodes, setEdges]);
 
 
-    // Save all node positions to /api/layout after any drag
-    const handleNodeDragStop = () => {
-        setNodes(currentNodes => {
-            const positions: Record<string, { x: number; y: number }> = {};
-            currentNodes.forEach(n => { positions[n.id] = n.position; });
-            axios.post('/api/layout', positions).catch(err => console.error('Failed to save layout:', err));
-            return currentNodes;
-        });
-    };
+    // No-op: layout is only persisted when the user explicitly saves to disk.
+    const handleNodeDragStop = () => {};
 
     const updateNodeData = (nodeId: string, key: string, value: string | number | number[] | boolean) => {
         setNodes((nds) =>

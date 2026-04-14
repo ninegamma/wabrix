@@ -1,11 +1,10 @@
 // src/xsocket.rs
 
 use std::ffi::CString;
-use crate::common::formatting::PreciseSeparator;
+use xbricks_base::common::formatting::PreciseSeparator;
 use xbricks_base::interface::Pdu;
 use crate::{probe_kernel_fds, Batch, BatchRx, BatchTx, MAX_BATCH_SIZE};
 use log::{debug, trace, warn};
-use std::cell::Cell;
 use core::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::sync::{Arc};

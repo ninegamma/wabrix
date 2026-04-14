@@ -1467,25 +1467,25 @@ mod tests {
 
     #[test]
     fn test_example_simple_toml() {
-        let config = XBricksConfig::from_file("examples/simple.toml");
+        let config = XBricksConfig::from_file("../xbricks/examples/simple.toml");
         assert!(config.is_ok(), "simple.toml should be valid");
     }
 
     #[test]
     fn test_example_mixed_umem_toml() {
-        let config = XBricksConfig::from_file("examples/mixed_umem.toml");
+        let config = XBricksConfig::from_file("../xbricks/examples/mixed_umem.toml");
         assert!(config.is_ok(), "mixed_umem.toml should be valid");
     }
 
     #[test]
     fn test_example_shared_umem_toml() {
-        let config = XBricksConfig::from_file("examples/shared_umem.toml");
+        let config = XBricksConfig::from_file("../xbricks/examples/shared_umem.toml");
         assert!(config.is_ok(), "shared_umem.toml should be valid");
     }
 
     #[test]
     fn test_example_multi_interface_toml() {
-        let config = XBricksConfig::from_file("examples/multi_interface.toml");
+        let config = XBricksConfig::from_file("../xbricks/examples/multi_interface.toml");
         assert!(config.is_ok(), "multi_interface.toml should be valid");
     }
 
@@ -1643,7 +1643,7 @@ mod tests {
 
     #[test]
     fn test_example_pipeline_test_0_toml() {
-        let config = XBricksConfig::from_file("examples/pipeline_test_0.toml");
+        let config = XBricksConfig::from_file("../xbricks/examples/pipeline_test_0.toml");
         assert!(config.is_ok(), "pipeline_test_0.toml should be valid: {:?}", config.err());
 
         let config = config.unwrap();
@@ -1694,7 +1694,7 @@ mod tests {
 
     #[test]
     fn test_example_simple_pipeline_toml() {
-        let config = XBricksConfig::from_file("examples/simple_pipeline.toml");
+        let config = XBricksConfig::from_file("../xbricks/examples/simple_pipeline.toml");
         assert!(config.is_ok(), "simple_pipeline.toml should be valid: {:?}", config.err());
 
         let config = config.unwrap();
@@ -1854,7 +1854,7 @@ mod tests {
 
     #[test]
     fn test_example_mixed_umem_workers_toml() {
-        let config = XBricksConfig::from_file("examples/mixed_umem_workers.toml");
+        let config = XBricksConfig::from_file("../xbricks/examples/mixed_umem_workers.toml");
         assert!(config.is_ok(), "mixed_umem_workers.toml should be valid: {:?}", config.err());
 
         let config = config.unwrap();

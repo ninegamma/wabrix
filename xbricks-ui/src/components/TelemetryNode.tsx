@@ -1,7 +1,7 @@
 import { memo, useEffect, useState } from 'react';
 import { Handle, Position, type NodeProps, type Node } from '@xyflow/react';
 // Import your generated type if you have one, or define it inline:
-import type { InterfaceConfig } from './types/InterfaceConfig';
+import type { InterfaceConfig } from '../types/InterfaceConfig.ts';
 
 // The payload sent by the Rust backend
 export type LiveStats = {
