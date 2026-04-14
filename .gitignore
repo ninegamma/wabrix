@@ -1,0 +1,27 @@
+# --- RUST ---
+# Ignore the compiled Rust binaries and build artifacts
+/target/
+**/*.rs.bk
+
+# --- NODE.JS / VITE (FRONTEND) ---
+# Ignore massive JavaScript dependencies
+node_modules/
+/xbricks-ui/node_modules/
+
+# Ignore compiled Vite frontend assets
+dist/
+/xbricks-ui/dist/
+
+# Ignore JS environment files (in case you add secrets later)
+.env
+.env.local
+.env.*.local
+
+# --- IDEs ---
+# Ignore JetBrains workspace files
+.idea/
+.claude/
+bin/
+
+#ignore tools
+xdp-tools/

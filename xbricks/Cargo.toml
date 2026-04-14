@@ -1,0 +1,41 @@
+[package]
+name = "xbricks"
+license = "MIT OR Apache-2.0"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+
+anyhow = { version = "1", default-features = true }
+env_logger = { version = "0.11", default-features = false }
+env_filter = "0.1"
+log = { version = "0.4.22", default-features = false }
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1.49", features = ["full"] }
+clap = { workspace = true, features = ["derive", "std"] }
+toml = "1.1"
+serde = { version = "1.0", features = ["derive"] }
+separator = "0.4"
+pcap-file = "3.0.0-rc1"
+serde_json = "1.0"
+futures-util = { version = "0.3", features = ["sink"] }
+tower-http = { version = "0.6", features = ["fs"] }
+ts-rs = "12.0"
+arc-swap = "1.9.1"
+xbricks_lib = { path = "../xbricks_lib" }
+xbricks_base = { path = "../xbricks_base" }
+
+[build-dependencies]
+anyhow = { version = "1", default-features = true }
+
+[features]
+performance = []
+profiling = []
+default = ["profiling"]
+# This says: "The wasm feature for xbricks activates the wasm feature for xbricks_lib"
+wasm = ["xbricks_lib/wasm"]
+
+[[bin]]
+name = "xbricks"
+path = "src/main.rs"
+

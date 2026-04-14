@@ -1,0 +1,31 @@
+# Multi-interface configuration example
+# Demonstrates multiple NICs with separate UMEM domains
+#
+# UMEM allocation:
+# - UMEM 0 (enp114s0f0): 16384 total frames / 2 cores = 8192 frames per core (cores 0,1)
+# - UMEM 1 (enp114s0f1): 16384 total frames / 2 cores = 8192 frames per core (cores 2,3)
+
+[xbricks]
+ifaces = [
+    { name = "enp2s0f1np1", rxd = 512, txd = 512 },
+    { name = "enp2s0f0np0", rxd = 1024, txd = 1024 }
+]
+
+umem = [
+    # UMEM 0 for enp114s0f0: 16384 frames shared by 2 cores = 8192 each
+    { id = 0, frame_size = 2048, frame_count = 16384, fq_size = 4096, cq_size = 4096, head_room = 128 },
+    # UMEM 1 for enp114s0f1: 16384 frames shared by 2 cores = 8192 each
+    { id = 1, frame_size = 2048, frame_count = 16384, fq_size = 4096, cq_size = 4096, head_room = 128 }
+]
+
+xsk = [
+    { iface = "enp2s0f1np1", queues = [0, 1], umem = 0, rxq_size = 4096, txq_size = 4096, zerocopy = true },
+    { iface = "enp2s0f0np0", queues = [0, 1], umem = 1, rxq_size = 4096, txq_size = 4096, zerocopy = true }
+]
+
+workers = [
+    { id = 0, core = 0 },
+    { id = 1, core = 1 },
+    { id = 2, core = 2 },
+    { id = 3, core = 3 }
+]

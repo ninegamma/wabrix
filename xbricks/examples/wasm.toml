@@ -1,0 +1,228 @@
+[[xbricks.ifaces]]
+name = "enp2s0f0np0"
+rxd = 8160
+txd = 2048
+irq_core = 8
+
+[[xbricks.ifaces]]
+name = "veth_xbricks"
+rxd = 1024
+txd = 1024
+type = "veth"
+namespace = "ns_xbricks"
+peer = "tap_xbricks"
+mac_if = "enp2s0f0np0"
+ipnet = "192.168.177.222/24"
+
+[[xbricks.umem]]
+id = 0
+frame_size = 2048
+frame_count = 262144
+fq_size = 65536
+cq_size = 16384
+head_room = 128
+partitions = 2
+reserved = 2048
+
+[[xbricks.umem]]
+id = 1
+frame_size = 2048
+frame_count = 4096
+fq_size = 1024
+cq_size = 1024
+head_room = 128
+partitions = 1
+reserved = 0
+
+[[xbricks.xsk]]
+iface = "enp2s0f0np0"
+queues = [0]
+umem = 0
+rxq_size = 32768
+txq_size = 4096
+zerocopy = true
+xdp_mode = "auto"
+
+[[xbricks.xsk]]
+iface = "veth_xbricks"
+queues = [0]
+umem = 1
+rxq_size = 1024
+txq_size = 1024
+zerocopy = false
+xdp_mode = "auto"
+
+[[xbricks.workers]]
+id = 0
+core = 9
+
+[[xbricks.workers.partitions]]
+umem = 0
+count = 2
+
+[[xbricks.workers.partitions]]
+umem = 1
+count = 1
+
+[[pipelines]]
+name = "nic0_in"
+workers = [0]
+
+[[pipelines.nodes]]
+id = "nd_receiver"
+type = "BatchRxNode"
+next = "nd_parser"
+routes = []
+queues = [0]
+umem = []
+
+[pipelines.nodes.args]
+interface = "enp2s0f0np0"
+batch_size = "512"
+
+[[pipelines.nodes]]
+id = "nd_parser"
+type = "FastParserNode"
+next = "nd_wasm_inspector"
+routes = []
+queues = []
+umem = []
+
+[pipelines.nodes.args]
+
+[[pipelines.nodes]]
+id = "nd_wasm_inspector"
+type = "WasmInspectorNode"
+routes = [
+    "nd_port_counter",
+    "nd_veth_sink",
+]
+queues = []
+umem = []
+
+[pipelines.nodes.args]
+umem = "0"
+wasm_file_path = "/home/rainer1956/rust/xbrix/target/wasm32-wasip2/release/filter_plugin.wasm"
+
+[[pipelines.nodes]]
+id = "nd_port_counter"
+type = "DstPortCntNode"
+next = "nd_drop"
+routes = []
+queues = []
+umem = []
+
+[pipelines.nodes.args]
+port_ranges = "0-10,80"
+
+[[pipelines.nodes]]
+id = "nd_veth_sink"
+type = "BatchTxNode"
+routes = []
+queues = [0]
+umem = []
+
+[pipelines.nodes.args]
+interface = "veth_xbricks"
+
+[[pipelines.nodes]]
+id = "nd_drop"
+type = "DropNode"
+routes = []
+queues = []
+umem = []
+
+[pipelines.nodes.args]
+
+[[pipelines]]
+name = "veth_out"
+workers = [0]
+
+[[pipelines.nodes]]
+id = "nd_veth_source"
+type = "BatchRxNode"
+next = "nd_transmitter"
+routes = []
+queues = [0]
+umem = []
+
+[pipelines.nodes.args]
+interface = "veth_xbricks"
+
+[[pipelines.nodes]]
+id = "nd_transmitter"
+type = "BatchTxNode"
+routes = []
+queues = [0]
+umem = []
+
+[pipelines.nodes.args]
+interface = "enp2s0f0np0"
+
+[layout.telemetry_enp2s0f0np0]
+x = -477.2597
+y = 99.43844
+
+[layout.nd_drop]
+x = 696.5377
+y = 603.6632
+
+[layout.xsk_1]
+x = 436.70557
+y = 340.33636
+
+[layout.nd_port_counter]
+x = 446.53772
+y = 603.6632
+
+[layout.nd_wasm_inspector]
+x = 196.53772
+y = 678.6632
+
+[layout.nd_transmitter]
+x = -54.40471
+y = 827.72076
+
+[layout.umem_1]
+x = 294.9635
+y = 31.100178
+
+[layout.nd_veth_source]
+x = -303.46228
+y = 828.6632
+
+[layout.worker_0]
+x = 147.02014
+y = 337.48828
+
+[layout.nd_veth_sink]
+x = 446.53772
+y = 753.6632
+
+[layout.iface_veth_xbricks]
+x = 512.3637
+y = 31.100178
+
+[layout.nd_parser]
+x = -53.462276
+y = 678.6632
+
+[layout.umem_0]
+x = 30.46025
+y = 31.100178
+
+[layout.nd_receiver]
+x = -303.46228
+y = 678.6632
+
+[layout.xsk_0]
+x = -161.19035
+y = 294.54837
+
+[layout.iface_enp2s0f0np0]
+x = -205.53893
+y = 99.901024
+
+[layout.telemetry_veth_xbricks]
+x = 659.5784
+y = 263.2055

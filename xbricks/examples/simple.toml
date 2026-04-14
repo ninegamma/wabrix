@@ -1,0 +1,26 @@
+# Simple configuration example with single interface and single UMEM
+# This is the simplest possible configuration for testing
+#
+# UMEM frame_count: Total frames in UMEM (divided equally among cores)
+# - 2 cores share UMEM 0
+# - frame_count = 16384 total frames
+# - Each core gets: 16384 / 2 = 8192 frames
+
+[xbricks]
+ifaces = [
+    { name = "enp2s0f1np1", rxd = 4096, txd = 4096 }
+]
+
+umem = [
+    # Total frames = 16384, divided among 2 cores = 8192 frames per core
+    { id = 0, frame_size = 2048, frame_count = 16384, fq_size = 4096, cq_size = 4096, head_room = 128 }
+]
+
+xsk = [
+    { iface = "enp2s0f1np1", queues = [0, 1], umem = 0, rxq_size = 4096, txq_size = 4096, zerocopy = true }
+]
+
+workers = [
+    { id = 0, core = 0 },
+    { id = 1, core = 1 }
+]
