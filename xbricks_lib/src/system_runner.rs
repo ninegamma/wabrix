@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 use xbricks_base::frame_registry::FrameRegistry;
 use crate::{PipelineStats, XSocketRegistry};
 use xbricks_base::system::PlatformData;
-use crate::telemetry_logger::TelemetryRegistry;
+use crate::telemetry::TelemetryRegistry;
 
 #[derive(Default)]
 pub struct XBricksSystem {

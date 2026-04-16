@@ -2,46 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use log::info;
-
-/// Represents a single telemetry node's metrics
-#[derive(Clone)]
-pub struct TelemetryMetrics {
-    pub node_id: String,
-    pub labels: Vec<String>,
-    pub counters_pkts: Vec<Arc<AtomicU64>>,
-    pub counters_bytes: Vec<Arc<AtomicU64>>,
-}
-
-/// Registry to hold references to all telemetry nodes
-#[derive(Clone, Default)]
-pub struct TelemetryRegistry {
-    metrics: Vec<TelemetryMetrics>,
-}
-
-impl TelemetryRegistry {
-    pub fn new() -> Self {
-        Self { metrics: Vec::new() }
-    }
-
-    pub fn register(
-        &mut self,
-        node_id: String,
-        labels: Vec<String>,
-        counters_pkts: Vec<Arc<AtomicU64>>,
-        counters_bytes: Vec<Arc<AtomicU64>>,
-    ) {
-        self.metrics.push(TelemetryMetrics {
-            node_id,
-            labels,
-            counters_pkts,
-            counters_bytes,
-        });
-    }
-
-    pub fn get_metrics(&self) -> &[TelemetryMetrics] {
-        &self.metrics
-    }
-}
+use crate::telemetry::TelemetryRegistry;
 
 /// TelemetryLogger periodically reads and prints telemetry data
 pub struct TelemetryLogger {

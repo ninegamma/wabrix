@@ -11,13 +11,13 @@ pub(crate) use crate::nodes::{
 };
 pub(crate) use crate::{BatchRx, BatchTx, MAX_BATCH_SIZE};
 use xbricks_base::system::PlatformData;
-use crate::telemetry_logger::TelemetryRegistry;
 use separator::Separatable;
 use xbricks_base::frame_registry::{set_tsc_frequency, set_worker_frame_registry};
 use xbricks_base::{Directive, Node, NodeId};
 use crate::config::hot_config::{HotNodeData, HotPipelineConfig};
 #[cfg(feature = "wasm")]
 use xbricks_wasm::wasm_manager::WasmManager;
+use crate::telemetry::TelemetryRegistry;
 
 type ClassifierFn = Box<dyn Fn(&Pdu) -> usize + Send>;
 

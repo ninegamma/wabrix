@@ -14,7 +14,7 @@ use tokio::sync::{mpsc, RwLock};
 use xbricks_lib::config::hot_config::SharedSystemState;
 use logger::WsLogger;
 use xbricks_lib::probe_kernel_fds;
-use xbricks_lib::telemetry::{spawn_nic_telemetry, LiveStats};
+use xbricks_lib::telemetry::{spawn_nic_telemetry, TMLiveStats};
 use xbricks_base::system::PlatformData;
 use crate::api::{spawn_management_api, AppState, SystemCommand};
 
@@ -32,7 +32,7 @@ struct Opt {
 async fn main() -> anyhow::Result<()> {
     // 1. Create the broadcast channel FIRST
     let (console_tx, _rx) = tokio::sync::broadcast::channel::<String>(1000);
-    let (telemetry_tx, _) = tokio::sync::broadcast::channel::<LiveStats>(100);
+    let (telemetry_tx, _) = tokio::sync::broadcast::channel::<TMLiveStats>(100);
 
     // 2. Hijack the global `log` crate and attach it to our channel
     let logger = WsLogger::new(console_tx.clone());

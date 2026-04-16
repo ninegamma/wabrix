@@ -16,6 +16,7 @@ use xbricks_base::system::PlatformData;
 #[cfg(feature = "wasm")]
 use xbricks_wasm::wasm_manager::WasmManager;
 use crate::system_runner::XBricksSystem;
+use crate::telemetry::TelemetryRegistry;
 use crate::toml_parser::{PartitionRequest, WorkerBuilderConfig};
 use crate::xscrubber_skel::XscrubberSkel;
 
@@ -325,7 +326,7 @@ impl SystemBuilder {
         // Create socket registry for pipeline construction
         xbricks_system.xsocket_registry = crate::system_builder::XSocketRegistry::new(xsockets);
         // Create telemetry registry
-        let mut telemetry_registry = crate::telemetry_logger::TelemetryRegistry::new();
+        let mut telemetry_registry = TelemetryRegistry::new();
         // Create dst port stats registry
         let mut dst_port_stats_registry: Vec<std::sync::Arc<crate::nodes::DstPortStats>> = Vec::new();
 

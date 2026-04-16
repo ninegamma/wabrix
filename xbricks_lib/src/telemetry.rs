@@ -1,21 +1,63 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use log::debug;
 use serde::{Serialize, Deserialize};
 use tokio::sync::broadcast::Sender;
 use ts_rs::TS;
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
-#[ts(export_to = "LiveStats.ts")]
-pub struct LiveStats {
-    pub iface: String,
-    pub direction: String, // "RX" or "TX"
+#[ts(export_to = "TMLiveStats.ts")]
+pub struct TMLiveStats {
+    pub tmstats_name: String,
+    pub labels: Vec<String>,
+    pub counters_pkts: Vec<u64>,
+    pub counters_bytes: Vec<u64>,
     pub is_active_run: bool,
-    pub live_pkts: u64,
-    pub sw_drops: u64,
-    pub hw_drops: u64,
 }
 
-pub fn spawn_nic_telemetry(telemetry_tx: Sender<LiveStats>, iface_name: String, shutdown_signal: Arc<AtomicBool>)-> anyhow::Result<()> {
+
+/// Represents a single telemetry node's metrics
+#[derive(Clone)]
+pub struct TelemetryMetrics {
+    pub node_id: String,
+    pub labels: Vec<String>,
+    pub counters_pkts: Vec<Arc<AtomicU64>>,
+    pub counters_bytes: Vec<Arc<AtomicU64>>,
+}
+
+/// Registry to hold references to all telemetry nodes
+#[derive(Clone, Default)]
+pub struct TelemetryRegistry {
+    metrics: Vec<TelemetryMetrics>,
+}
+
+impl TelemetryRegistry {
+    pub fn new() -> Self {
+        Self { metrics: Vec::new() }
+    }
+
+    pub fn register(
+        &mut self,
+        node_id: String,
+        labels: Vec<String>,
+        counters_pkts: Vec<Arc<AtomicU64>>,
+        counters_bytes: Vec<Arc<AtomicU64>>,
+    ) {
+        self.metrics.push(TelemetryMetrics {
+            node_id,
+            labels,
+            counters_pkts,
+            counters_bytes,
+        });
+    }
+
+    pub fn get_metrics(&self) -> &[TelemetryMetrics] {
+        &self.metrics
+    }
+}
+
+
+pub fn spawn_nic_telemetry(telemetry_tx: Sender<TMLiveStats>, iface_name: String, shutdown_signal: Arc<AtomicBool>)-> anyhow::Result<()> {
     tokio::spawn(async move {
         // Persistent tracking variables (Absolute counters from ethtool)
         let mut prev_pkts = 0u64;
@@ -117,23 +159,38 @@ pub fn spawn_nic_telemetry(telemetry_tx: Sender<LiveStats>, iface_name: String, 
                 // We send updates if we are actively receiving, OR if we just finished a burst
                 // so the UI can lock in the final static number.
                 if in_run || idle_ticks <= 50 {
-                    let stats = LiveStats {
-                        iface: iface_name.clone(),
-                        direction: "RX".to_string(),
+                    let stats = TMLiveStats {
+                        tmstats_name: iface_name.clone(),
+                        labels: vec!["rx_uc_pkts".to_string(), "sw_drops".to_string(), "hw_drops".to_string()],
+                        counters_pkts: vec![run_pkts, run_sw_drops, run_hw_drops],
+                        counters_bytes: vec![],
                         is_active_run: in_run,
-                        live_pkts: run_pkts,
-                        sw_drops: run_sw_drops,
-                        hw_drops: run_hw_drops,
                     };
-
                     // Ignore errors (this just means no browsers are currently connected to the WebSocket)
                     let _ = telemetry_tx.send(stats);
                 }
             }
 
-            // Sleep for 10ms (matching your 0.01s Bash sleep)
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         }
     });
     Ok(())
+}
+
+mod tests {
+    use std::path::PathBuf;
+    use ts_rs::Config;
+    use super::*;
+
+    #[test]
+    fn check_env() {
+        println!("Exporting to: {:?}", std::env::var("TS_RS_EXPORT_DIR"));
+    }
+
+    #[test]
+    fn export_bindings() {
+        let config = Config::default().with_out_dir(PathBuf::from("../xbricks-ui/src/types/"));
+        // Force the base path to your UI folder
+        TMLiveStats::export_all(&config).expect("could not export type");
+    }
 }

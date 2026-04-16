@@ -546,7 +546,6 @@ pub struct BucketedTelemetryNode {
 use rand::{TryRng};
 use rand::rngs::SmallRng;
 use core::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
-use core::fmt::Display;
 use std::mem::MaybeUninit;
 use separator::Separatable;
 use xbricks_base::frame_registry::get_worker_frame_registry;
@@ -774,53 +773,7 @@ impl Node for DstPortCntNode {
 
         Directive::Next(self.next_node.clone())
     }
-    /*
-        fn process(&mut self, batch: &mut Batch) -> Directive {
-            #[cfg(feature = "profiling")]
-            let start_cycles = unsafe { _rdtsc() };
-
-            if batch.len() == 0 {
-                return Directive::Stop;
-            }
-
-            for pdu in batch.iter() {
-                //log::trace!("Processing {}", pdu);
-
-                // Check if packet has TCP or UDP headers and extract destination port
-                let dst_port = if pdu.is_tcp() {
-                    // Find TCP header and get destination port
-                    (0..pdu.headers().count())
-                        .find(|&i| pdu.headers().get(i).kind() == crate::headers::HeaderKind::Tcp)
-                        .map(|i| pdu.headers().tcp(i).dst_port())
-                } else if pdu.is_udp() {
-                    // Find UDP header and get destination port
-                    (0..pdu.headers().count())
-                        .find(|&i| pdu.headers().get(i).kind() == crate::headers::HeaderKind::Udp)
-                        .map(|i| pdu.headers().udp(i).dst_port())
-                } else {
-                    None
-                };
-
-                if let Some(port) = dst_port {
-                    if let Some(counter) = self.port_counters.get(&port) {
-                        counter.fetch_add(1, Ordering::Relaxed);
-                    } else {
-                        self.other_counter.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-            }
-
-            self.processed_packets += batch.len();
-
-            #[cfg(feature = "profiling")]
-            {
-                let end_cycles = unsafe { _rdtsc() };
-                self.total_cycles += end_cycles - start_cycles;
-            }
-
-            Directive::Next(self.next_node.clone())
-        }
-    */
+    
     #[inline]
     fn processed_packets(&self) -> usize {
         self.processed_packets

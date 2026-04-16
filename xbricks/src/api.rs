@@ -38,7 +38,7 @@ pub struct AppState {
     pub cmd_tx: tokio::sync::mpsc::Sender<SystemCommand>,
     /// Path to the active .toml configuration file (mutable so saves can redirect)
     pub config_path: Arc<tokio::sync::RwLock<String>>,
-    pub telemetry_tx: tokio::sync::broadcast::Sender<LiveStats>,
+    pub telemetry_tx: tokio::sync::broadcast::Sender<TMLiveStats>,
 }
 
 #[derive(Deserialize)]
@@ -118,7 +118,7 @@ use tokio::task::JoinHandle;
 use tower_http::services::ServeDir;
 use xbricks_base::NodeId;
 use xbricks_lib::config::hot_config::SharedSystemState;
-use xbricks_lib::telemetry::LiveStats;
+use xbricks_lib::telemetry::{TMLiveStats};
 
 // Update the signature to return the shutdown sender AND the task handle
 pub(crate) fn spawn_management_api(state: AppState) -> (oneshot::Sender<()>, JoinHandle<()>) {

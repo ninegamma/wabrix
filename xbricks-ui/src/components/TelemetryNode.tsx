@@ -2,23 +2,14 @@ import { memo, useEffect, useState } from 'react';
 import { Handle, Position, type NodeProps, type Node } from '@xyflow/react';
 // Import your generated type if you have one, or define it inline:
 import type { InterfaceConfig } from '../types/InterfaceConfig.ts';
-
-// The payload sent by the Rust backend
-export type LiveStats = {
-    iface: string;
-    direction: string;
-    is_active_run: boolean;
-    live_pkts: number;
-    sw_drops: number;
-    hw_drops: number;
-};
+import type { TMLiveStats } from '../types/TMLiveStats.ts';
 
 // We extend the Node type to accept InterfaceConfig data
 export type TelemetryNodeType = Node<InterfaceConfig, 'telemetry'>;
 
 // Use React.memo so the node doesn't re-render unless its specific stats change
 export const TelemetryNode = memo(({ data }: NodeProps<TelemetryNodeType>) => {
-    const [stats, setStats] = useState<LiveStats | null>(null);
+    const [stats, setStats] = useState<TMLiveStats | null>(null);
     const [isConnected, setIsConnected] = useState(false);
 
     useEffect(() => {
@@ -32,11 +23,10 @@ export const TelemetryNode = memo(({ data }: NodeProps<TelemetryNodeType>) => {
 
         socket.onmessage = (event) => {
             try {
-                const incomingStats: LiveStats = JSON.parse(event.data);
-
+                const incomingStats: TMLiveStats = JSON.parse(event.data);
                 // CRITICAL: Only update state if this telemetry message belongs to THIS specific node.
                 // We assume data.name holds the interface name (e.g., 'enp2s0f0np0')
-                if (incomingStats.iface === data.name) {
+                if (incomingStats.tmstats_name === data.name) {
                     setStats(incomingStats);
                 }
             } catch (err) {
@@ -87,18 +77,18 @@ export const TelemetryNode = memo(({ data }: NodeProps<TelemetryNodeType>) => {
             {/* Live Telemetry Area */}
             {stats ? (
                 <div style={{ background: '#0f172a', padding: '8px', borderRadius: '4px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-                        <span style={{ color: '#cbd5e1' }}>Packets:</span>
-                        <strong style={{ color: '#10b981' }}>{stats.live_pkts.toLocaleString()}</strong>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-                        <span style={{ color: '#cbd5e1' }}>SW Drops:</span>
-                        <strong style={{ color: stats.sw_drops > 0 ? '#ef4444' : '#94a3b8' }}>{stats.sw_drops.toLocaleString()}</strong>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                        <span style={{ color: '#cbd5e1' }}>HW Drops:</span>
-                        <strong style={{ color: stats.hw_drops > 0 ? '#ef4444' : '#94a3b8' }}>{stats.hw_drops.toLocaleString()}</strong>
-                    </div>
+                    {stats.labels.map((label, i) => {
+                        const value = stats.counters_pkts[i] ?? 0n;
+                        const isDrops = label.includes('drop');
+                        return (
+                            <div key={label} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: i < stats.labels.length - 1 ? '4px' : '0' }}>
+                                <span style={{ color: '#cbd5e1' }}>{label}:</span>
+                                <strong style={{ color: isDrops && value > 0n ? '#ef4444' : isDrops ? '#94a3b8' : '#10b981' }}>
+                                    {value.toLocaleString()}
+                                </strong>
+                            </div>
+                        );
+                    })}
                 </div>
             ) : (
                 <div style={{ fontSize: '11px', color: '#64748b', textAlign: 'center', padding: '10px 0' }}>
