@@ -16,7 +16,7 @@ use xbricks_base::system::PlatformData;
 #[cfg(feature = "wasm")]
 use xbricks_wasm::wasm_manager::WasmManager;
 use crate::system_runner::XBricksSystem;
-use crate::telemetry::TelemetryRegistry;
+use xbricks_base::telemetry::TelemetryRegistry;
 use crate::toml_parser::{PartitionRequest, WorkerBuilderConfig};
 use crate::xscrubber_skel::XscrubberSkel;
 

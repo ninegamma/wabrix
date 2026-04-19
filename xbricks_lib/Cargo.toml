@@ -51,7 +51,7 @@ performance = []
 profiling = []
 # Create a 'wasm' feature that enables the dependency
 wasm = ["dep:xbricks_wasm"]
-default = ["profiling"]
+default = ["profiling", "wasm"]
 
 [lib]
 name = "xbricks_lib"

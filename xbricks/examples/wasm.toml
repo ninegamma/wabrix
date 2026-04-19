@@ -97,6 +97,19 @@ routes = [
     "nd_port_counter",
     "nd_veth_sink",
 ]
+labels = [
+    "d-port 0",
+    "d-port 1",
+    "d-port 2",
+    "d-port 3",
+    "d-port 4",
+    "d-port 5",
+    "d-port 6",
+    "d-port 7",
+    "d-port 8",
+    "d-port 9",
+    "d-port other",
+]
 queues = []
 umem = []
 
@@ -159,9 +172,6 @@ umem = []
 [pipelines.nodes.args]
 interface = "enp2s0f0np0"
 
-[layout.telemetry_enp2s0f0np0]
-x = -477.2597
-y = 99.43844
 
 [layout.nd_drop]
 x = 696.5377
@@ -223,6 +233,3 @@ y = 294.54837
 x = -205.53893
 y = 99.901024
 
-[layout.telemetry_veth_xbricks]
-x = 659.5784
-y = 263.2055

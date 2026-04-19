@@ -6,12 +6,10 @@ import axios from 'axios';
 import dagre from 'dagre';
 import { IfaceNode, UmemNode, XskNode, WorkerNode, PipelineNode } from './components/CustomNodes.tsx';
 import { TerminalWindow } from './TerminalWindow';
-import { TelemetryNode } from './components/TelemetryNode.tsx';
 import {FileBrowserDialog} from "./components/FileBrowserDialog.tsx";
 
 const nodeTypes = {
     iface: IfaceNode,
-    telemetry: TelemetryNode,
     umem: UmemNode,
     xsk: XskNode,
     worker: WorkerNode,
@@ -294,19 +292,6 @@ export default function App() {
                         data: isPipeline ? { ...n.data, type: n.type } : n.data,
                     });
 
-                    // 2. If the node we just pushed was an Interface, inject a companion Telemetry node!
-                    if (n.type === 'iface') {
-                        initialNodes.push({
-                            id: `telemetry_${n.data.name}`,
-                            type: 'telemetry',
-                            // If we have a saved layout, put it exactly where the user saved it.
-                            // If not, offset it slightly below the Interface node so they don't overlap.
-                            position: hasSavedLayout
-                                ? (response.data.layout?.[`telemetry_${n.data.name}`] ?? { x: n.position?.x || 0, y: (n.position?.y || 0) + 200 })
-                                : { x: 0, y: 0 },
-                            data: n.data, // Pass the exact same interface config data so it knows what to monitor
-                        });
-                    }
                 });
 
                 // Build edges from backend + derive from pipeline node routes

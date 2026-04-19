@@ -4049,7 +4049,9 @@ dependencies = [
  "log",
  "macaddr",
  "separator",
+ "serde",
  "tokio",
+ "ts-rs",
  "xbricks_protocol",
  "xsk-rs",
 ]
@@ -4101,12 +4103,14 @@ name = "xbricks_wasm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "crossbeam-channel",
  "dashmap",
  "log",
  "wasmtime",
  "wasmtime-component-macro",
  "wasmtime-wasi",
  "xbricks_base",
+ "xbricks_protocol",
  "xsk-rs",
 ]
 

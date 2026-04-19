@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use log::info;
-use crate::telemetry::TelemetryRegistry;
+use xbricks_base::telemetry::TelemetryRegistry;
 
 /// TelemetryLogger periodically reads and prints telemetry data
 pub struct TelemetryLogger {

@@ -118,7 +118,7 @@ use tokio::task::JoinHandle;
 use tower_http::services::ServeDir;
 use xbricks_base::NodeId;
 use xbricks_lib::config::hot_config::SharedSystemState;
-use xbricks_lib::telemetry::{TMLiveStats};
+use xbricks_base::telemetry::{TMLiveStats};
 
 // Update the signature to return the shutdown sender AND the task handle
 pub(crate) fn spawn_management_api(state: AppState) -> (oneshot::Sender<()>, JoinHandle<()>) {

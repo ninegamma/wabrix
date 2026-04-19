@@ -7,14 +7,14 @@ use tokio::task::JoinHandle;
 use xbricks_base::frame_registry::FrameRegistry;
 use crate::{PipelineStats, XSocketRegistry};
 use xbricks_base::system::PlatformData;
-use crate::telemetry::TelemetryRegistry;
+use xbricks_base::telemetry::TelemetryRegistry;
 
 #[derive(Default)]
 pub struct XBricksSystem {
     pub(crate) xsocket_registry: XSocketRegistry,
     /// Map: worker_id -> FrameRegistry
     pub(crate) frame_registries: HashMap<usize, FrameRegistry>,
-    pub(crate) telemetry_registry: Arc<TelemetryRegistry>,
+    pub telemetry_registry: Arc<TelemetryRegistry>,
     /// Group pipelines by worker
     /// Map: worker_id -> (CoreId, Vec<PipelineRunner>)
     /// worker_idx is used by each node to look up its specific queue_id from its queues array

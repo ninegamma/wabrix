@@ -1,3 +1,4 @@
+import { useState, useEffect, useCallback, useRef, memo } from 'react';
 import { Handle, Position, type NodeProps, type Node } from '@xyflow/react';
 // ==========================================
 // 1. IMPORT GENERATED TYPES
@@ -10,6 +11,7 @@ import type { UmemConfig } from '../types/UmemConfig';
 import type { NodeConfig } from '../types/NodeConfig';
 import type { XskMapping } from '../types/XskMapping';
 import type { WorkerConfig } from '../types/WorkerConfig';
+import type { TMLiveStats } from '../types/TMLiveStats';
 
 
 // ==========================================
@@ -24,20 +26,179 @@ export type XskNodeType = Node<XskMapping, 'xsk'>;
 export type WorkerNodeType = Node<WorkerConfig, 'worker'>;
 export type PipelineNodeType = Node<PipelineNodeData, 'pipeline'>;
 
-export function IfaceNode({ data }: NodeProps<IfaceNodeType>) {
+// ==========================================
+// 1. THE FLOATING TELEMETRY POPOVER
+// ==========================================
+const TelemetryPopover = ({ ifaceName, onClose }: { ifaceName: string, onClose: () => void }) => {
+    const [stats, setStats] = useState<TMLiveStats | null>(null);
+    // Pixel offset from initial anchor point — lets the popover be dragged independently
+    const [offset, setOffset] = useState({ x: 0, y: 0 });
+    const dragOrigin = useRef<{ mx: number; my: number; ox: number; oy: number } | null>(null);
+
+    useEffect(() => {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/api/ws/telemetry`;
+        const socket = new WebSocket(wsUrl);
+
+        socket.onmessage = (event) => {
+            try {
+                const incomingStats: TMLiveStats = JSON.parse(event.data);
+                if (incomingStats.tmstats_name === ifaceName) {
+                    setStats(incomingStats);
+                }
+            } catch (err) {
+                console.error("Telemetry parse error", err);
+            }
+        };
+
+        return () => {
+            if (socket.readyState === WebSocket.OPEN) {
+                socket.close();
+            }
+        };
+    }, [ifaceName]);
+
+    // Drag the popover without moving the parent node
+    const onHeaderMouseDown = (e: React.MouseEvent) => {
+        e.stopPropagation(); // prevent React Flow node drag
+        dragOrigin.current = { mx: e.clientX, my: e.clientY, ox: offset.x, oy: offset.y };
+
+        const onMove = (ev: MouseEvent) => {
+            if (!dragOrigin.current) return;
+            setOffset({
+                x: dragOrigin.current.ox + (ev.clientX - dragOrigin.current.mx),
+                y: dragOrigin.current.oy + (ev.clientY - dragOrigin.current.my),
+            });
+        };
+        const onUp = () => {
+            dragOrigin.current = null;
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup', onUp);
+        };
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+    };
+
+    const isActive = stats?.is_active_run;
+
+    return (
+        // nodrag tells React Flow not to initiate a node drag when clicking inside here
+        <div className="nodrag" style={{
+            position: 'absolute',
+            top: `calc(-110px + ${offset.y}px)`,
+            left: `calc(50% + ${offset.x}px)`,
+            transform: 'translateX(-50%)',
+            background: isActive ? '#064e3b' : '#0f172a',
+            border: `1px solid ${isActive ? '#10b981' : '#3b82f6'}`,
+            borderRadius: '8px',
+            padding: '10px',
+            width: '180px',
+            color: '#f8fafc',
+            boxShadow: '0 10px 25px rgba(0,0,0,0.5)',
+            zIndex: 1000,
+            userSelect: 'none',
+        }}>
+            {/* Drag handle + header */}
+            <div
+                onMouseDown={onHeaderMouseDown}
+                style={{
+                    display: 'flex', justifyContent: 'space-between',
+                    marginBottom: '8px', borderBottom: '1px solid #333', paddingBottom: '4px',
+                    cursor: 'grab',
+                }}
+            >
+                <span style={{ fontSize: '10px', color: isActive ? '#10b981' : '#cbd5e1' }}>
+                    {isActive ? '🚀 LIVE TRAFFIC' : '⏳ IDLE'}
+                </span>
+                <button
+                    onMouseDown={e => e.stopPropagation()} // don't start a drag when clicking ✖
+                    onClick={onClose}
+                    style={{ background: 'transparent', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: '12px' }}
+                >
+                    ✖
+                </button>
+            </div>
+
+            {/* Stats — driven by the labels/counters_pkts arrays from TMLiveStats */}
+            {stats ? (
+                <div style={{ fontSize: '12px' }}>
+                    {stats.labels.map((label, i) => {
+                        const val = Number(stats.counters_pkts[i] ?? 0);
+                        const isDropCounter = label.includes('drop');
+                        return (
+                            <div key={label} style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                <span>{label}:</span>
+                                <strong style={{ color: isDropCounter && val > 0 ? '#ef4444' : isDropCounter ? '#94a3b8' : '#10b981' }}>
+                                    {val.toLocaleString()}
+                                </strong>
+                            </div>
+                        );
+                    })}
+                </div>
+            ) : (
+                <div style={{ fontSize: '11px', color: '#64748b', textAlign: 'center' }}>
+                    Waiting for data...
+                </div>
+            )}
+        </div>
+    );
+};
+
+// 2. THE MAIN INTERFACE NODE
+// ==========================================
+export const IfaceNode = memo(({ data }: NodeProps<IfaceNodeType>) => {
+    // State to track if the telemetry pop-up is open
+    const [showTelemetry, setShowTelemetry] = useState(false);
+
     return (
         <div style={{
-            background: '#1e293b', border: '2px solid #3b82f6', borderRadius: '8px',
-            padding: '12px', minWidth: '180px', color: '#f8fafc', fontFamily: 'monospace',
+            position: 'relative', // CRITICAL: So the absolute popover anchors to this node!
+            background: '#1e293b',
+            border: '2px solid #3b82f6',
+            borderRadius: '8px',
+            padding: '12px',
+            minWidth: '180px',
+            color: '#f8fafc',
+            fontFamily: 'monospace',
             boxShadow: '0 4px 6px rgba(0,0,0,0.3)'
         }}>
+
+            {/* --- THE INTERACTIVE DOT --- */}
+            <div
+                onClick={() => setShowTelemetry(!showTelemetry)}
+                style={{
+                    position: 'absolute',
+                    top: '-6px',
+                    right: '-6px',
+                    width: '14px',
+                    height: '14px',
+                    background: showTelemetry ? '#10b981' : '#3b82f6',
+                    border: '2px solid #0f172a',
+                    borderRadius: '50%',
+                    cursor: 'pointer',
+                    boxShadow: showTelemetry ? '0 0 8px #10b981' : 'none',
+                    transition: 'all 0.2s',
+                    zIndex: 10
+                }}
+                title="Toggle Live Telemetry"
+            />
+
+            {/* --- THE POPOVER (Only renders if true) --- */}
+            {showTelemetry && (
+                <TelemetryPopover
+                    ifaceName={data.name}
+                    onClose={() => setShowTelemetry(false)}
+                />
+            )}
+
+            {/* --- STANDARD NODE CONTENT --- */}
             <div style={{ borderBottom: '1px solid #475569', paddingBottom: '8px', marginBottom: '8px' }}>
                 <strong style={{ fontSize: '14px', color: '#60a5fa' }}>🌐 IFACE: {data.name}</strong>
             </div>
 
             <div style={{ fontSize: '11px', lineHeight: '1.6', color: '#cbd5e1' }}>
                 {Object.entries(data)
-                    .filter(([_, value]) => value !== null && value !== undefined) // <-- This hides the nulls!
+                    .filter(([_, value]) => value !== null && value !== undefined && typeof value !== 'object')
                     .map(([key, value]) => (
                         <div key={key}>
                             <strong style={{ color: '#94a3b8' }}>{key}:</strong> {String(value)}
@@ -47,11 +208,9 @@ export function IfaceNode({ data }: NodeProps<IfaceNodeType>) {
 
             <Handle type="target" position={Position.Left} style={{ background: '#3b82f6' }} />
             <Handle type="source" position={Position.Right} style={{ background: '#3b82f6' }} />
-            <Handle id="bottom" type="source" position={Position.Bottom} style={{ background: '#3b82f6', width: 12, height: 3, borderRadius: 1 }} />
         </div>
     );
-}
-
+});
 // ==========================================
 // 3. THE DYNAMIC UMEM NODE
 // ==========================================
@@ -163,6 +322,9 @@ function pipelineColor(name: string | undefined) {
 }
 
 export function PipelineNode({ data }: NodeProps<PipelineNodeType>) {
+    const [showTelemetry, setShowTelemetry] = useState(false);
+    const closeTelemetry = useCallback(() => setShowTelemetry(false), []);
+
     const label = data.id;
     const colors = pipelineColor(data.pipeline_name);
     const routes: string[] = Array.isArray(data.routes) ? data.routes : [];
@@ -191,6 +353,30 @@ export function PipelineNode({ data }: NodeProps<PipelineNodeType>) {
             padding: '12px', minWidth: '180px', color: '#f8fafc', fontFamily: 'monospace',
             boxShadow: '0 4px 6px rgba(0,0,0,0.3)', position: 'relative',
         }}>
+            {/* Telemetry toggle dot */}
+            <div
+                onClick={() => setShowTelemetry(!showTelemetry)}
+                style={{
+                    position: 'absolute',
+                    top: '-6px',
+                    right: '-6px',
+                    width: '14px',
+                    height: '14px',
+                    background: showTelemetry ? '#10b981' : colors.border,
+                    border: '2px solid #0f172a',
+                    borderRadius: '50%',
+                    cursor: 'pointer',
+                    boxShadow: showTelemetry ? '0 0 8px #10b981' : 'none',
+                    transition: 'all 0.2s',
+                    zIndex: 10,
+                }}
+                title="Toggle Live Telemetry"
+            />
+
+            {showTelemetry && (
+                <TelemetryPopover ifaceName={data.id} onClose={closeTelemetry} />
+            )}
+
             <Handle type="target" position={Position.Left} style={{ background: colors.handle }} />
 
             <div style={{ borderBottom: `1px solid ${colors.divider}`, paddingBottom: '8px', marginBottom: '8px' }}>

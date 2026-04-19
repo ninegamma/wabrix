@@ -1,11 +1,14 @@
+use std::sync::atomic::Ordering;
 use crate::wasm_manager::{MyHostState, WasmManager}; // Assuming WasmManager is defined here
-
 use wasmtime::Store;
 use wasmtime::component::{bindgen, ResourceTable};
 use wasmtime_wasi::WasiCtxBuilder;
 use xbricks_base::{Directive, Node, NodeId};
 use xbricks_base::interface::batch::Batch;
 use xbricks_base::interface::Pdu;
+use xbricks_base::telemetry::TelemetryMetrics;
+use crossbeam_channel::Sender;
+use xbricks_protocol::TELEMETRY_FLAG;
 
 // 1. Generate bindings.
 // Note: `async: true` is required to use `instantiate_async` and `call_async`
@@ -21,21 +24,25 @@ pub struct WasmInspectorNode {
     store: Store<MyHostState>,
     // The generated bindings struct (named after the 'world' in CamelCase)
     bindings: FilterPlugin,
-    // Add reusable buffers for the fast path
-    fast_path_route: NodeId,
-    exception_route: NodeId,
+    // FLEXIBILITY UPGRADE: A dynamic routing table instead of hardcoded branches
+    // Index corresponds to the Route ID returned by Wasm
+    routing_table: Vec<NodeId>,
+    // Telemetry dispatch channel
+    telemetry_tx: Option<Sender<u32>>,
     processed_packets: usize,
     #[cfg(feature = "profiling")]
     total_cycles: u64,
+    telemetry_metrics: TelemetryMetrics,
 }
 
 impl WasmInspectorNode {
     pub fn new(
         id: NodeId,
-        manager: &WasmManager, // Pass the shared WasmManager instead of Arc<Engine>
+        manager: &WasmManager,
         wasm_file_path: &str,
-        fast_path_route: NodeId,
-        exception_route: NodeId,
+        routing_table: Vec<NodeId>, // Accept any number of routes
+        telemetry_tx: Option<Sender<u32>>,
+        telemetry_metrics: TelemetryMetrics,
     ) -> Self {
         // 1. Fetch the Component from the Manager's DashMap cache
         // This takes nanoseconds if already loaded, avoiding disk I/O.
@@ -65,11 +72,12 @@ impl WasmInspectorNode {
             id,
             store,
             bindings,
-            fast_path_route,
-            exception_route,
+            routing_table,
+            telemetry_tx,
             processed_packets: 0,
             #[cfg(feature = "profiling")]
             total_cycles: 0,
+            telemetry_metrics,
         }
     }
 }
@@ -87,7 +95,6 @@ impl Node for WasmInspectorNode {
         if len == 0 {
             return Directive::Stop;
         }
-
         self.processed_packets += len;
 
         // ==========================================================
@@ -95,7 +102,7 @@ impl Node for WasmInspectorNode {
         // ==========================================================
 
         // Calculate the exact byte size of the populated packets
-        let active_bytes = len * std::mem::size_of::<Pdu>();
+        let active_bytes = len * size_of::<Pdu>();
 
         // View the Host Batch as a raw byte slice
         let batch_bytes: &[u8] = unsafe {
@@ -106,56 +113,75 @@ impl Node for WasmInspectorNode {
         };
 
         // Call the Component Model plugin
-        let returned_bytes = self
+        let action_vector = self
             .bindings
             .xbricks_router_inspector()
             .call_inspect_batch(&mut self.store, batch_bytes).unwrap_or_else(|e| {
             log::error!("Wasm execution failed: {}", e);
             // If Wasm crashes, we skip step 2 and the router defaults to Forward/Drop
-            Vec::new()
+            vec![255; len] // 255 = DROP fallback
         });
 
-        // ==========================================================
-        // 2. APPLY THE MUTATIONS BACK TO THE HOST BATCH
-        // ==========================================================
-        if returned_bytes.len() == active_bytes {
-            unsafe {
-                // Instantly overwrite our Host Batch with the Wasm-mutated Batch.
-                // Because Wasm treats the `SystemBus` pointer as locked `_padding`,
-                // the pointers are perfectly preserved during this copy!
-                std::ptr::copy_nonoverlapping(
-                    returned_bytes.as_ptr(),
-                    batch.as_mut_ptr() as *mut u8,
-                    active_bytes,
-                );
-            }
+        // Safety check: Ensure Wasm returned an action for every packet
+        if action_vector.len() != len {
+            log::error!("Wasm returned mismatched action array!");
+            batch.clear(); // Drop all
+            return Directive::Stop;
         }
-        // ==========================================================
-        // 3. ROUTE THE PACKETS (Based on the new Wasm flags!)
-        // ==========================================================
-        let mut split_branches = Vec::with_capacity(2);
-        let mut outputs = [Batch::new(), Batch::new()];
+
+        // PREPARE DYNAMIC OUTPUTS
+        let num_routes = self.routing_table.len();
+        let mut outputs: Vec<Batch> = std::iter::repeat_with(Batch::new)
+            .take(num_routes)
+            .collect();
+
+        // We need an iterator index to match PDUs to the Wasm Action Vector
+        let mut pdu_index = 0;
+
+
+        // DISTRIBUTE AND EXECUTE ACTIONS
+        // Bits 0-7 (Route ID): Which output port to send the packet to (0-254). 255 = DROP.
+        // Bit 8 (Telemetry Flag): 1 = Send a telemetry event for this packet.
+        // Bits 16-31 (Telemetry Meta): An ID, counter, or metric value for the telemetry subsystem.
 
         batch.distribute(&mut outputs, |pdu| {
-            // Wasm wrote the verdict directly into the `flags` field!
-            match pdu.w.flags {
-                0 => 0, // VERDICT_FORWARD -> mapped to outputs[0] (fast_path)
-                1 => 1, // VERDICT_EXCEPTION -> mapped to outputs[1]
-                2 => 1, // VERDICT_DROP -> mapped to outputs[1] (exception/drop route)
-                _ => 1, // Fallback safety
+            let action = action_vector[pdu_index];
+            pdu_index += 1;
+
+            let route_id = (action & 0xFF) as usize;
+            let telemetry_bucket = ((action >> 16) & 0xFF) as usize; // Get the port bucket (0-10)
+            let send_sample = (action & TELEMETRY_FLAG) != 0;
+
+            // 1. HIGH VOLUME (Atomics) -> Cost: ~10 cycles
+            // (Assuming telemetry_metrics is thread-local to this worker!)
+            if send_sample {
+                if telemetry_bucket < self.telemetry_metrics.counters_pkts.len() {
+                    self.telemetry_metrics.counters_pkts[telemetry_bucket].fetch_add(1, Ordering::Relaxed);
+                    self.telemetry_metrics.counters_bytes[telemetry_bucket].fetch_add(pdu.w.data_len() as u64, Ordering::Relaxed);
+                }
             }
+/*
+            // TODO
+            // 2. LOW VOLUME (Channels) -> Cost: ~80 cycles (but rarely happens)
+            if send_sample {
+                // Only send a sample for anomalous packets
+                let _ = self.telemetry_channel.try_send(AnomalyEvent {
+                    bucket: telemetry_bucket,
+                    // ... packet metadata
+                });
+            }
+*/
+            if route_id >= num_routes { usize::MAX } else { route_id }
         });
-        
-        let fast_batch = std::mem::replace(&mut outputs[0], Batch::new());
-        if !fast_batch.is_empty() {
-            split_branches.push((self.fast_path_route.clone(), fast_batch));
-        }
 
-        let exception_batch = std::mem::replace(&mut outputs[1], Batch::new());
-        if !exception_batch.is_empty() {
-            split_branches.push((self.exception_route.clone(), exception_batch));
+        // 4. DISPATCH DIRECTIVES
+        let mut split_branches = Vec::with_capacity(num_routes);
+        for (i, mut output_batch) in outputs.into_iter().enumerate() {
+            if !output_batch.is_empty() {
+                // Route ID matches the index in our dynamic routing table
+                split_branches.push((self.routing_table[i].clone(), output_batch));
+            }
         }
-
         #[cfg(feature = "profiling")]
         {
             let end_cycles = unsafe { std::arch::x86_64::_rdtsc() };

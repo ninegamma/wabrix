@@ -3,7 +3,7 @@ package xbricks:router@0.1.0;
 interface inspector {
     // We pass the entire Batch as raw bytes.
     // Wasm modifies the flags in-place and returns the bytes back.
-    inspect-batch: func(batch-bytes: list<u8>) -> list<u8>;
+    inspect-batch: func(batch-bytes: list<u8>) -> list<u32>;
 }
 
 /// The definition of a standard xbricks filter plugin

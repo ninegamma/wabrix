@@ -14,7 +14,7 @@ use tokio::sync::{mpsc, RwLock};
 use xbricks_lib::config::hot_config::SharedSystemState;
 use logger::WsLogger;
 use xbricks_lib::probe_kernel_fds;
-use xbricks_lib::telemetry::{spawn_nic_telemetry, TMLiveStats};
+use xbricks_base::telemetry::{spawn_telemetry, spawn_pipeline_telemetry, TMLiveStats};
 use xbricks_base::system::PlatformData;
 use crate::api::{spawn_management_api, AppState, SystemCommand};
 
@@ -141,6 +141,7 @@ async fn main() -> anyhow::Result<()> {
                 // 7. Spawn Workers
                 let shutdown = Arc::new(AtomicBool::new(false));
                 let workers_completed = Arc::new(AtomicUsize::new(0));
+                let pipeline_registry = Arc::clone(&xbricks_system.telemetry_registry);
                 let (handles, telemetry_handle, dst_port_stats) = xbricks_system
                     .spawn_workers(B_WITH_TELEMETRY, shutdown.clone(), workers_completed.clone())
                     .context("Failed to spawn worker threads").unwrap();
@@ -149,7 +150,8 @@ async fn main() -> anyhow::Result<()> {
 
                 // TODO: We must set the interface to use
                 let iface_name = "enp2s0f0np0".to_string();
-                spawn_nic_telemetry(telemetry_tx.clone(), iface_name, shutdown.clone())?;
+                spawn_telemetry(telemetry_tx.clone(), iface_name, shutdown.clone())?;
+                spawn_pipeline_telemetry(telemetry_tx.clone(), pipeline_registry, shutdown.clone())?;
 
                 // ==========================================================
                 // WAIT FOR EVENTS WHILE RUNNING

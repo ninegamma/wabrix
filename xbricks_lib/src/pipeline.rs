@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use core_affinity::CoreId;
 use log::{debug, error, info};
 use crate::toml_parser::PipelineInstance;
@@ -17,7 +17,7 @@ use xbricks_base::{Directive, Node, NodeId};
 use crate::config::hot_config::{HotNodeData, HotPipelineConfig};
 #[cfg(feature = "wasm")]
 use xbricks_wasm::wasm_manager::WasmManager;
-use crate::telemetry::TelemetryRegistry;
+use xbricks_base::telemetry::TelemetryRegistry;
 
 type ClassifierFn = Box<dyn Fn(&Pdu) -> usize + Send>;
 
@@ -596,8 +596,34 @@ impl PipelineFactory {
                             node_conf.id, &node_conf.routes[1]
                         ))?
                         .clone();
+                    let routing_table = vec![fast_path_id, exception_path_id];
 
-                    Box::new(WasmInspectorNode::new(my_id.clone(), manager, wasm_path, fast_path_id, exception_path_id))
+                    let labels = node_conf.labels.clone();
+                    let num_buckets = labels.len();
+                    let counters_pkts: Vec<Arc<AtomicU64>> = (0..num_buckets)
+                        .map(|_| Arc::new(AtomicU64::new(0)))
+                        .collect();
+                    let counters_bytes: Vec<Arc<AtomicU64>> = (0..num_buckets)
+                        .map(|_| Arc::new(AtomicU64::new(0)))
+                        .collect();
+
+                    if let Some(registry) = telemetry_registry.as_mut() {
+                        registry.register(
+                            node_conf.id.clone(),
+                            labels.clone(),
+                            counters_pkts.clone(),
+                            counters_bytes.clone(),
+                        );
+                    }
+
+                    let telemetry_metrics = xbricks_base::telemetry::TelemetryMetrics {
+                        node_id: node_conf.id.clone(),
+                        labels,
+                        counters_pkts,
+                        counters_bytes,
+                    };
+
+                    Box::new(WasmInspectorNode::new(my_id.clone(), manager, wasm_path, routing_table, None, telemetry_metrics))
                 }
 
                 _ => return Err(format!("Unknown Node Type: {}", node_conf.node_type)),

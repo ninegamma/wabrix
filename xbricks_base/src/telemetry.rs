@@ -16,7 +16,7 @@ pub struct TMLiveStats {
 }
 
 
-/// Represents a single telemetry node's metrics
+/// Represents a single node's metrics
 #[derive(Clone)]
 pub struct TelemetryMetrics {
     pub node_id: String,
@@ -57,7 +57,40 @@ impl TelemetryRegistry {
 }
 
 
-pub fn spawn_nic_telemetry(telemetry_tx: Sender<TMLiveStats>, iface_name: String, shutdown_signal: Arc<AtomicBool>)-> anyhow::Result<()> {
+/// Periodically reads pipeline node counters from the TelemetryRegistry and
+/// broadcasts them over the same WebSocket channel as NIC telemetry.
+/// Each registered node emits one `TMLiveStats` message per tick.
+pub fn spawn_pipeline_telemetry(
+    telemetry_tx: Sender<TMLiveStats>,
+    registry: Arc<TelemetryRegistry>,
+    shutdown_signal: Arc<AtomicBool>,
+) -> anyhow::Result<()> {
+    tokio::spawn(async move {
+        while !shutdown_signal.load(Ordering::Relaxed) {
+            for metrics in registry.get_metrics() {
+                let counters_pkts: Vec<u64> = metrics.counters_pkts.iter()
+                    .map(|c| c.load(Ordering::Relaxed))
+                    .collect();
+                let counters_bytes: Vec<u64> = metrics.counters_bytes.iter()
+                    .map(|c| c.load(Ordering::Relaxed))
+                    .collect();
+                let is_active_run = counters_pkts.iter().any(|&v| v > 0);
+                let stats = TMLiveStats {
+                    tmstats_name: metrics.node_id.clone(),
+                    labels: metrics.labels.clone(),
+                    counters_pkts,
+                    counters_bytes,
+                    is_active_run,
+                };
+                let _ = telemetry_tx.send(stats);
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        }
+    });
+    Ok(())
+}
+
+pub fn spawn_telemetry(telemetry_tx: Sender<TMLiveStats>, iface_name: String, shutdown_signal: Arc<AtomicBool>) -> anyhow::Result<()> {
     tokio::spawn(async move {
         // Persistent tracking variables (Absolute counters from ethtool)
         let mut prev_pkts = 0u64;

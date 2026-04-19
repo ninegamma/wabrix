@@ -5,6 +5,7 @@ pub mod interface;
 pub mod frame_registry;
 pub mod system;
 pub mod common;
+pub mod telemetry;
 
 use core::fmt::Display;
 use crossbeam_channel::Sender;
