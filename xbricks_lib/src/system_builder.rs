@@ -157,32 +157,6 @@ impl SystemBuilder {
             .flat_map(|parts| parts.iter().map(|(_umem_id, p)| *p))
             .collect();
 
-        let system_bus = Arc::new(SystemBus {
-            bus_senders: bus_senders.clone(),
-            umem_partitions: all_partitions,
-        });
-
-        // 4. Create FrameRegistry for each worker
-        for worker_id in &sorted_worker_ids {
-            // Get the partitions for this worker
-            let partitions = std::mem::take(&mut worker_partitions[*worker_id]);
-
-            // Get the receiver for this worker
-            let return_rx = bus_receivers[*worker_id]
-                .take()
-                .ok_or_else(|| format!("No bus receiver for worker {}", worker_id))?;
-
-            // Create the registry
-            let frame_registry = FrameRegistry::new(
-                *worker_id,
-                partitions,
-                return_rx,
-                system_bus.clone(),
-                self.runtime_umems.clone(),
-            );
-            xbricks_system.frame_registries[*worker_id] = Some(frame_registry);
-        }
-
         // Initialize UMEMs and Fill/Comp Queues
         // Indexed by group_id (0..MAX_UMEM). None = this group_id not configured.
         let mut initialized_umems: Vec<Option<(Arc<Umem>, Vec<xsk_rs::FrameDesc>)>> = vec![None; MAX_UMEM];
@@ -211,13 +185,42 @@ impl SystemBuilder {
             let shared_umem = Arc::from(umem);
             initialized_umems[group_id] = Some((shared_umem, umem_descs));
         }
-
+        let mut umem_addr= [None; MAX_UMEM];
         // Store all UMEM handles in XBricksSystem and propagate to each worker's registry.
         for (group_id, entry) in initialized_umems.iter().enumerate() {
             if let Some((umem, _)) = entry {
                 xbricks_system.umems[group_id] = Some(umem.clone());
+                umem_addr[group_id] = Some(umem.as_ptr() as usize);
             }
         }
+
+        let system_bus = Arc::new(SystemBus {
+            bus_senders: bus_senders.clone(),
+            umem_partitions: all_partitions,
+            umem_addr,
+        });
+
+        // Create FrameRegistry for each worker
+        for worker_id in &sorted_worker_ids {
+            // Get the partitions for this worker
+            let partitions = std::mem::take(&mut worker_partitions[*worker_id]);
+
+            // Get the receiver for this worker
+            let return_rx = bus_receivers[*worker_id]
+                .take()
+                .ok_or_else(|| format!("No bus receiver for worker {}", worker_id))?;
+
+            // Create the registry
+            let frame_registry = FrameRegistry::new(
+                *worker_id,
+                partitions,
+                return_rx,
+                system_bus.clone(),
+                self.runtime_umems.clone(),
+            );
+            xbricks_system.frame_registries[*worker_id] = Some(frame_registry);
+        }
+
         // Give every worker registry the physical UMEM handle (cheap Arc clone).
         for frame_registry_opt in xbricks_system.frame_registries.iter_mut() {
             if let Some(frame_registry) = frame_registry_opt {
@@ -468,7 +471,7 @@ mod tests {
     // Helper to create test SystemBus and configs
     fn create_test_bus_and_configs() -> (Arc<SystemBus>, Vec<Option<Arc<RuntimeUmemConfig>>>) {
         let (tx, _rx) = crossbeam_channel::bounded(10);
-        let bus = Arc::new(SystemBus { bus_senders: vec![tx], umem_partitions: vec![] });
+        let bus = Arc::new(SystemBus { bus_senders: vec![tx], umem_partitions: vec![], umem_addr: [None; MAX_UMEM] });
 
         let mut configs: Vec<Option<Arc<RuntimeUmemConfig>>> = vec![None; MAX_UMEM];
         configs[0] = Some(Arc::new(RuntimeUmemConfig {

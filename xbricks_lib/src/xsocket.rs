@@ -822,7 +822,7 @@ impl BatchRx for XSocketRx {
             let local_idx = (desc.addr() as u32) >> frame_size_log2; // local_idx is wrt. current Umem
             let global_idx = encode_global_frame(self.config.umem_config.group_id, local_idx);
 
-            let pdu = Pdu::new(*desc, global_idx, worker_id, umem_ptr, bus_ptr, frame_size_log2);
+            let pdu = Pdu::new(*desc, global_idx, worker_id, bus_ptr, frame_size_log2);
 
             // Since we ALREADY calculated max_to_pull to guarantee capacity,
             // we can confidently unwrap/ignore the error branch.
@@ -937,7 +937,7 @@ impl BatchTx for XSocketTx {
         let mut valid_to_send = 0;
         let mut descs = [FrameDesc::default(); crate::pipeline::MAX_BATCH_SIZE];
 
-        let my_umem_ptr = self.umem.as_ptr() as *mut u8;
+        let my_umem_addr = self.umem.as_ptr() as usize;
         let my_umem_id = self.config.umem_config.group_id;
         let registry_ptr = crate::xsocket::get_worker_frame_registry();
 
@@ -949,8 +949,8 @@ impl BatchTx for XSocketTx {
 
             for i in 0..count_to_send {
                 let pdu_ref = batch.get_mut(i);
-
-                if pdu_ref.umem_ptr() != my_umem_ptr {
+                let foreign_umem_addr = pdu_ref.umem_addr();
+                if foreign_umem_addr != my_umem_addr {
                     // It's foreign memory, we must copy it
                     let mut scratch = [MaybeUninit::uninit()];
 
@@ -962,18 +962,22 @@ impl BatchTx for XSocketTx {
 
                         let len = pdu_ref.w.data_len();
                         unsafe {
-                            std::ptr::copy_nonoverlapping(pdu_ref.w.data_ptr(), new_pdu.w.data_ptr(), len);
+                            std::ptr::copy_nonoverlapping(
+                                pdu_ref.w.data_ptr(foreign_umem_addr),
+                                new_pdu.w.data_ptr(my_umem_addr),
+                                len as usize
+                            );
                         }
                         new_pdu.w.set_data_length(len as u32);
-
+                        
+                        descs[valid_to_send] = new_pdu.to_frame_desc();
                         // MAGIC SWAP: Put the UMEM 1 packet into the batch,
                         // and take ownership of the old UMEM 0 packet!
                         let old_pdu = std::mem::replace(pdu_ref, new_pdu);
 
                         // Drop the old packet immediately (returns it to UMEM 0)
                         drop(old_pdu);
-
-                        descs[valid_to_send] = batch.get(i).to_frame_desc();
+                        
                         valid_to_send += 1;
                     } else {
                         // UMEM 1 is exhausted. Stop processing this batch.
@@ -987,11 +991,17 @@ impl BatchTx for XSocketTx {
                 }
             }
         } else {
-            // Fallback if no registry (just send what we can)
             for i in 0..count_to_send {
-                descs[i] = batch.get(i).to_frame_desc();
+                let pdu_ref = batch.get(i);
+                if pdu_ref.umem_addr() == my_umem_addr {
+                    descs[valid_to_send] = pdu_ref.to_frame_desc();
+                    valid_to_send += 1;
+                } else {
+                    // We cannot safely transmit this, and we cannot copy it.
+                    // Stop building descriptors here.
+                    break;
+                }
             }
-            valid_to_send = count_to_send;
         }
 
         // ==========================================================

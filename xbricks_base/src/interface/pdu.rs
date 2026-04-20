@@ -1,5 +1,6 @@
 use core::{cmp, fmt, slice};
 use core::ptr;
+use std::ops::Add;
 use log::{debug, trace};
 use xsk_rs::FrameDesc;
 use xsk_rs::umem::frame::SegmentLengths;
@@ -66,7 +67,7 @@ impl Drop for Pdu {
     fn drop(&mut self) {
         unsafe {
             // 0. Check if the PDU is an uninitialized Pdu::default(), e.g. happens in PacketGenNode
-            if self.system_bus.is_null() || self.umem_ptr().is_null() {
+            if self.try_umem_addr().is_none() {
                 log::debug!("Ignoring drop of uninitialized PDU slot");
                 return;
             }
@@ -125,18 +126,10 @@ impl Pdu {
         desc: FrameDesc,
         global_frame_idx: u32,
         owner_id: u8,
-        umem_base: *mut u8,
         system_bus: *const SystemBus,
         frame_size_log2: u8,
     ) -> Self {
-        // Calculate the Frame Base Address (Absolute)
-        // Frame 0 starts at 0, Frame 1 at frame_size, etc.
-        // Frame start is calculated strictly from the AF_XDP descriptor address
-        let local_offset = desc.addr() & !((1usize << frame_size_log2) - 1);
-        let frame_base_addr =  umem_base as u64 + local_offset as u64;
-
         let w= WPdu::new(
-            frame_base_addr,
             desc.addr() as u64,
             desc.lengths().data() as u32,
             desc.options(),
@@ -186,15 +179,32 @@ impl Pdu {
         desc
     }
 
-    /// 1-CYCLE CROSS-UMEM CHECK: Reconstructs the UMEM base pointer on the fly.
-    /// By subtracting the local frame offset from the virtual frame pointer,
-    /// we get the UMEM base pointer WITHOUT increasing the 64-byte struct size!
+    /// Using this in parsing logic where we KNOW it exists
     #[inline(always)]
-    pub fn umem_ptr(&self) -> *mut u8 {
-        let offset = self.local_frame_offset();
-        ( self.headers().base_addr() - (offset as usize) ) as *mut u8
+    pub fn umem_addr(&self) -> usize {
+        unsafe { self.try_umem_addr().unwrap_unchecked() }
     }
 
+    /// try get Umem pointer from SystemBus
+    #[inline(always)]
+     pub unsafe fn try_umem_addr(&self) -> Option<usize> {
+        let bus = &*self.system_bus;
+        bus.umem_addr[self.umem_id() as usize]
+    }
+
+    /// returns pointer to the first byte of the frame this Pdu represents
+    #[inline(always)]
+    pub fn base_ptr(&self) -> *const u8 {
+        unsafe { (self.umem_addr() as *const u8).add(self.local_frame_offset()) }
+    }
+
+    /// returns pointer converted to usize to the first byte of the frame this Pdu represents
+    #[inline(always)]
+    pub fn base_addr(&self) -> usize {
+        self.umem_addr().add(self.local_frame_offset())
+    }
+    
+    
     /// Prepares a freshly allocated PDU for transmission.
     /// Locks the descriptor to the physical frame boundary + headroom.
     #[inline(always)]
@@ -232,9 +242,9 @@ impl Pdu {
     fn payload_mut(&mut self, which: usize) -> Option<*mut u8> {
         let headers = self.headers().count();
         match which {
-            x if x + 1 < headers => self.headers().get(x + 1).as_ptr_u8_mut(),
+            x if x + 1 < headers => self.headers().get(self.base_addr(), x + 1).as_ptr_u8_mut(),
             x if x == headers - 1 => {
-                let mut h = self.headers().get(x);
+                let mut h = self.headers().get(self.base_addr(), x);
                 // Assume Header has .offset() returning length
                 Some(unsafe { h.as_ptr_u8_mut().unwrap().offset(h.offset().unwrap() as isize) })
             }
@@ -246,14 +256,14 @@ impl Pdu {
     fn payload(&self, which: usize) -> Option<*const u8> {
         let headers = self.headers().count();
         match which {
-            x if x + 1 < headers => self.headers().get(x + 1).as_ptr_u8(),
+            x if x + 1 < headers => self.headers().get(self.base_addr(), x + 1).as_ptr_u8(),
             x if x == headers - 1 =>
                 Some(unsafe {
                     self.headers()
-                        .get(x)
+                        .get(self.base_addr(), x)
                         .as_ptr_u8()
                         .unwrap()
-                        .offset(self.headers().get(x).offset().unwrap() as isize)
+                        .offset(self.headers().get(self.base_addr(), x).offset().unwrap() as isize)
                 }),
             _ => None,
         }
@@ -282,11 +292,11 @@ impl Pdu {
         let mut sum = 0;
         for i in 0..=which {
             // Assuming header.offset() returns the header length in bytes
-            if let Some(len) = self.headers().get(i).offset() {
+            if let Some(len) = self.headers().get(self.base_addr(), i).offset() {
                 sum += len;
             }
         }
-        if sum > self.w.data_len() { 0 } else { self.w.data_len() - sum }
+        if sum > self.w.data_len() as usize { 0 } else { self.w.data_len() as usize - sum }
     }
 
     // Helper for payload management
@@ -338,6 +348,34 @@ impl Pdu {
         } else {
             0
         }
+    }
+
+    #[inline]
+    pub fn parse_fast(&mut self) -> usize {
+        let umem_addr= self.umem_addr();
+        self.w.parse_fast(umem_addr)
+    }
+    
+    
+    /// Returns a mutable pointer to the start of the packet data plus the offset argument.
+    #[inline(always)]
+    pub fn data_address(&self, offset: usize) -> *mut u8 {
+        let umem_addr = self.umem_addr();
+        // Add offset to the virtual memory pointer of the frame
+        (umem_addr + self.desc_addr as usize + offset) as *mut u8
+    }
+    
+    
+    pub fn ether_type(&self) -> u16 {
+        if let Some(umem_addr) = unsafe { self.try_umem_addr() } {
+            self.w.ether_type(umem_addr)
+        } else { 0 }
+    }
+
+    pub fn ipv4_src(&self) -> Option<u32> {
+        if let Some(umem_addr) = unsafe { self.try_umem_addr() } {
+            self.w.ipv4_src(umem_addr as usize)
+        } else { None }
     }
 }
 
@@ -495,7 +533,6 @@ mod tests {
             desc,
             0, // frame_idx
             0, // owner_id
-            umem_base,
             core::ptr::null(), // system_bus
             frame_size_log2,
         );
@@ -503,7 +540,7 @@ mod tests {
         // 4. Fill Payload with known pattern (0xAA) to verify it stays intact
         unsafe {
             // Use the public API to get the data pointer
-            let payload_ptr = pdu.w.data_ptr();
+            let payload_ptr = pdu.w.data_ptr(umem_base as usize);
             ptr::write_bytes(payload_ptr, 0xAA, initial_payload_len);
         }
 
@@ -516,13 +553,13 @@ mod tests {
 
         // 6. Perform Push
         // (Assuming the method is named push_header as requested)
-        pdu.w.push_header(&header).expect("push_header failed");
+        pdu.w.push_header(umem_base as usize, &header).expect("push_header failed");
 
         // 7. ASSERTIONS
 
         // A. Verify Length and Headroom updates via Public API
         assert_eq!(
-            pdu.w.data_len(),
+            pdu.w.data_len() as usize,
             initial_payload_len + header_size,
             "Data length should increase"
         );
@@ -539,7 +576,7 @@ mod tests {
 
         // C. Verify Memory Content
         unsafe {
-            let current_data_ptr = pdu.w.data_ptr();
+            let current_data_ptr = pdu.w.data_ptr(umem_base as usize);
 
             // 1. Check if Header is written at the new start
             let written_header = *(current_data_ptr as *const TestHeader);
@@ -567,12 +604,12 @@ mod tests {
             options: 0,
         };
 
-        let mut pdu = Pdu::new(desc, 0, 0, umem_base, core::ptr::null(), 11);
+        let mut pdu = Pdu::new(desc, 0, 0, core::ptr::null(), 11);
 
         let header = TestHeader { id: 1, flags: 1 };
 
         // Should fail
-        let result = pdu.w.push_header(&header);
+        let result = pdu.w.push_header(umem_base as usize, &header);
         assert!(result.is_err(), "Should return error when headroom is insufficient");
     }
 }

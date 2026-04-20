@@ -354,7 +354,6 @@ impl FrameRegistry {
                 desc,
                 frame_idx,
                 self.worker_id as u8,
-                umem_base_ptr,
                 system_bus,
                 frame_size_log2,
             );
@@ -425,7 +424,6 @@ impl FrameRegistry {
                 desc,
                 global_frame_idx,
                 self.worker_id as u8,
-                umem_base_ptr,
                 system_bus,
                 frame_size_log2,
             ));

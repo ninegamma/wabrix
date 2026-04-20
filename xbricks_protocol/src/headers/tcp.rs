@@ -142,6 +142,7 @@ impl TcpHeader {
 
     #[inline]
     pub fn set_data_offset(&mut self, offset: u8) {
+        debug_assert!(offset <= 15, "TCP data offset exceeds 4 bits!");
         self.offset_to_ns = (self.offset_to_ns & 0x0f) | (offset << 4);
     }
 

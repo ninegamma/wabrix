@@ -76,7 +76,7 @@ impl Node for PcapRxNode {
 
                     unsafe {
                         // 4. Copy data from File Buffer -> UMEM
-                        std::ptr::copy_nonoverlapping(packet.data.as_ptr(), pdu.w.data_ptr(), len);
+                        std::ptr::copy_nonoverlapping(packet.data.as_ptr(), pdu.data_address(0), len);
                     }
 
                     // 5. Update PDU metadata
@@ -84,7 +84,7 @@ impl Node for PcapRxNode {
                     // pdu.timestamp = packet.timestamp; // If you add set_timestamp to Pdu
 
                     // 6. Parse headers (Eth/IP/TCP) so the next node can use them
-                    pdu.w.parse();
+                    pdu.parse_fast();
 
                     if batch.push(pdu.shallow_copy()).is_ok() {
                         pdus_used += 1;
@@ -175,7 +175,7 @@ impl Node for PcapTxNode {
         while let Some(pdu) = batch.pop() {
             unsafe {
                 // 2. Extract Data
-                let data_slice = std::slice::from_raw_parts(pdu.w.data_ptr(), pdu.w.data_len());
+                let data_slice = std::slice::from_raw_parts(pdu.data_address(0), pdu.w.data_len() as usize);
 
                 // 3. Create generic timestamp (or use pdu.timestamp if available)
                 let start = SystemTime::now();

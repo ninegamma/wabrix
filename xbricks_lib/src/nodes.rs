@@ -728,16 +728,16 @@ impl Node for DstPortCntNode {
         for pdu in batch.iter() {
             let mut dst_port = None;
             let header_count = pdu.headers().count();
-
+            let umem_addr =  pdu.umem_addr();
             // FAST PATH: Iterate backwards. L4 headers (TCP/UDP) are usually last!
             for i in (0..header_count).rev() {
-                match pdu.headers().get(i).kind() {
+                match pdu.headers().get(umem_addr, i).kind() {
                     HeaderKind::Tcp => {
-                        dst_port = Some(pdu.headers().tcp(i).dst_port());
+                        dst_port = Some(pdu.headers().tcp(umem_addr, i).dst_port());
                         break; // Found it, stop scanning!
                     }
                     HeaderKind::Udp => {
-                        dst_port = Some(pdu.headers().udp(i).dst_port());
+                        dst_port = Some(pdu.headers().udp(umem_addr, i).dst_port());
                         break;
                     }
                     _ => {} // Ignore IP, MAC, etc.
@@ -828,14 +828,14 @@ impl Node for FastParserNode {
             if i + prefetch_dist < len {
                 let future_pdu = batch.get(i + prefetch_dist);
                 unsafe {
-                    let future_addr = future_pdu.w.data_address(0);
+                    let future_addr = future_pdu.data_address(0);
                     _mm_prefetch(future_addr as *const i8, _MM_HINT_T0);
                 }
             }
 
             // 2. Parse the current PDU (using your 7-cycle parse_fast!)
             let current_pdu = batch.get_mut(i);
-            current_pdu.w.parse_fast();
+            current_pdu.parse_fast();
 
             log::trace!("Current Pdu: {}", current_pdu);
         }
@@ -1003,16 +1003,16 @@ impl Node for ExceptionRouterNode {
         batch.distribute(&mut outputs, |pdu| {
             // Check for Exception Traffic (ARP or ICMP)
             let mut is_exception = false;
-
+            let umem_addr = pdu.umem_addr();
             for i in (0..pdu.headers().count()).rev() {
-                let kind = pdu.headers().get(i).kind();
+                let kind = pdu.headers().get(umem_addr, i).kind();
                 if kind == HeaderKind::ArpIpv4 || kind == HeaderKind::Icmp {
                     is_exception = true;
                     break;
                 }
 
                 // Optional: Route SSH (Port 22) to the namespace
-                if kind == HeaderKind::Tcp && pdu.headers().tcp(i).dst_port() == 22 {
+                if kind == HeaderKind::Tcp && pdu.headers().tcp(umem_addr, i).dst_port() == 22 {
                     is_exception = true;
                     break;
                 }
@@ -1252,8 +1252,9 @@ impl PacketGenNode {
         let tcp_size = TcpHeader::size();
         let total_size = mac_size + ip_size + tcp_size;
 
+        let umem_addr = pdu.umem_addr();
         // Write headers directly into the frame at current data pointer
-        let data_ptr = pdu.data_ptr();
+        let data_ptr = pdu.data_ptr(umem_addr);
 
         unsafe {
             // Write MAC header
@@ -1268,10 +1269,11 @@ impl PacketGenNode {
             let tcp_ptr = data_ptr.add(mac_size + ip_size) as *mut TcpHeader;
             std::ptr::copy_nonoverlapping(&tcp as *const TcpHeader, tcp_ptr, 1);
 
+
             // Initialize HeaderStack with the correct offsets
-            pdu.headers_mut().push(Header::Mac(&mut *mac_ptr));
-            pdu.headers_mut().push(Header::Ip(&mut *ip_ptr));
-            pdu.headers_mut().push(Header::Tcp(&mut *tcp_ptr));
+            pdu.headers_mut().push(umem_addr, Header::Mac(&mut *mac_ptr));
+            pdu.headers_mut().push(umem_addr, Header::Ip(&mut *ip_ptr));
+            pdu.headers_mut().push(umem_addr, Header::Tcp(&mut *tcp_ptr));
         }
 
         // Update PDU data length

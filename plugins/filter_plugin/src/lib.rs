@@ -31,8 +31,6 @@ struct MyInspector;
 
 impl Guest for MyInspector {
     fn inspect_batch(batch_bytes: Vec<u8>) -> Vec<u32> {
-        // 1. ZERO-COPY CAST: View the raw bytes as Pdu0 structs.
-        // We use an immutable cast (*const) because Wasm no longer mutates the batch!
         let pdus = unsafe {
             slice::from_raw_parts(
                 batch_bytes.as_ptr() as *const Pdu0,
@@ -40,58 +38,49 @@ impl Guest for MyInspector {
             )
         };
 
-        // 2. Pre-allocate the Action Vector to avoid reallocations
         let mut actions = Vec::with_capacity(pdus.len());
 
-        // 3. Iterate, Inspect, and Pack
         for pdu in pdus {
-            let mut action = 0;
+            let mut action = TELEMETRY_FLAG;
 
-            // Trigger Telemetry
-            action |= TELEMETRY_FLAG;  // bit 8 = 1
+            let mut is_v4 = false;
+            let mut dst_port = None;
 
-            if pdu.is_ipv4() && pdu.is_tcp() {
-                // Route to Fast Path
-                action |= ROUTE_FAST_PATH;
+            // SINGLE PASS: Iterate backwards to find L4 ports instantly,
+            // and just verify IPv4 exists along the way.
+            let header_count = pdu.headers().count();
+            let base_ptr = pdu.local_frame_offset(); // Wasm base_ptr IS the offset!
 
-                let mut dst_port = None;
-                let header_count = pdu.headers().count();
+            for i in (0..header_count).rev() {
+                let kind = pdu.headers().kinds[i]; // Direct array access!
 
-                // FAST PATH: Iterate backwards. L4 headers (TCP/UDP) are usually last!
-                for i in (0..header_count).rev() {
-                    match pdu.headers().get(i).kind() {
-                        HeaderKind::Tcp => {
-                            dst_port = Some(pdu.headers().tcp(i).dst_port());
-                            break; // Found it, stop scanning!
-                        }
-                        HeaderKind::Udp => {
-                            dst_port = Some(pdu.headers().udp(i).dst_port());
-                            break;
-                        }
-                        _ => {} // Ignore IP, MAC, etc.
+                if kind == HeaderKind::Ip {
+                    is_v4 = true;
+                } else if dst_port.is_none() {
+                    // Extract AND convert Endianness!
+                    if kind == HeaderKind::Tcp {
+                        dst_port = Some(pdu.headers().tcp(base_ptr, i).dst_port());
+                    } else if kind == HeaderKind::Udp {
+                        dst_port = Some(pdu.headers().udp(base_ptr, i).dst_port());
                     }
                 }
+            }
 
-                // Extract Destination Port
-                //let dst_port = pdu.w.headers().tcp(2).dst_port();
+            // Execute Routing Logic
+            if is_v4 && dst_port.is_some() {
+                action |= ROUTE_FAST_PATH;
 
-                let telemetry_bucket: u32;
-                // Bucket logic: Ports 0-9 get their own ID, everything else gets ID 10
-                if let Some(dport) = dst_port {
-                    telemetry_bucket = if dport <= 9 {
-                        dport as u32
-                    } else {
-                        10
-                    };
+                // Safe to unwrap because of the if condition
+                let port = dst_port.unwrap();
+
+                let telemetry_bucket = if port <= 9 {
+                    port as u32
                 } else {
-                    telemetry_bucket = 10;
-                }
+                    10
+                };
 
-                // Pack the bucket ID into the upper 16 bits
                 action |= telemetry_bucket << 16;
-
             } else {
-                // Not TCP/IPv4: Send to Exception Route, no telemetry needed
                 action |= ROUTE_EXCEPTION;
                 let telemetry_bucket = 9u32;
                 action |= telemetry_bucket << 16;

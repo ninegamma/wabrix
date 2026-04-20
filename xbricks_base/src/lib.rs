@@ -9,6 +9,8 @@ pub mod telemetry;
 
 use core::fmt::Display;
 use crossbeam_channel::Sender;
+use xsk_rs::Umem;
+use crate::frame_registry::MAX_UMEM;
 use crate::interface::batch::Batch;
 
 /// Configuration specific to the shared memory region (UMEM).
@@ -80,6 +82,7 @@ pub struct SystemBus {
     /// All UMEM partitions across all workers, used by determine_owner to map
     /// a frame index to the worker that owns it.
     pub umem_partitions: Vec<UmemPartition>,
+    pub umem_addr: [Option<usize>; MAX_UMEM] ,
 }
 
 ///This is safe because crossbeam_channel::Sender<u32> is already Send, so a Vec of them is also Send.

@@ -54,11 +54,14 @@ pub struct WBatch {
 
 
 impl WBatch {
+
     /// Create an empty batch
     pub fn new() -> Self {
-        // Safe because MaybeUninit doesn't require initialization
-        let packets = unsafe { MaybeUninit::uninit().assume_init() };
-        Self { packets, count: 0 }
+        Self {
+            // 100% Safe, zero-cost initialization in stable Rust!
+            packets: [const { MaybeUninit::uninit() }; MAX_BATCH_SIZE],
+            count: 0
+        }
     }
 
     /// Add a PDU to the batch
