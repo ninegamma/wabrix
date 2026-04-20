@@ -344,7 +344,7 @@ use rustix::event::{PollFd, PollFlags, poll};
 use rustix::io::Errno;
 use separator::Separatable;
 use xbricks_base::{BusCommand, RuntimeUmemConfig, SystemBus};
-use xbricks_base::frame_registry::{get_tsc_frequency, get_worker_frame_registry};
+use xbricks_base::frame_registry::{get_tsc_frequency, get_worker_frame_registry, encode_global_frame, decode_global_frame};
 
 impl XSocketRx {
     /// Returns the UMEM group ID for this socket
@@ -494,15 +494,13 @@ impl XSocketRx {
         // Architecture Rule: Kernel expects PHYSICAL ADDRESSES (offsets), not indices.
         // Address = (Local_Index * Frame_Size) + Headroom
 
-        let offset_idx = self.config.umem_config.group_start_frame_idx;
         let frame_size_log2 = self.config.umem_config.frame_size_log2 as u64;
         let headroom = self.config.umem_config.head_room as u64;
 
         for i in 0..actual_batch {
-            let global_idx = self.scratch_frames[i] as u64;
-            let local_idx = global_idx - offset_idx as u64;
+            let (_umem_id, local_idx) = decode_global_frame(self.scratch_frames[i]);
             // Use a 1-cycle bitwise shift instead of multiplication
-            let addr = (local_idx << frame_size_log2) + headroom;
+            let addr = ((local_idx as u64) << frame_size_log2) + headroom;
             // Write directly to our persistent struct buffer
             self.scratch_descriptors[i] = xsk_rs::FrameDesc::new(addr as usize);
         }
@@ -812,7 +810,6 @@ impl BatchRx for XSocketRx {
 
         // 6. Process the received packets
         let frame_size_log2 = self.config.umem_config.frame_size_log2;
-        let group_start_frame_idx = self.config.umem_config.group_start_frame_idx;
         let umem_ptr = self.umem.as_ptr();
         let bus_ptr = &*self.bus as *const _;
         let worker_id = self.config.worker_id as u8;
@@ -823,7 +820,7 @@ impl BatchRx for XSocketRx {
             // BITWISE SHIFT INSTEAD OF DIVISION
             // Replaces ~20 cycle division with a 1 cycle shift
             let local_idx = (desc.addr() as u32) >> frame_size_log2; // local_idx is wrt. current Umem
-            let global_idx = local_idx + group_start_frame_idx; // global idx is used by the program to identify the frame within the entire combined Umem
+            let global_idx = encode_global_frame(self.config.umem_config.group_id, local_idx);
 
             let pdu = Pdu::new(*desc, global_idx, worker_id, umem_ptr, bus_ptr, frame_size_log2);
 
@@ -1078,7 +1075,6 @@ impl XSocketTx {
             }
 
             let frame_size_log2 = self.config.umem_config.frame_size_log2;
-            let group_start_idx = self.config.umem_config.group_start_frame_idx;
 
             // FIX: Iterate by index instead of .iter()
             for i in 0..consumed {
@@ -1087,10 +1083,10 @@ impl XSocketTx {
                 // 1. Calculate the local index relative to this specific UMEM
                 let local_idx = addr >> frame_size_log2;
 
-                // 2. Translate to the absolute Global System Index
-                let global_idx = local_idx + group_start_idx;
-                trace!("drain_completion_queue: Worker {}: Releasing frame_idx={} (local_idx={}, group_start_idx={})",
-                    self.config.worker_id, global_idx, local_idx, group_start_idx);
+                // 2. Encode to the global frame index (umem_id << 24 | local_idx)
+                let global_idx = encode_global_frame(self.config.umem_config.group_id, local_idx);
+                trace!("drain_completion_queue: Worker {}: Releasing frame_idx={} (local_idx={}, umem_group_id={})",
+                    self.config.worker_id, global_idx, local_idx, self.config.umem_config.group_id);
                 self.release_frame(global_idx);
             }
         }
@@ -1138,7 +1134,7 @@ impl XSocketTx {
 
     fn determine_owner(&self, frame_idx: u32) -> usize {
         for partition in &self.bus.umem_partitions {
-            if partition.owns(frame_idx) {
+            if partition.owns_encoded(frame_idx) {
                 return partition.worker_id;
             }
         }

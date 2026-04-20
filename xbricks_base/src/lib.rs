@@ -45,15 +45,24 @@ impl Drop for RuntimeUmemConfig {
 pub struct UmemPartition {
     pub worker_id: usize,     // Worker thread that owns this partition
     pub umem_group_id: usize, // Memory domain (UMEM group)
-    pub start_idx: u32,
+    pub start_idx: u32,       // Absolute global frame index (used by system_builder for layout math)
     // end_idx is non-inclusive: [start_idx, end_idx)
-    pub end_idx: u32,
+    pub end_idx: u32,         // Absolute global frame index
+    /// UMEM-relative start: local_start = start_idx - group_start_frame_idx
+    pub local_start: u32,
+    /// UMEM-relative end (non-inclusive): local_end = end_idx - group_start_frame_idx
+    pub local_end: u32,
 }
 
 impl UmemPartition {
+    /// Check ownership against an **encoded** global frame index
+    /// (format: `(umem_id << 24) | local_idx`).
     #[inline]
-    pub fn owns(&self, frame_idx: u32) -> bool {
-        frame_idx >= self.start_idx && frame_idx < self.end_idx
+    pub fn owns_encoded(&self, encoded_frame_idx: u32) -> bool {
+        let (umem_id, local_idx) = crate::frame_registry::decode_global_frame(encoded_frame_idx);
+        umem_id == self.umem_group_id
+            && local_idx >= self.local_start
+            && local_idx < self.local_end
     }
 }
 

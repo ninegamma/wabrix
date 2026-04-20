@@ -70,7 +70,7 @@ impl PipelineFactory {
         mut dst_port_stats_registry: Option<&mut Vec<Arc<crate::nodes::DstPortStats>>>,
         platform_data: &PlatformData,
         #[cfg(feature = "wasm")]
-        wasm_managers: &HashMap<usize, Arc<WasmManager>>,
+        wasm_managers: &Vec<Option<Arc<WasmManager>>>,
         // NEW: Pass the shared state so nodes can hold a reference to it
         shared_state: Arc<crate::config::hot_config::SharedSystemState>,
     ) -> Result<Vec<Box<dyn Node>>, String> {
@@ -567,8 +567,8 @@ impl PipelineFactory {
                         .parse::<usize>()
                         .map_err(|_| format!("WasmInspectorNode {} 'umem' must be a number", node_conf.id))?;
 
-                    let manager = wasm_managers
-                        .get(&umem_id)
+                    let manager = wasm_managers[umem_id]
+                        .as_ref()
                         .ok_or(format!(
                             "WasmInspectorNode {}: no WasmManager for umem {}",
                             node_conf.id, umem_id

@@ -1,27 +1,26 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use core_affinity::CoreId;
 use log::{info};
 use tokio::task::JoinHandle;
-use xbricks_base::frame_registry::FrameRegistry;
+use xsk_rs::Umem;
+use xbricks_base::frame_registry::{FrameRegistry, MAX_UMEM};
 use crate::{PipelineStats, XSocketRegistry};
 use xbricks_base::system::PlatformData;
 use xbricks_base::telemetry::TelemetryRegistry;
 
-#[derive(Default)]
 pub struct XBricksSystem {
     pub(crate) xsocket_registry: XSocketRegistry,
-    /// Map: worker_id -> FrameRegistry
-    pub(crate) frame_registries: HashMap<usize, FrameRegistry>,
+    /// Indexed by worker_id (0..num_workers).
+    pub(crate) frame_registries: Vec<Option<FrameRegistry>>,
     pub telemetry_registry: Arc<TelemetryRegistry>,
-    /// Group pipelines by worker
-    /// Map: worker_id -> (CoreId, Vec<PipelineRunner>)
-    /// worker_idx is used by each node to look up its specific queue_id from its queues array
-    pub(crate) worker_runners: HashMap<usize, (CoreId, Vec<crate::pipeline::PipelineRunner>)>,
+    /// Indexed by worker_id (0..num_workers).
+    pub(crate) worker_runners: Vec<Option<(CoreId, Vec<crate::pipeline::PipelineRunner>)>>,
     pub(crate) platform_data: PlatformData,
     pub(crate) dst_port_stats: Vec<Arc<crate::nodes::DstPortStats>>,
     pub shared_state: Arc<crate::config::hot_config::SharedSystemState>,
+    /// All live UMEM handles indexed by umem_id (0..MAX_UMEM). None = not used.
+    pub umems: Vec<Option<Arc<Umem>>>,
 }
 
 impl XBricksSystem {
@@ -49,8 +48,11 @@ impl XBricksSystem {
 
         info!("Spawning pipeline worker threads...");
         let mut handles = vec![];
-        for (worker_id, (core_id, runners)) in self.worker_runners {
-            // Find the worker config to get core affinity
+        for (worker_id, entry) in self.worker_runners.into_iter().enumerate() {
+            let (core_id, runners) = match entry {
+                Some(v) => v,
+                None => continue,
+            };
 
             let num_pipelines = runners.len();
             let shutdown_clone = Arc::clone(&shutdown);
@@ -58,8 +60,8 @@ impl XBricksSystem {
 
             // Get the frame registry for this worker
             let frame_registry = self
-                .frame_registries
-                .remove(&worker_id)
+                .frame_registries[worker_id]
+                .take()
                 .expect(&format!("Frame registry for worker {} not found", worker_id));
 
             // Spawn the worker with all its pipelines and frame registry

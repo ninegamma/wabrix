@@ -9,7 +9,7 @@ use log::{warn, debug, info, error};
 use xsk_rs::config::{FrameSize, QueueSize};
 //use xbricks_wasm::wasm_manager::WasmManager;
 use xbricks_base::{RuntimeUmemConfig, SystemBus, UmemPartition};
-use xbricks_base::frame_registry::FrameRegistry;
+use xbricks_base::frame_registry::{FrameRegistry, MAX_UMEM};
 use crate::xsocket::{XSocket, XSocketRx, XSocketTx, XdpSocketConfig};
 use crate::{BatchRx, BatchTx, MAX_BATCH_SIZE};
 use xbricks_base::system::PlatformData;
@@ -23,10 +23,13 @@ use crate::xscrubber_skel::XscrubberSkel;
 pub struct SystemBuilder {
     pub(crate) workers: Vec<WorkerBuilderConfig>,
     pub(crate) xdp_socket_configs: Vec<XdpSocketConfig>,
-    pub runtime_umems: HashMap<usize, Arc<RuntimeUmemConfig>>, // umem_id to config
+    /// Indexed by umem_id (0..MAX_UMEM). None = not configured.
+    pub runtime_umems: Vec<Option<Arc<RuntimeUmemConfig>>>,
     #[cfg(feature = "wasm")]
-    pub(crate) wasm_managers: HashMap<usize, Arc<WasmManager>>, // umem_id to wasm_manager
-    pub(crate) worker_partitions: HashMap<usize, Vec<PartitionRequest>>, // worker_id to partition requests
+    /// Indexed by umem_id (0..MAX_UMEM). None = no WASM manager for that UMEM.
+    pub(crate) wasm_managers: Vec<Option<Arc<WasmManager>>>,
+    /// Indexed by worker_id (0..workers.len()). None = no partitions requested.
+    pub(crate) worker_partitions: Vec<Option<Vec<PartitionRequest>>>,
 }
 
 
@@ -46,8 +49,18 @@ impl SystemBuilder {
         platform_data: PlatformData,
     ) -> Result<Box<XBricksSystem>, Box<dyn std::error::Error>> {
 
-        let mut xbricks_system = Box::new(XBricksSystem::default());
-        xbricks_system.platform_data = platform_data;
+        use crate::config::hot_config::SharedSystemState;
+        let num_workers = self.workers.len();
+        let mut xbricks_system = Box::new(XBricksSystem {
+            xsocket_registry: XSocketRegistry::default(),
+            frame_registries: (0..num_workers).map(|_| None).collect(),
+            telemetry_registry: Arc::new(TelemetryRegistry::default()),
+            worker_runners: (0..num_workers).map(|_| None).collect(),
+            platform_data,
+            dst_port_stats: Vec::new(),
+            shared_state: SharedSystemState::new(HashMap::new()),
+            umems: vec![None; MAX_UMEM],
+        });
         // 1. Initialize Channels for the System Bus
         // We need one channel per worker to allow them to return frames to each other.
         let mut bus_senders = Vec::new();
@@ -62,40 +75,35 @@ impl SystemBuilder {
         // system_bus is created after step 3 once umem_partitions are known
 
         // 2. Group XDP Configs by UMEM Group ID
-        let mut umem_groups: HashMap<usize, Vec<&XdpSocketConfig>> = HashMap::new();
+        let mut umem_groups: Vec<Option<Vec<&XdpSocketConfig>>> = vec![None; MAX_UMEM];
         for config in &self.xdp_socket_configs {
-            umem_groups.entry(config.umem_config.group_id).or_default().push(config);
+            umem_groups[config.umem_config.group_id].get_or_insert_with(Vec::new).push(config);
         }
 
         // 3. Calculate partition allocation for each worker
-        // Map: worker_id -> Vec<(umem_group_id, UmemPartition)>
-        let mut worker_partitions: HashMap<usize, Vec<(usize, UmemPartition)>> = HashMap::new();
+        // Indexed by worker_id (0..num_workers).
+        let mut worker_partitions: Vec<Vec<(usize, UmemPartition)>> = vec![Vec::new(); num_workers];
 
-        // Track next available partition index for each UMEM
-        // Map: umem_group_id -> next_partition_index
-        let mut umem_partition_counters: HashMap<usize, usize> = HashMap::new();
-
-        // Initialize counters based on UMEM partition counts
-        for (umem_id, _umem_conf) in &self.runtime_umems {
-            umem_partition_counters.insert(*umem_id, 0);
-        }
+        // Track next available partition index for each UMEM. Indexed by umem_id (0..MAX_UMEM).
+        let mut umem_partition_counters: Vec<usize> = vec![0; MAX_UMEM];
 
         // Process workers in order of their IDs for deterministic allocation
-        let mut sorted_worker_ids: Vec<usize> = self.worker_partitions.keys().copied().collect();
-        sorted_worker_ids.sort();
+        let mut sorted_worker_ids: Vec<usize> = (0..num_workers)
+            .filter(|&id| self.worker_partitions[id].is_some())
+            .collect();
 
         for worker_id in &sorted_worker_ids {
             let mut worker_parts = Vec::new();
 
             // Get partition requests for this worker (if any)
-            let partition_reqs = self.worker_partitions.get(worker_id).cloned().unwrap_or_default();
+            let partition_reqs = self.worker_partitions[*worker_id].as_deref().unwrap_or(&[]);
 
             // Process each partition request for this worker
-            for partition_req in &partition_reqs {
+            for partition_req in partition_reqs {
                 let umem_group_id = partition_req.umem;
                 let umem_conf = self
-                    .runtime_umems
-                    .get(&umem_group_id)
+                    .runtime_umems[umem_group_id]
+                    .as_ref()
                     .ok_or_else(|| format!("Worker {}: requested partitions from unknown UMEM {}", worker_id, umem_group_id))?;
 
                 // Calculate partition size from usable (non-reserved) frames only
@@ -105,9 +113,7 @@ impl SystemBuilder {
                 let usable_start = umem_conf.group_start_frame_idx + umem_conf.reserved_frames;
 
                 // Get the starting partition index for this allocation
-                let partition_idx = umem_partition_counters
-                    .get_mut(&umem_group_id)
-                    .ok_or_else(|| format!("UMEM {} not initialized", umem_group_id))?;
+                let partition_idx = &mut umem_partition_counters[umem_group_id];
 
                 let first_partition_idx = *partition_idx;
 
@@ -121,6 +127,8 @@ impl SystemBuilder {
                     umem_group_id,
                     start_idx,
                     end_idx,
+                    local_start: start_idx - umem_conf.group_start_frame_idx,
+                    local_end:   end_idx   - umem_conf.group_start_frame_idx,
                 };
 
                 worker_parts.push((umem_group_id, partition));
@@ -140,12 +148,12 @@ impl SystemBuilder {
                 );
             }
 
-            worker_partitions.insert(*worker_id, worker_parts);
+            worker_partitions[*worker_id] = worker_parts;
         }
 
         // Collect all partitions into a flat Vec for determine_owner lookups
         let all_partitions: Vec<UmemPartition> = worker_partitions
-            .values()
+            .iter()
             .flat_map(|parts| parts.iter().map(|(_umem_id, p)| *p))
             .collect();
 
@@ -157,7 +165,7 @@ impl SystemBuilder {
         // 4. Create FrameRegistry for each worker
         for worker_id in &sorted_worker_ids {
             // Get the partitions for this worker
-            let partitions = worker_partitions.remove(worker_id).unwrap_or_else(Vec::new); // If no partitions requested, create empty registry
+            let partitions = std::mem::take(&mut worker_partitions[*worker_id]);
 
             // Get the receiver for this worker
             let return_rx = bus_receivers[*worker_id]
@@ -172,20 +180,18 @@ impl SystemBuilder {
                 system_bus.clone(),
                 self.runtime_umems.clone(),
             );
-            xbricks_system.frame_registries.insert(*worker_id, frame_registry);
+            xbricks_system.frame_registries[*worker_id] = Some(frame_registry);
         }
 
         // Initialize UMEMs and Fill/Comp Queues
-        // We store the initialized UMEM objects to be shared by sockets in the same group.
-        // Map: group_id -> (Umem, FrameCount, StartIndex)
-        let mut initialized_umems: HashMap<usize, (Arc<Umem>, Vec<xsk_rs::FrameDesc>)> = HashMap::new();
+        // Indexed by group_id (0..MAX_UMEM). None = this group_id not configured.
+        let mut initialized_umems: Vec<Option<(Arc<Umem>, Vec<xsk_rs::FrameDesc>)>> = vec![None; MAX_UMEM];
 
-        // We iterate over the keys to avoid borrow checker conflicts with the values
-        let group_ids: Vec<usize> = self.runtime_umems.keys().cloned().collect();
-
-        for group_id in group_ids {
-            // 1. Get the config from the builder
-            let umem_conf = self.runtime_umems.get_mut(&group_id).unwrap();
+        for (group_id, umem_conf_opt) in self.runtime_umems.iter().enumerate() {
+            let umem_conf = match umem_conf_opt {
+                Some(c) => c,
+                None => continue,
+            };
 
             let xsk_umem_config = xsk_rs::config::UmemConfig::builder()
                 .frame_size(FrameSize::new(umem_conf.frame_size)?)
@@ -203,42 +209,49 @@ impl SystemBuilder {
             )?;
 
             let shared_umem = Arc::from(umem);
-            // Store UMEM for sharing (cloning Umem is cheap, it's a handle)
-            initialized_umems.insert(
-                group_id,
-                (shared_umem, umem_descs),
-            );
+            initialized_umems[group_id] = Some((shared_umem, umem_descs));
         }
 
-        // UPDATE REGISTRIES WITH INITIALIZED CONFIGS ---
-        // Now every worker has the SAME Arc handle that the Builder has.
-        for frame_registry in xbricks_system.frame_registries.values_mut() {
-            for (group_id, (umem,_ ) ) in &initialized_umems {
-                // Give it the physical UMEM handle (cheap Arc clone)
-                frame_registry.active_umems.insert(*group_id, umem.clone());
+        // Store all UMEM handles in XBricksSystem and propagate to each worker's registry.
+        for (group_id, entry) in initialized_umems.iter().enumerate() {
+            if let Some((umem, _)) = entry {
+                xbricks_system.umems[group_id] = Some(umem.clone());
+            }
+        }
+        // Give every worker registry the physical UMEM handle (cheap Arc clone).
+        for frame_registry_opt in xbricks_system.frame_registries.iter_mut() {
+            if let Some(frame_registry) = frame_registry_opt {
+                for (group_id, entry) in initialized_umems.iter().enumerate() {
+                    if let Some((umem, _)) = entry {
+                        frame_registry.active_umems[group_id] = Some(umem.clone());
+                    }
+                }
             }
         }
 
         // --- 6. CREATE SOCKETS ---
         let mut xsockets = Vec::new();
-        for (group_id, (umem, umem_descs)) in &initialized_umems {
+        for (group_id, entry) in initialized_umems.iter().enumerate() {
+            let (umem, umem_descs) = match entry {
+                Some(v) => v,
+                None => continue,
+            };
             let mut queue_ring_map = HashMap::new();
-            let umem_conf = self.runtime_umems.get(group_id).unwrap();
+            let umem_conf = self.runtime_umems[group_id].as_ref().unwrap();
 
-            for config in umem_groups.get(group_id).unwrap_or(&Vec::new()).iter() {
+            for config in umem_groups[group_id].as_deref().unwrap_or(&[]).iter() {
                 let ring_key = (config.interface.clone(), config.queue_id);
                 let shared_rings = queue_ring_map.get(&ring_key).cloned();
 
                 let mut initial_descs = Vec::new();
                 if shared_rings.is_none() {
-                    if let Some(registry) = xbricks_system.frame_registries.get_mut(&config.worker_id) {
+                    if let Some(registry) = xbricks_system.frame_registries[config.worker_id].as_mut() {
                         let mut global_frames = vec![0u32; umem_conf.fq_size as usize];
-                        let allocated = registry.allocate_batch_into(*group_id, &mut global_frames);
-                        let offset_idx = umem_conf.group_start_frame_idx;
+                        let allocated = registry.allocate_batch_into(group_id, &mut global_frames);
 
                         for i in 0..allocated {
-                            let local_idx = (global_frames[i] - offset_idx) as usize;
-                            initial_descs.push(umem_descs[local_idx]);
+                            let (_umem_id, local_idx) = xbricks_base::frame_registry::decode_global_frame(global_frames[i]);
+                            initial_descs.push(umem_descs[local_idx as usize]);
                         }
                     }
                 }
@@ -297,15 +310,15 @@ impl SystemBuilder {
             }
         }
         #[cfg(feature = "wasm")]
-        for (umem_id, config) in &self.runtime_umems {
-            if let Some((umem, _ )) = &initialized_umems.get(umem_id) {
-                let umem_conf = self.runtime_umems.get(umem_id).unwrap();
-                self.wasm_managers.insert(
-                    *umem_id,
-                    Arc::new(WasmManager::new(umem_conf.frame_size, umem_conf.reserved_frames, umem_conf.frame_count, umem.clone())?),
-                );
-            } else {
-                log::error!("🔥 Failed to initialize WASM Manager for UMEM {}. Umem not found.", umem_id);
+        for (umem_id, umem_conf_opt) in self.runtime_umems.iter().enumerate() {
+            if let Some(umem_conf) = umem_conf_opt {
+                if let Some((umem, _)) = &initialized_umems[umem_id] {
+                    self.wasm_managers[umem_id] = Some(Arc::new(
+                        WasmManager::new(umem_conf.frame_size, umem_conf.reserved_frames, umem_conf.frame_count, umem.clone())?
+                    ));
+                } else {
+                    log::error!("🔥 Failed to initialize WASM Manager for UMEM {}. Umem not found.", umem_id);
+                }
             }
         }
 
@@ -317,10 +330,10 @@ impl SystemBuilder {
         }
 
         let num_sockets = xsockets.len();
-        let num_workers = xbricks_system.frame_registries.len();
+        let num_active_workers = xbricks_system.frame_registries.iter().filter(|e| e.is_some()).count();
         info!(
             "Initialized {} XDP sockets and {} worker frame registries from configuration",
-            num_sockets, num_workers
+            num_sockets, num_active_workers
         );
 
         // Create socket registry for pipeline construction
@@ -333,7 +346,7 @@ impl SystemBuilder {
         // ==========================================================
         // NEW: INITIALIZE RCU SHARED SYSTEM STATE
         // ==========================================================
-        use crate::config::hot_config::{SharedSystemState, HotPipelineConfig};
+        use crate::config::hot_config::HotPipelineConfig;
         use arc_swap::ArcSwap;
 
         let mut rcu_pipelines = HashMap::new();
@@ -387,7 +400,7 @@ impl SystemBuilder {
 
                 runners.push(runner);
             }
-            xbricks_system.worker_runners.insert(worker_id, (core_id, runners));
+            xbricks_system.worker_runners[worker_id] = Some((core_id, runners));
         }
 
         xbricks_system.telemetry_registry = Arc::new(telemetry_registry);
@@ -450,28 +463,26 @@ impl crate::pipeline::XSocketRxTxProvider for XSocketRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xbricks_base::frame_registry::decode_global_frame;
 
     // Helper to create test SystemBus and configs
-    fn create_test_bus_and_configs() -> (Arc<SystemBus>, HashMap<usize, Arc<RuntimeUmemConfig>>) {
+    fn create_test_bus_and_configs() -> (Arc<SystemBus>, Vec<Option<Arc<RuntimeUmemConfig>>>) {
         let (tx, _rx) = crossbeam_channel::bounded(10);
         let bus = Arc::new(SystemBus { bus_senders: vec![tx], umem_partitions: vec![] });
 
-        let mut configs = HashMap::new();
-        configs.insert(
-            0,
-            Arc::new(RuntimeUmemConfig {
-                group_id: 0,
-                frame_size: 2048,
-                frame_size_log2: 11,
-                frame_count: 1024,
-                head_room: 128,
-                fq_size: 512,
-                cq_size: 512,
-                group_start_frame_idx: 0,
-                partitions: 2,
-                reserved_frames: 0,
-            }),
-        );
+        let mut configs: Vec<Option<Arc<RuntimeUmemConfig>>> = vec![None; MAX_UMEM];
+        configs[0] = Some(Arc::new(RuntimeUmemConfig {
+            group_id: 0,
+            frame_size: 2048,
+            frame_size_log2: 11,
+            frame_count: 1024,
+            head_room: 128,
+            fq_size: 512,
+            cq_size: 512,
+            group_start_frame_idx: 0,
+            partitions: 2,
+            reserved_frames: 0,
+        }));
 
         (bus, configs)
     }
@@ -482,23 +493,23 @@ mod tests {
         let (tx, rx) = crossbeam_channel::bounded(10);
         let (bus, configs) = create_test_bus_and_configs();
 
+        // UMEM 0, group_start=0 → local range == absolute range
         let partition = UmemPartition {
-            worker_id: 0,
-            umem_group_id: 0,
-            start_idx: 0,
-            end_idx: 100,
+            worker_id: 0, umem_group_id: 0,
+            start_idx: 0, end_idx: 100,
+            local_start: 0, local_end: 100,
         };
 
-        let registry = FrameRegistry::new(0, vec![(0, partition)], rx, bus, configs);
+        let mut registry = FrameRegistry::new(0, vec![(0, partition)], rx, bus, configs);
 
-        // Check that we have 100 frames available
         assert_eq!(registry.total_free_frames(), 100);
 
-        // Check frame ownership
-        assert_eq!(registry.find_umem_group_for_frame(0), Some(0));
-        assert_eq!(registry.find_umem_group_for_frame(50), Some(0));
-        assert_eq!(registry.find_umem_group_for_frame(99), Some(0));
-        assert_eq!(registry.find_umem_group_for_frame(100), None); // Out of range
+        // All frames should decode to umem_id 0
+        let frames = registry.allocate_batch(0, 100);
+        assert_eq!(frames.len(), 100);
+        for &f in &frames {
+            assert_eq!(decode_global_frame(f).0, 0, "frame {f:#010x} must belong to UMEM 0");
+        }
     }
 
     /// Test frame indexing with multiple UMEM groups
@@ -506,57 +517,50 @@ mod tests {
     fn test_multi_umem_frame_indexing() {
         let (tx, rx) = crossbeam_channel::bounded(10);
 
-        // UMEM 0: frames 0-4095 (4096 frames)
+        // UMEM 0: 4096 frames, group_start=0
         let partition0 = UmemPartition {
-            worker_id: 0,
-            umem_group_id: 0,
-            start_idx: 0,
-            end_idx: 4096,
+            worker_id: 0, umem_group_id: 0,
+            start_idx: 0, end_idx: 4096,
+            local_start: 0, local_end: 4096,
         };
 
-        // UMEM 1: frames 4096-6143 (2048 frames)
+        // UMEM 1: 2048 frames, group_start=4096 → local range [0, 2048)
         let partition1 = UmemPartition {
-            worker_id: 0,
-            umem_group_id: 1,
-            start_idx: 4096,
-            end_idx: 6144,
+            worker_id: 0, umem_group_id: 1,
+            start_idx: 4096, end_idx: 6144,
+            local_start: 0, local_end: 2048,
         };
 
         let (bus, mut configs) = create_test_bus_and_configs();
-        // Add config for UMEM 1
-        configs.insert(
-            1,
-            Arc::new(RuntimeUmemConfig {
-                group_id: 1,
-                frame_size: 2048,
-                frame_size_log2: 11,
-                frame_count: 2048,
-                head_room: 128,
-                fq_size: 512,
-                cq_size: 512,
-                group_start_frame_idx: 4096,
-                partitions: 1,
-                reserved_frames: 0,
-            }),
-        );
+        // Override UMEM 0 to have 4096 frames to match partition0
+        configs[0] = Some(Arc::new(RuntimeUmemConfig {
+            group_id: 0, frame_size: 2048, frame_size_log2: 11,
+            frame_count: 4096, head_room: 128, fq_size: 512, cq_size: 512,
+            group_start_frame_idx: 0, partitions: 2, reserved_frames: 0,
+        }));
+        configs[1] = Some(Arc::new(RuntimeUmemConfig {
+            group_id: 1, frame_size: 2048, frame_size_log2: 11,
+            frame_count: 2048, head_room: 128, fq_size: 512, cq_size: 512,
+            group_start_frame_idx: 4096, partitions: 1, reserved_frames: 0,
+        }));
 
-        let registry = FrameRegistry::new(0, vec![(0, partition0), (1, partition1)], rx, bus, configs);
+        let mut registry = FrameRegistry::new(0, vec![(0, partition0), (1, partition1)], rx, bus, configs);
 
-        // Check total frames
         assert_eq!(registry.total_free_frames(), 6144);
 
-        // Check frame ownership for UMEM 0
-        assert_eq!(registry.find_umem_group_for_frame(0), Some(0));
-        assert_eq!(registry.find_umem_group_for_frame(2047), Some(0));
-        assert_eq!(registry.find_umem_group_for_frame(4095), Some(0));
+        // All frames from UMEM 0 must decode to umem_id 0
+        let frames0 = registry.allocate_batch(0, 4096);
+        assert_eq!(frames0.len(), 4096);
+        for &f in &frames0 {
+            assert_eq!(decode_global_frame(f).0, 0, "frame {f:#010x} must belong to UMEM 0");
+        }
 
-        // Check frame ownership for UMEM 1
-        assert_eq!(registry.find_umem_group_for_frame(4096), Some(1));
-        assert_eq!(registry.find_umem_group_for_frame(5120), Some(1));
-        assert_eq!(registry.find_umem_group_for_frame(6143), Some(1));
-
-        // Check out of range
-        assert_eq!(registry.find_umem_group_for_frame(6144), None);
+        // All frames from UMEM 1 must decode to umem_id 1
+        let frames1 = registry.allocate_batch(1, 2048);
+        assert_eq!(frames1.len(), 2048);
+        for &f in &frames1 {
+            assert_eq!(decode_global_frame(f).0, 1, "frame {f:#010x} must belong to UMEM 1");
+        }
     }
 
     /// Test frame allocation from specific UMEM group
@@ -564,59 +568,43 @@ mod tests {
     fn test_allocate_from_specific_umem() {
         let (tx, rx) = crossbeam_channel::bounded(10);
 
+        // UMEM 0: 100 frames, group_start=0
         let partition0 = UmemPartition {
-            worker_id: 0,
-            umem_group_id: 0,
-            start_idx: 0,
-            end_idx: 100,
+            worker_id: 0, umem_group_id: 0,
+            start_idx: 0, end_idx: 100,
+            local_start: 0, local_end: 100,
         };
 
+        // UMEM 1: 100 frames, group_start=100 → local range [0, 100)
         let partition1 = UmemPartition {
-            worker_id: 0,
-            umem_group_id: 1,
-            start_idx: 100,
-            end_idx: 200,
+            worker_id: 0, umem_group_id: 1,
+            start_idx: 100, end_idx: 200,
+            local_start: 0, local_end: 100,
         };
 
         let (bus, mut configs) = create_test_bus_and_configs();
-        // Add config for UMEM 1
-        configs.insert(
-            1,
-            Arc::new(RuntimeUmemConfig {
-                group_id: 1,
-                frame_size: 2048,
-                frame_size_log2: 11,
-                frame_count: 100,
-                head_room: 128,
-                fq_size: 512,
-                cq_size: 512,
-                group_start_frame_idx: 100,
-                partitions: 1,
-                reserved_frames: 0,
-            }),
-        );
+        configs[1] = Some(Arc::new(RuntimeUmemConfig {
+            group_id: 1, frame_size: 2048, frame_size_log2: 11,
+            frame_count: 100, head_room: 128, fq_size: 512, cq_size: 512,
+            group_start_frame_idx: 100, partitions: 1, reserved_frames: 0,
+        }));
 
         let mut registry = FrameRegistry::new(0, vec![(0, partition0), (1, partition1)], rx, bus, configs);
 
-        // Allocate 10 frames from UMEM 0
+        // Allocate 10 frames from UMEM 0 — must all decode to umem_id 0
         let frames = registry.allocate_batch(0, 10);
         assert_eq!(frames.len(), 10);
-        for &frame_idx in &frames {
-            assert!(frame_idx < 100, "Frame {} should be from UMEM 0", frame_idx);
+        for &f in &frames {
+            assert_eq!(decode_global_frame(f).0, 0, "frame {f:#010x} must be from UMEM 0");
         }
 
-        // Allocate 5 frames from UMEM 1
+        // Allocate 5 frames from UMEM 1 — must all decode to umem_id 1
         let frames = registry.allocate_batch(1, 5);
         assert_eq!(frames.len(), 5);
-        for &frame_idx in &frames {
-            assert!(
-                frame_idx >= 100 && frame_idx < 200,
-                "Frame {} should be from UMEM 1",
-                frame_idx
-            );
+        for &f in &frames {
+            assert_eq!(decode_global_frame(f).0, 1, "frame {f:#010x} must be from UMEM 1");
         }
 
-        // Check remaining frames
         assert_eq!(registry.total_free_frames(), 185); // 200 - 15
     }
 
@@ -627,38 +615,28 @@ mod tests {
         let (bus, configs) = create_test_bus_and_configs();
 
         let partition = UmemPartition {
-            worker_id: 0,
-            umem_group_id: 0,
-            start_idx: 0,
-            end_idx: 100,
+            worker_id: 0, umem_group_id: 0,
+            start_idx: 0, end_idx: 100,
+            local_start: 0, local_end: 100,
         };
 
         let mut registry = FrameRegistry::new(0, vec![(0, partition)], rx, bus.clone(), configs.clone());
 
-        // Allocate 10 frames
         let frames = registry.allocate_batch(0, 10);
         assert_eq!(frames.len(), 10);
         assert_eq!(registry.total_free_frames(), 90);
 
-        // Release first frame
         registry.release_local(frames[0]);
         assert_eq!(registry.total_free_frames(), 91);
 
-        // Release same frame again (refcount is 0, will add duplicate - this is a caller bug)
-        // In real usage, this shouldn't happen as the frame is already back in free_stash.
-        // As double free is caught by release_local, we don't need to worry about it.
-
+        // Double-free is caught by release_local
         registry.release_local(frames[0]);
-        assert_eq!(registry.total_free_frames(), 91); // Double Free Caught
+        assert_eq!(registry.total_free_frames(), 91);
 
-        // Note: The above is a bug scenario - callers should not release frames twice
-        // The refcount mechanism is for tracking shallow copies (retain/release pairs)
-
-        // Release remaining frames (note: we now have 92 due to duplicate)
         for &frame_idx in &frames[1..] {
             registry.release_local(frame_idx);
         }
-        assert_eq!(registry.total_free_frames(), 100); // 91 + 9 = 100
+        assert_eq!(registry.total_free_frames(), 100);
     }
 
     /// Test merged partitions (worker requests multiple consecutive partitions)
@@ -667,28 +645,23 @@ mod tests {
         let (tx, rx) = crossbeam_channel::bounded(10);
         let (bus, configs) = create_test_bus_and_configs();
 
-        // Worker gets 4 consecutive partitions merged into one
-        // Partitions 0-3 from UMEM 0, each 256 frames = 1024 total frames
+        // 4 consecutive partitions merged into one — UMEM 0, group_start=0
         let merged_partition = UmemPartition {
-            worker_id: 0,
-            umem_group_id: 0,
-            start_idx: 0,
-            end_idx: 1024, // 4 partitions * 256 frames
+            worker_id: 0, umem_group_id: 0,
+            start_idx: 0, end_idx: 1024,
+            local_start: 0, local_end: 1024,
         };
 
-        let registry = FrameRegistry::new(0, vec![(0, merged_partition)], rx, bus.clone(), configs.clone());
+        let mut registry = FrameRegistry::new(0, vec![(0, merged_partition)], rx, bus.clone(), configs.clone());
 
-        // Check total frames
         assert_eq!(registry.total_free_frames(), 1024);
 
-        // Check frame ownership across the merged partition
-        assert_eq!(registry.find_umem_group_for_frame(0), Some(0));
-        assert_eq!(registry.find_umem_group_for_frame(255), Some(0)); // End of partition 0
-        assert_eq!(registry.find_umem_group_for_frame(256), Some(0)); // Start of partition 1
-        assert_eq!(registry.find_umem_group_for_frame(512), Some(0)); // Start of partition 2
-        assert_eq!(registry.find_umem_group_for_frame(768), Some(0)); // Start of partition 3
-        assert_eq!(registry.find_umem_group_for_frame(1023), Some(0)); // End of partition 3
-        assert_eq!(registry.find_umem_group_for_frame(1024), None); // Out of range
+        // All 1024 frames must decode to umem_id 0
+        let frames = registry.allocate_batch(0, 1024);
+        assert_eq!(frames.len(), 1024);
+        for &f in &frames {
+            assert_eq!(decode_global_frame(f).0, 0);
+        }
     }
 
     /// Test allocation exhaustion
@@ -698,48 +671,45 @@ mod tests {
         let (bus, configs) = create_test_bus_and_configs();
 
         let partition = UmemPartition {
-            worker_id: 0,
-            umem_group_id: 0,
-            start_idx: 0,
-            end_idx: 10, // Only 10 frames
+            worker_id: 0, umem_group_id: 0,
+            start_idx: 0, end_idx: 10,
+            local_start: 0, local_end: 10,
         };
 
         let mut registry = FrameRegistry::new(0, vec![(0, partition)], rx, bus.clone(), configs.clone());
 
-        // Allocate all frames
-        let frames = registry.allocate_batch(0, 20); // Request more than available
-        assert_eq!(frames.len(), 10); // Should only get 10
+        let frames = registry.allocate_batch(0, 20); // request more than available
+        assert_eq!(frames.len(), 10);
         assert_eq!(registry.total_free_frames(), 0);
 
-        // Try to allocate more (should get empty)
         let frames = registry.allocate_batch(0, 5);
         assert_eq!(frames.len(), 0);
     }
 
-    /// Test frame indexing with non-zero start indices
+    /// Test frame indexing with non-zero start indices (worker owns partition [512, 1024) of UMEM 0)
     #[test]
     fn test_non_zero_start_indices() {
         let (tx, rx) = crossbeam_channel::bounded(10);
         let (bus, configs) = create_test_bus_and_configs();
 
-        // Worker owns partitions 2-3 from UMEM 0 (frames 512-1023)
+        // UMEM 0, group_start=0 → local_start=512, local_end=1024
         let partition = UmemPartition {
-            worker_id: 1,
-            umem_group_id: 0,
-            start_idx: 512,
-            end_idx: 1024,
+            worker_id: 1, umem_group_id: 0,
+            start_idx: 512, end_idx: 1024,
+            local_start: 512, local_end: 1024,
         };
 
-        let registry = FrameRegistry::new(1, vec![(0, partition)], rx, bus.clone(), configs.clone());
+        let mut registry = FrameRegistry::new(1, vec![(0, partition)], rx, bus.clone(), configs.clone());
 
-        // Check total frames
         assert_eq!(registry.total_free_frames(), 512);
 
-        // Check frame ownership
-        assert_eq!(registry.find_umem_group_for_frame(511), None); // Before range
-        assert_eq!(registry.find_umem_group_for_frame(512), Some(0)); // Start
-        assert_eq!(registry.find_umem_group_for_frame(768), Some(0)); // Middle
-        assert_eq!(registry.find_umem_group_for_frame(1023), Some(0)); // End
-        assert_eq!(registry.find_umem_group_for_frame(1024), None); // After range
+        // All allocated frames must decode to umem_id=0 and local_idx in [512, 1024)
+        let frames = registry.allocate_batch(0, 512);
+        assert_eq!(frames.len(), 512);
+        for &f in &frames {
+            let (uid, lidx) = decode_global_frame(f);
+            assert_eq!(uid, 0, "frame {f:#010x} must be from UMEM 0");
+            assert!(lidx >= 512 && lidx < 1024, "local_idx {lidx} must be in [512, 1024)");
+        }
     }
 }

@@ -8,6 +8,7 @@ use anyhow::{anyhow, Result};
 use std::collections::{HashMap, HashSet};
 use ts_rs::TS;
 use xbricks_base::RuntimeUmemConfig;
+use xbricks_base::frame_registry::MAX_UMEM;
 use crate::system_builder::SystemBuilder;
 use crate::xsocket::XdpSocketConfig;
 
@@ -528,6 +529,14 @@ impl XBricksConfig {
         // 2. Validate UMEM configurations
         let mut umem_ids = HashSet::new();
         for umem_cfg in &section.umem {
+            // Check UMEM ID fits in 8 bits (required by encode_global_frame)
+            if umem_cfg.id >= MAX_UMEM {
+                return Err(anyhow!(
+                    "UMEM id {} exceeds maximum of {} (must fit in 8 bits for frame encoding)",
+                    umem_cfg.id, MAX_UMEM - 1
+                ));
+            }
+
             // Check for duplicate UMEM IDs
             if !umem_ids.insert(umem_cfg.id) {
                 return Err(anyhow!("Duplicate UMEM id: {}", umem_cfg.id));
@@ -755,21 +764,20 @@ impl XBricksConfig {
         }
 
         // 5a. Validate total partition allocation doesn't exceed available partitions per UMEM
-        let mut partition_allocation: HashMap<usize, usize> = HashMap::new();
+        let mut partition_allocation = vec![0usize; MAX_UMEM];
 
         for worker_cfg in &section.workers {
             for partition_req in &worker_cfg.partitions {
-                *partition_allocation.entry(partition_req.umem).or_insert(0) += partition_req.count;
+                partition_allocation[partition_req.umem] += partition_req.count;
             }
         }
 
-        for (umem_id, total_requested) in &partition_allocation {
-            let umem_cfg = section.umem.iter().find(|u| u.id == *umem_id).unwrap(); // Safe because validation above ensures all referenced UMEMs exist
-
-            if *total_requested > umem_cfg.partitions as usize {
+        for umem_cfg in &section.umem {
+            let total_requested = partition_allocation[umem_cfg.id];
+            if total_requested > umem_cfg.partitions as usize {
                 return Err(anyhow!(
                     "UMEM {}: total requested partitions ({}) exceeds available partitions ({})",
-                    umem_id,
+                    umem_cfg.id,
                     total_requested,
                     umem_cfg.partitions
                 ));
@@ -1029,8 +1037,12 @@ impl XBricksConfig {
     pub fn to_system_builder(&self) -> anyhow::Result<SystemBuilder> {
         // --- STEP 1: Build Lookups (Who owns which queue?) ---
 
-        // Map: Worker ID -> Core ID
-        let worker_core_map: HashMap<usize, usize> = self.xbricks.workers.iter().map(|w| (w.id, w.core)).collect();
+        // Map: Worker ID -> Core ID (indexed by worker_id, dense 0..N)
+        let max_worker_id = self.xbricks.workers.iter().map(|w| w.id).max().unwrap_or(0);
+        let mut worker_core_map: Vec<Option<usize>> = vec![None; max_worker_id + 1];
+        for w in &self.xbricks.workers {
+            worker_core_map[w.id] = Some(w.core);
+        }
 
         // Map: (Interface Name, Queue ID) -> Worker ID
         // We scan all pipelines to discover which worker is assigned to which queue.
@@ -1078,7 +1090,7 @@ impl XBricksConfig {
 
         // --- STEP 2: Create Runtime UMEM Configs ---
 
-        let mut runtime_umems: HashMap<usize, Arc<RuntimeUmemConfig>> = HashMap::new();
+        let mut runtime_umems: Vec<Option<Arc<RuntimeUmemConfig>>> = vec![None; MAX_UMEM];
         // Assuming global frame indices are sequential across UMEM groups based on definition order
         let mut current_global_frame_idx = 0;
 
@@ -1097,7 +1109,7 @@ impl XBricksConfig {
                 reserved_frames: umem_cfg.reserved,
             });
 
-            runtime_umems.insert(umem_cfg.id, rc);
+            runtime_umems[umem_cfg.id] = Some(rc);
             current_global_frame_idx += umem_cfg.frame_count;
         }
 
@@ -1107,8 +1119,8 @@ impl XBricksConfig {
 
         for xsk_map in &self.xbricks.xsk {
             // Get the UMEM config for this mapping
-            let umem_config = runtime_umems
-                .get(&xsk_map.umem)
+            let umem_config = runtime_umems[xsk_map.umem]
+                .as_ref()
                 .ok_or_else(|| anyhow!("XSK mapping references unknown UMEM ID {}", xsk_map.umem))?;
 
             for &queue_id in &xsk_map.queues {
@@ -1119,8 +1131,9 @@ impl XBricksConfig {
                         xsk_map.iface, queue_id
                     ))?;
 
-                let core_id = *worker_core_map
-                    .get(&worker_id)
+                let core_id = worker_core_map
+                    .get(worker_id)
+                    .and_then(|opt| *opt)
                     .ok_or_else(|| anyhow!("Worker ID {} not found in workers list", worker_id))?;
 
                 let id_string = format!("{} queue {} worker {}", xsk_map.iface, queue_id, worker_id);
@@ -1141,9 +1154,9 @@ impl XBricksConfig {
         }
         // --- STEP 4: Extract worker partition requests ---
 
-        let mut worker_partitions = HashMap::new();
+        let mut worker_partitions: Vec<Option<Vec<PartitionRequest>>> = vec![None; max_worker_id + 1];
         for worker_cfg in &self.xbricks.workers {
-            worker_partitions.insert(worker_cfg.id, worker_cfg.partitions.clone());
+            worker_partitions[worker_cfg.id] = Some(worker_cfg.partitions.clone());
         }
 
         // --- STEP 5: Build System Workers (Existing Logic) ---
@@ -1153,7 +1166,7 @@ impl XBricksConfig {
             xdp_socket_configs,
             runtime_umems,
             #[cfg(feature = "wasm")]
-            wasm_managers: Default::default(),
+            wasm_managers: vec![None; MAX_UMEM],
             worker_partitions,
         };
 
