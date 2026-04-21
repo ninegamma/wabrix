@@ -34,7 +34,7 @@ struct Opt {
     #[arg(short = 'c', long, default_value = "0")]
     core: Option<usize>,
 
-    /// Number of worker threads (1-4), each on separate core and TX queue
+    /// Number of worker threads (1-4), each on a separate core and TX queue
     #[arg(short = 'w', long, default_value = "1")]
     workers: usize,
 
@@ -195,7 +195,7 @@ async fn main() -> anyhow::Result<()> {
         total_workers, total_workers
     );
 
-    let (handles, _, _dst_port_stats) = xbricks_system.spawn_workers(false, shutdown.clone(), workers_completed.clone())?;
+    let (handles, _) = xbricks_system.spawn_workers(false, shutdown.clone(), workers_completed.clone())?;
 
     info!(
         "Spawned {} worker thread handles. Waiting for completion or Ctrl-C...",

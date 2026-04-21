@@ -57,7 +57,6 @@ impl SystemBuilder {
             telemetry_registry: Arc::new(TelemetryRegistry::default()),
             worker_runners: (0..num_workers).map(|_| None).collect(),
             platform_data,
-            dst_port_stats: Vec::new(),
             shared_state: SharedSystemState::new(HashMap::new()),
             umems: vec![None; MAX_UMEM],
         });
@@ -344,7 +343,6 @@ impl SystemBuilder {
         // Create telemetry registry
         let mut telemetry_registry = TelemetryRegistry::new();
         // Create dst port stats registry
-        let mut dst_port_stats_registry: Vec<std::sync::Arc<crate::nodes::DstPortStats>> = Vec::new();
 
         // ==========================================================
         // NEW: INITIALIZE RCU SHARED SYSTEM STATE
@@ -390,7 +388,6 @@ impl SystemBuilder {
                     worker_id,
                     &mut xbricks_system.xsocket_registry,
                     Some(&mut telemetry_registry),
-                    Some(&mut dst_port_stats_registry),
                     &xbricks_system.platform_data,
                     #[cfg(feature = "wasm")]
                     &self.wasm_managers,
@@ -407,7 +404,6 @@ impl SystemBuilder {
         }
 
         xbricks_system.telemetry_registry = Arc::new(telemetry_registry);
-        xbricks_system.dst_port_stats = dst_port_stats_registry;
 
         Ok(xbricks_system)
     }

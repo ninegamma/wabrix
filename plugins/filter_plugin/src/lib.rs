@@ -57,7 +57,6 @@ impl Guest for MyInspector {
                 if kind == HeaderKind::Ip {
                     is_v4 = true;
                 } else if dst_port.is_none() {
-                    // Extract AND convert Endianness!
                     if kind == HeaderKind::Tcp {
                         dst_port = Some(pdu.headers().tcp(base_ptr, i).dst_port());
                     } else if kind == HeaderKind::Udp {
@@ -69,16 +68,13 @@ impl Guest for MyInspector {
             // Execute Routing Logic
             if is_v4 && dst_port.is_some() {
                 action |= ROUTE_FAST_PATH;
-
                 // Safe to unwrap because of the if condition
                 let port = dst_port.unwrap();
-
                 let telemetry_bucket = if port <= 9 {
                     port as u32
                 } else {
                     10
                 };
-
                 action |= telemetry_bucket << 16;
             } else {
                 action |= ROUTE_EXCEPTION;

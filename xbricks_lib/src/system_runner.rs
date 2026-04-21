@@ -17,7 +17,6 @@ pub struct XBricksSystem {
     /// Indexed by worker_id (0..num_workers).
     pub(crate) worker_runners: Vec<Option<(CoreId, Vec<crate::pipeline::PipelineRunner>)>>,
     pub(crate) platform_data: PlatformData,
-    pub(crate) dst_port_stats: Vec<Arc<crate::nodes::DstPortStats>>,
     pub shared_state: Arc<crate::config::hot_config::SharedSystemState>,
     /// All live UMEM handles indexed by umem_id (0..MAX_UMEM). None = not used.
     pub umems: Vec<Option<Arc<Umem>>>,
@@ -34,7 +33,6 @@ impl XBricksSystem {
     ) -> anyhow::Result<(
         Vec<JoinHandle<Result<Vec<PipelineStats>, String>>>,
         Option<std::thread::JoinHandle<()>>,
-        Vec<Arc<crate::nodes::DstPortStats>>,
     )> {
         // --- SPAWN TELEMETRY LOGGER ---
 
@@ -82,8 +80,7 @@ impl XBricksSystem {
             );
         }
 
-        let dst_port_stats = self.dst_port_stats.clone();
-        Ok((handles, telemetry_handle, dst_port_stats))
+        Ok((handles, telemetry_handle))
     }
 
     fn spawn_telemetry(&mut self, shutdown: Arc<AtomicBool>) -> anyhow::Result<std::thread::JoinHandle<()>> {

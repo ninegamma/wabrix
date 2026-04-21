@@ -142,9 +142,9 @@ async fn main() -> anyhow::Result<()> {
                 let shutdown = Arc::new(AtomicBool::new(false));
                 let workers_completed = Arc::new(AtomicUsize::new(0));
                 let pipeline_registry = Arc::clone(&xbricks_system.telemetry_registry);
-                let (handles, telemetry_handle, dst_port_stats) = xbricks_system
+                let (handles, telemetry_handle) = xbricks_system
                     .spawn_workers(B_WITH_TELEMETRY, shutdown.clone(), workers_completed.clone())
-                    .context("Failed to spawn worker threads").unwrap();
+                    .context("Failed to spawn worker threads")?;
 
                 info!("All {} worker threads spawned. Data Plane is LIVE.", handles.len());
 
@@ -183,7 +183,6 @@ async fn main() -> anyhow::Result<()> {
                 }
 
                 if let Some(handle) = telemetry_handle { let _ = handle.join(); }
-                for stats in dst_port_stats { stats.print_statistics(); }
 
                 active_shared_state.store(
                     xbricks_lib::config::hot_config::SharedSystemState::new(std::collections::HashMap::new())

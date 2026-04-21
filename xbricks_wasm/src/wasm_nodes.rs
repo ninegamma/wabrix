@@ -171,6 +171,7 @@ impl Node for WasmInspectorNode {
                 });
             }
 */
+            // invalid route ID: pdu remains in batch, and maybe dropped later
             if route_id >= num_routes { usize::MAX } else { route_id }
         });
 

@@ -2,13 +2,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use core_affinity::CoreId;
-use log::{debug, error, info};
+use log::{debug, info};
 use crate::toml_parser::PipelineInstance;
-use xbricks_base::interface::Pdu;
 pub(crate) use crate::nodes::{
-    BatchRxNode, BatchTxNode, BucketedTelemetryNode, ClassifierNode, DropNode, DstPortCntNode, FastParserNode,
-    L4ClassifierNode, PacketGenNode, get_telemetry_mapper, ExceptionRouterNode,
+    BatchRxNode, BatchTxNode, DropNode, FastParserNode,
+    PacketGenNode,
 };
+
 pub(crate) use crate::{BatchRx, BatchTx, MAX_BATCH_SIZE};
 use xbricks_base::system::PlatformData;
 use separator::Separatable;
@@ -18,8 +18,6 @@ use crate::config::hot_config::{HotNodeData, HotPipelineConfig};
 #[cfg(feature = "wasm")]
 use xbricks_wasm::wasm_manager::WasmManager;
 use xbricks_base::telemetry::TelemetryRegistry;
-
-type ClassifierFn = Box<dyn Fn(&Pdu) -> usize + Send>;
 
 /// Trait for managing XDP socket access
 /// This abstracts away the details of how XDP sockets are stored and retrieved
@@ -34,31 +32,6 @@ pub trait XSocketRxTxProvider {
     fn take_tx_socket(&mut self, queue_id: usize, interface: &str) -> Option<Box<dyn BatchTx + Send>>;
 }
 
-pub fn get_classifier_algorithm(name: &str) -> ClassifierFn {
-    match name {
-        "ipv4_filter" => Box::new(|pdu| {
-            // Route 0 = IPv4 packets, everything else goes to default
-            if pdu.is_ipv4() { 0 } else { 99 }
-        }),
-        "ipv4_split" => Box::new(|pdu| {
-            // Example: Route 0 = IPv4, Route 1 = IPv6, Default = Other
-            if pdu.is_ipv4() {
-                0
-            } else if pdu.is_ipv6() {
-                1
-            } else {
-                99
-            }
-        }),
-        "mac_filter" => Box::new(|_pdu| {
-            // Example check
-            0
-        }),
-        // Add more logic here
-        _ => panic!("Unknown classifier algorithm: {}", name),
-    }
-}
-
 pub struct PipelineFactory;
 
 impl PipelineFactory {
@@ -67,7 +40,6 @@ impl PipelineFactory {
         worker_id: usize,
         xsocket_mgr: &mut dyn XSocketRxTxProvider,
         mut telemetry_registry: Option<&mut TelemetryRegistry>,
-        mut dst_port_stats_registry: Option<&mut Vec<Arc<crate::nodes::DstPortStats>>>,
         platform_data: &PlatformData,
         #[cfg(feature = "wasm")]
         wasm_managers: &Vec<Option<Arc<WasmManager>>>,
@@ -371,184 +343,6 @@ impl PipelineFactory {
                         .clone();
 
                     Box::new(FastParserNode::new(my_id.clone(), next_id))
-                }
-
-                // === 6. L4Classifier Node ===
-                "L4ClassifierNode" => {
-                    // This node requires routes array with exactly 2 entries
-                    if node_conf.routes.len() != 2 {
-                        return Err(format!(
-                            "L4ClassifierNode {} requires exactly 2 routes (tcp_udp and other)",
-                            node_conf.id
-                        ));
-                    }
-
-                    // Route 0: TCP/UDP traffic
-                    let tcp_udp_route_str = &node_conf.routes[0];
-                    let tcp_udp_route = id_map
-                        .get(tcp_udp_route_str)
-                        .ok_or(format!(
-                            "L4ClassifierNode {}: tcp_udp route '{}' not found",
-                            node_conf.id, tcp_udp_route_str
-                        ))?
-                        .clone();
-
-                    // Route 1: Other traffic
-                    let other_route_str = &node_conf.routes[1];
-                    let other_route = id_map
-                        .get(other_route_str)
-                        .ok_or(format!(
-                            "L4ClassifierNode {}: other route '{}' not found",
-                            node_conf.id, other_route_str
-                        ))?
-                        .clone();
-
-                    Box::new(L4ClassifierNode::new(my_id.clone(), tcp_udp_route, other_route))
-                }
-
-                // === 6. L4Classifier Node ===
-                "ExceptionRouterNode" => {
-                    // This node requires routes array with exactly 2 entries
-                    if node_conf.routes.len() != 2 {
-                        return Err(format!(
-                            "ExceptionRouterNode {} requires exactly 2 routes (tcp_udp and other)",
-                            node_conf.id
-                        ));
-                    }
-
-                    // Route 0: TCP/UDP traffic
-                    let fast_path_route_str = &node_conf.routes[0];
-                    let fast_path_route = id_map
-                        .get(fast_path_route_str)
-                        .ok_or(format!(
-                            "ExceptionRouterNode {}: tcp_udp route '{}' not found",
-                            node_conf.id, fast_path_route_str
-                        ))?
-                        .clone();
-
-                    // Route 1: Other traffic
-                    let exception_route_str = &node_conf.routes[1];
-                    let exception_route = id_map
-                        .get(exception_route_str)
-                        .ok_or(format!(
-                            "ExceptionRouterNode {}: other route '{}' not found",
-                            node_conf.id, exception_route_str
-                        ))?
-                        .clone();
-
-                    Box::new(ExceptionRouterNode::new(my_id.clone(), fast_path_route, exception_route))
-                }
-
-                // === 7. DstPortCnt Node ===
-                "DstPortCntNode" => {
-                    let next_str = node_conf
-                        .next
-                        .as_ref()
-                        .ok_or(format!("Node {} missing 'next'", node_conf.id))?;
-                    let next_id = id_map
-                        .get(next_str)
-                        .ok_or(format!("Node {} points to unknown next '{}'", node_conf.id, next_str))?
-                        .clone();
-
-                    let port_ranges = node_conf
-                        .args
-                        .get("port_ranges")
-                        .ok_or(format!("DstPortCntNode {} missing 'port_ranges' arg", node_conf.id))?;
-
-                    let node = DstPortCntNode::new(my_id.clone(), next_id, port_ranges, node_conf.id.clone());
-
-                    // Register stats for later printing
-                    if let Some(registry) = dst_port_stats_registry.as_mut() {
-                        registry.push(node.get_stats());
-                    }
-
-                    Box::new(node)
-                }
-
-                // === 7. Classifier Node ===
-                "ClassifierNode" => {
-                    // Resolve Routes: ["A", "B"] -> [NodeId(1), NodeId(5)]
-                    if node_conf.routes.is_empty() {
-                        return Err(format!("Classifier {} missing 'routes'", node_conf.id));
-                    }
-
-                    let mut route_ids = Vec::new();
-                    for r_str in &node_conf.routes {
-                        let rid = id_map
-                            .get(r_str)
-                            .ok_or(format!("Route target '{}' not found", r_str))?
-                            .clone();
-                        route_ids.push(rid);
-                    }
-
-                    // Resolve Default Route
-                    let default_id = if let Some(def_str) = &node_conf.default {
-                        Some(
-                            id_map
-                                .get(def_str)
-                                .ok_or(format!("Default target '{}' not found", def_str))?
-                                .clone(),
-                        )
-                    } else {
-                        None
-                    };
-
-                    // Resolve Algorithm
-                    let algo_name = node_conf
-                        .args
-                        .get("algo")
-                        .ok_or(format!("Classifier {} missing 'algo' arg", node_conf.id))?;
-                    let closure = get_classifier_algorithm(algo_name);
-
-                    Box::new(ClassifierNode::new(my_id.clone(), route_ids, default_id, closure))
-                }
-
-                // === 8. Telemetry Node ===
-                "TelemetryNode" => {
-                    let next_str = node_conf
-                        .next
-                        .as_ref()
-                        .ok_or(format!("Node {} missing 'next'", node_conf.id))?;
-                    let next_id = id_map
-                        .get(next_str)
-                        .ok_or(format!("Node {} points to unknown next '{}'", node_conf.id, next_str))?
-                        .clone();
-
-                    // Get algorithm name
-                    let algo_name = node_conf
-                        .args
-                        .get("algo")
-                        .ok_or(format!("TelemetryNode {} missing 'algo' arg", node_conf.id))?;
-
-                    // Get number of buckets
-                    let num_buckets = node_conf
-                        .args
-                        .get("buckets")
-                        .ok_or(format!("TelemetryNode {} missing 'buckets' arg", node_conf.id))?
-                        .parse::<usize>()
-                        .map_err(|_| format!("TelemetryNode {} 'buckets' must be a number", node_conf.id))?;
-
-                    // Parse labels if provided
-                    let labels = if let Some(labels_str) = node_conf.args.get("labels") {
-                        labels_str.split(',').map(|s| s.trim().to_string()).collect()
-                    } else {
-                        // Generate default labels (Bucket 0, Bucket 1, etc.)
-                        (0..num_buckets).map(|i| format!("Bucket {}", i)).collect()
-                    };
-
-                    // Get the mapper function
-                    let mapper = get_telemetry_mapper(algo_name);
-
-                    // Create the telemetry node
-                    let telemetry_node = BucketedTelemetryNode::new(my_id.clone(), next_id, num_buckets, mapper);
-
-                    // Register with telemetry registry if provided
-                    if let Some(registry) = telemetry_registry.as_mut() {
-                        let (counters_pkts, counters_bytes) = telemetry_node.get_counters();
-                        registry.register(node_conf.id.clone(), labels, counters_pkts, counters_bytes);
-                    }
-
-                    Box::new(telemetry_node)
                 }
 
                 // === 9. Wasm Inspector Node ===
