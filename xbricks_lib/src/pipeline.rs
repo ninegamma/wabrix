@@ -45,6 +45,10 @@ impl PipelineFactory {
         wasm_managers: &Vec<Option<Arc<WasmManager>>>,
         // NEW: Pass the shared state so nodes can hold a reference to it
         shared_state: Arc<crate::config::hot_config::SharedSystemState>,
+        #[cfg(feature = "wasm")]
+        wasm_instance_totals: &[usize],
+        #[cfg(feature = "wasm")]
+        wasm_instance_counters: &mut Vec<usize>,
     ) -> Result<Vec<Box<dyn Node>>, String> {
         // --- PASS 1: ID Resolution ---
         // Map "string_id" -> NodeId
@@ -417,7 +421,15 @@ impl PipelineFactory {
                         counters_bytes,
                     };
 
-                    Box::new(WasmInspectorNode::new(my_id.clone(), manager, wasm_path, routing_table, None, telemetry_metrics))
+                    // Compute this instance's reserved-memory partition.
+                    let instance_idx = wasm_instance_counters[umem_id];
+                    let total_instances = wasm_instance_totals[umem_id].max(1);
+                    let frames_per_instance = manager.umem().reserved_frames / total_instances as u32;
+                    let partition_start_bytes =
+                        instance_idx as usize * frames_per_instance as usize * manager.umem().frame_size as usize;
+                    wasm_instance_counters[umem_id] += 1;
+
+                    Box::new(WasmInspectorNode::new(my_id.clone(), manager, wasm_path, routing_table, None, telemetry_metrics, partition_start_bytes))
                 }
 
                 _ => return Err(format!("Unknown Node Type: {}", node_conf.node_type)),

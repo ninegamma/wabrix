@@ -33,6 +33,11 @@ pub struct WasmInspectorNode {
     #[cfg(feature = "profiling")]
     total_cycles: u64,
     telemetry_metrics: TelemetryMetrics,
+    /// Byte offset from Umem base where WASM address 0 begins for this instance.
+    /// Used to translate `desc_addr` values to partition-relative WASM addresses
+    /// before calling the plugin, and back to absolute offsets after.
+    /// Zero for the first (or only) instance.
+    partition_start_bytes: usize,
 }
 
 impl WasmInspectorNode {
@@ -43,15 +48,25 @@ impl WasmInspectorNode {
         routing_table: Vec<NodeId>, // Accept any number of routes
         telemetry_tx: Option<Sender<u32>>,
         telemetry_metrics: TelemetryMetrics,
+        partition_start_bytes: usize,
     ) -> Self {
         // 1. Fetch the Component from the Manager's DashMap cache
         // This takes nanoseconds if already loaded, avoiding disk I/O.
         let component = manager.get_component(wasm_file_path).expect("Failed to load Wasm component");
 
-        // 2. Initialize the WASI Context for THIS specific node
+        // 2. Build the partition-specific UmemHandle for this instance.
+        //    WASM address 0 will map to `umem_base + partition_start_bytes`.
+        //    The window extends to the end of the full Umem.
+        let partition_handle = manager.make_partition_handle(partition_start_bytes);
+
+        // 3. Pre-load the partition handle into the shared XdpMemoryCreator so
+        //    that Wasmtime picks it up when it calls new_memory() during instantiate().
+        manager.set_instantiation_handle(partition_handle.clone());
+
+        // 4. Initialize the WASI Context for THIS specific node
         let wasi_ctx = WasiCtxBuilder::new().inherit_stdout().inherit_stderr().build();
 
-        // 3. Create the Store
+        // 5. Create the Store
         // This is where the magic happens: Wasmtime calls our `XdpMemoryCreator`
         // in the background to hand out the zero-copy UMEM handle.
         let mut store = Store::new(
@@ -59,12 +74,14 @@ impl WasmInspectorNode {
             MyHostState {
                 ctx: wasi_ctx,
                 table: ResourceTable::new(),
-                umem: manager.umem(), // Pass the UMEM pointer so the HostState has access
+                umem: partition_handle, // Host-side state also sees the partition window
             },
         );
 
-        // 4. Instantiate the plugin
-        // We use the Manager's shared Linker, which already has WASI registered.
+        // 6. Instantiate the plugin.
+        //    Wasmtime calls XdpMemoryCreator::new_memory() here, which returns
+        //    the partition handle we pre-loaded in step 3.
+        //    We use the Manager's shared Linker, which already has WASI registered.
         let bindings = FilterPlugin::instantiate(&mut store, &component, manager.linker())
             .expect("Failed to instantiate Wasm component");
 
@@ -78,6 +95,7 @@ impl WasmInspectorNode {
             #[cfg(feature = "profiling")]
             total_cycles: 0,
             telemetry_metrics,
+            partition_start_bytes,
         }
     }
 }
@@ -101,26 +119,45 @@ impl Node for WasmInspectorNode {
         // 1. CROSS THE WASM BOUNDARY (The 4KB L1-Cache Transfer)
         // ==========================================================
 
+        // TODO: check if we can avoid this hack
+        // Translate desc_addr to be relative to this instance's WASM address 0
+        // (= partition_start_bytes from the Umem base). The plugin uses desc_addr
+        // as a WASM linear memory address, so it must be partition-relative.
+        // We restore the absolute offset after the call so the rest of the
+        // pipeline continues to see correct Umem addresses.
+        if self.partition_start_bytes > 0 {
+            for pdu in batch.iter_mut() {
+                pdu.w.desc_addr -= self.partition_start_bytes as u64;
+            }
+        }
+
         // Calculate the exact byte size of the populated packets
         let active_bytes = len * size_of::<Pdu>();
 
-        // View the Host Batch as a raw byte slice
-        let batch_bytes: &[u8] = unsafe {
-            std::slice::from_raw_parts(
-                batch.as_ptr(),
-                active_bytes
-            )
+        // Call the Component Model plugin inside a block so that `batch_bytes`
+        // (a shared reference into `batch`) is dropped before we restore desc_addr.
+        let action_vector = {
+            // View the Host Batch as a raw byte slice
+            let batch_bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(batch.as_ptr(), active_bytes)
+            };
+
+            self.bindings
+                .xbricks_router_inspector()
+                .call_inspect_batch(&mut self.store, batch_bytes)
+                .unwrap_or_else(|e| {
+                    log::error!("Wasm execution failed: {}", e);
+                    // If Wasm crashes, we skip step 2 and the router defaults to Forward/Drop
+                    vec![255; len] // 255 = DROP fallback
+                })
         };
 
-        // Call the Component Model plugin
-        let action_vector = self
-            .bindings
-            .xbricks_router_inspector()
-            .call_inspect_batch(&mut self.store, batch_bytes).unwrap_or_else(|e| {
-            log::error!("Wasm execution failed: {}", e);
-            // If Wasm crashes, we skip step 2 and the router defaults to Forward/Drop
-            vec![255; len] // 255 = DROP fallback
-        });
+        // Restore absolute Umem offsets so downstream nodes are unaffected.
+        if self.partition_start_bytes > 0 {
+            for pdu in batch.iter_mut() {
+                pdu.w.desc_addr += self.partition_start_bytes as u64;
+            }
+        }
 
         // Safety check: Ensure Wasm returned an action for every packet
         if action_vector.len() != len {

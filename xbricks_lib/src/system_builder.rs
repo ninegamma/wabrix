@@ -371,6 +371,43 @@ impl SystemBuilder {
         xbricks_system.shared_state = shared_state.clone();
         // ==========================================================
 
+        // Pre-scan: count WasmInspectorNode instances per umem_id so we can
+        // divide the reserved region into equal partitions.
+        #[cfg(feature = "wasm")]
+        let wasm_instance_totals: Vec<usize> = {
+            let mut totals = vec![0usize; MAX_UMEM];
+            for worker in &self.workers {
+                for pipeline in &worker.pipelines {
+                    for node in &pipeline.nodes {
+                        if node.node_type == "WasmInspectorNode" {
+                            if let Some(id_str) = node.args.get("umem") {
+                                if let Ok(uid) = id_str.parse::<usize>() {
+                                    if uid < MAX_UMEM {
+                                        totals[uid] += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Validate: reserved_frames must be evenly divisible by instance count
+            for (uid, &count) in totals.iter().enumerate() {
+                if count == 0 { continue; }
+                if let Some(umem_conf) = self.runtime_umems[uid].as_ref() {
+                    if umem_conf.reserved_frames % count as u32 != 0 {
+                        return Err(format!(
+                            "UMEM {}: reserved_frames ({}) must be divisible by the number of WasmInspectorNode instances ({})",
+                            uid, umem_conf.reserved_frames, count
+                        ).into());
+                    }
+                }
+            }
+            totals
+        };
+        #[cfg(feature = "wasm")]
+        let mut wasm_instance_counters: Vec<usize> = vec![0usize; MAX_UMEM];
+
         // Build pipeline runners for each worker
         for worker in self.workers {
             let worker_id = worker.id as usize;
@@ -392,6 +429,10 @@ impl SystemBuilder {
                     #[cfg(feature = "wasm")]
                     &self.wasm_managers,
                     shared_state.clone(),
+                    #[cfg(feature = "wasm")]
+                    &wasm_instance_totals,
+                    #[cfg(feature = "wasm")]
+                    &mut wasm_instance_counters,
                 )
                 .map_err(|e| anyhow::anyhow!(e))?;
                 // Create the pipeline runner

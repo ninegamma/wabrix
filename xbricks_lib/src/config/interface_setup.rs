@@ -95,8 +95,26 @@ impl InterfaceSetup {
         let check_output = Command::new("ip").args(&["link", "show", &self.name]).output()?;
 
         if check_output.status.success() {
-            info!("✓ Veth pair {} already exists", self.name);
-            return Ok(());
+            // Check if the existing interface has the required number of queues
+            let existing_queues = std::fs::read_dir(format!("/sys/class/net/{}/queues", self.name))
+                .map(|entries| entries.filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().starts_with("rx-")).count() as u32)
+                .unwrap_or(1);
+
+            if existing_queues >= self.queues {
+                info!("✓ Veth pair {} already exists with {} queues", self.name, existing_queues);
+                return Ok(());
+            }
+
+            info!(
+                "Veth pair {} exists with {} queue(s) but {} required — deleting and recreating",
+                self.name, existing_queues, self.queues
+            );
+            let del_output = Command::new("ip").args(&["link", "del", &self.name]).output()?;
+            if !del_output.status.success() {
+                let stderr = String::from_utf8_lossy(&del_output.stderr);
+                return Err(anyhow!("Failed to delete existing veth {}: {}", self.name, stderr));
+            }
+            info!("✓ Deleted existing veth pair {}", self.name);
         }
 
         // Get MAC address from mac_if if specified
@@ -148,10 +166,20 @@ impl InterfaceSetup {
             info!("✓ Namespace {} already exists", namespace);
         }
 
-        // Create veth pair
-        info!("Creating veth pair: {} <-> {}...", self.name, peer_name);
+        // Create veth pair with the required number of queues
+        info!("Creating veth pair: {} <-> {} ({} queues)...", self.name, peer_name, self.queues);
+        let queues_str = self.queues.to_string();
         let output = Command::new("ip")
-            .args(&["link", "add", &self.name, "type", "veth", "peer", "name", peer_name])
+            .args(&[
+                "link", "add",
+                &self.name,
+                "numtxqueues", &queues_str,
+                "numrxqueues", &queues_str,
+                "type", "veth",
+                "peer", "name", peer_name,
+                "numtxqueues", &queues_str,
+                "numrxqueues", &queues_str,
+            ])
             .output()?;
 
         if !output.status.success() {
