@@ -314,12 +314,14 @@ impl SystemBuilder {
         #[cfg(feature = "wasm")]
         for (umem_id, umem_conf_opt) in self.runtime_umems.iter().enumerate() {
             if let Some(umem_conf) = umem_conf_opt {
-                if let Some((umem, _)) = &initialized_umems[umem_id] {
-                    self.wasm_managers[umem_id] = Some(Arc::new(
-                        WasmManager::new(umem_conf.frame_size, umem_conf.reserved_frames, umem_conf.frame_count, umem.clone())?
-                    ));
-                } else {
-                    log::error!("🔥 Failed to initialize WASM Manager for UMEM {}. Umem not found.", umem_id);
+                if umem_conf.reserved_frames > 0 {
+                    if let Some((umem, _)) = &initialized_umems[umem_id] {
+                        self.wasm_managers[umem_id] = Some(Arc::new(
+                            WasmManager::new(umem_conf.frame_size, umem_conf.reserved_frames, umem_conf.frame_count, umem.clone())?
+                        ));
+                    } else {
+                        log::error!("🔥 Failed to initialize WASM Manager for UMEM {}. Umem not found.", umem_id);
+                    }
                 }
             }
         }
@@ -406,7 +408,7 @@ impl SystemBuilder {
             totals
         };
         #[cfg(feature = "wasm")]
-        let mut wasm_instance_counters: Vec<usize> = vec![0usize; MAX_UMEM];
+        let mut wasm_instance_counters= vec![0u32; MAX_UMEM];
 
         // Build pipeline runners for each worker
         for worker in self.workers {

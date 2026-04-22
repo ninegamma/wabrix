@@ -37,7 +37,7 @@ pub struct WasmInspectorNode {
     /// Used to translate `desc_addr` values to partition-relative WASM addresses
     /// before calling the plugin, and back to absolute offsets after.
     /// Zero for the first (or only) instance.
-    partition_start_bytes: usize,
+    partition_start_bytes: u32,
 }
 
 impl WasmInspectorNode {
@@ -48,7 +48,7 @@ impl WasmInspectorNode {
         routing_table: Vec<NodeId>, // Accept any number of routes
         telemetry_tx: Option<Sender<u32>>,
         telemetry_metrics: TelemetryMetrics,
-        partition_start_bytes: usize,
+        partition_start_bytes: u32,
     ) -> Self {
         // 1. Fetch the Component from the Manager's DashMap cache
         // This takes nanoseconds if already loaded, avoiding disk I/O.
@@ -119,18 +119,6 @@ impl Node for WasmInspectorNode {
         // 1. CROSS THE WASM BOUNDARY (The 4KB L1-Cache Transfer)
         // ==========================================================
 
-        // TODO: check if we can avoid this hack
-        // Translate desc_addr to be relative to this instance's WASM address 0
-        // (= partition_start_bytes from the Umem base). The plugin uses desc_addr
-        // as a WASM linear memory address, so it must be partition-relative.
-        // We restore the absolute offset after the call so the rest of the
-        // pipeline continues to see correct Umem addresses.
-        if self.partition_start_bytes > 0 {
-            for pdu in batch.iter_mut() {
-                pdu.w.desc_addr -= self.partition_start_bytes as u64;
-            }
-        }
-
         // Calculate the exact byte size of the populated packets
         let active_bytes = len * size_of::<Pdu>();
 
@@ -144,7 +132,7 @@ impl Node for WasmInspectorNode {
 
             self.bindings
                 .xbricks_router_inspector()
-                .call_inspect_batch(&mut self.store, batch_bytes)
+                .call_inspect_batch(&mut self.store, batch_bytes, self.partition_start_bytes)
                 .unwrap_or_else(|e| {
                     log::error!("Wasm execution failed: {}", e);
                     // If Wasm crashes, we skip step 2 and the router defaults to Forward/Drop
@@ -152,12 +140,6 @@ impl Node for WasmInspectorNode {
                 })
         };
 
-        // Restore absolute Umem offsets so downstream nodes are unaffected.
-        if self.partition_start_bytes > 0 {
-            for pdu in batch.iter_mut() {
-                pdu.w.desc_addr += self.partition_start_bytes as u64;
-            }
-        }
 
         // Safety check: Ensure Wasm returned an action for every packet
         if action_vector.len() != len {

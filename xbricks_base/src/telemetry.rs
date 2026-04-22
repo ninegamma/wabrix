@@ -59,7 +59,9 @@ impl TelemetryRegistry {
 
 /// Periodically reads pipeline node counters from the TelemetryRegistry and
 /// broadcasts them over the same WebSocket channel as NIC telemetry.
-/// Each registered node emits one `TMLiveStats` message per tick.
+/// Multiple entries with the same node_id (e.g. from different workers running
+/// the same pipeline) are aggregated into a single `TMLiveStats` message by
+/// summing their counters.
 pub fn spawn_pipeline_telemetry(
     telemetry_tx: Sender<TMLiveStats>,
     registry: Arc<TelemetryRegistry>,
@@ -67,23 +69,45 @@ pub fn spawn_pipeline_telemetry(
 ) -> anyhow::Result<()> {
     tokio::spawn(async move {
         while !shutdown_signal.load(Ordering::Relaxed) {
+            // Aggregate counters across all entries that share the same node_id.
+            // We rely on insertion order: the first entry for a given id provides
+            // the labels and the initial counter values; subsequent entries for
+            // the same id are summed in.
+            let mut seen: Vec<(String, Vec<u64>, Vec<u64>, Vec<String>)> = Vec::new();
+
             for metrics in registry.get_metrics() {
-                let counters_pkts: Vec<u64> = metrics.counters_pkts.iter()
+                let pkts: Vec<u64> = metrics.counters_pkts.iter()
                     .map(|c| c.load(Ordering::Relaxed))
                     .collect();
-                let counters_bytes: Vec<u64> = metrics.counters_bytes.iter()
+                let bytes: Vec<u64> = metrics.counters_bytes.iter()
                     .map(|c| c.load(Ordering::Relaxed))
                     .collect();
+
+                if let Some(entry) = seen.iter_mut().find(|(id, ..)| id == &metrics.node_id) {
+                    // Accumulate into existing entry
+                    for (acc, v) in entry.1.iter_mut().zip(pkts.iter()) {
+                        *acc += v;
+                    }
+                    for (acc, v) in entry.2.iter_mut().zip(bytes.iter()) {
+                        *acc += v;
+                    }
+                } else {
+                    seen.push((metrics.node_id.clone(), pkts, bytes, metrics.labels.clone()));
+                }
+            }
+
+            for (node_id, counters_pkts, counters_bytes, labels) in seen {
                 let is_active_run = counters_pkts.iter().any(|&v| v > 0);
                 let stats = TMLiveStats {
-                    tmstats_name: metrics.node_id.clone(),
-                    labels: metrics.labels.clone(),
+                    tmstats_name: node_id,
+                    labels,
                     counters_pkts,
                     counters_bytes,
                     is_active_run,
                 };
                 let _ = telemetry_tx.send(stats);
             }
+
             tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
         }
     });

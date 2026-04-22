@@ -32,7 +32,7 @@ pub struct UmemHandle {
     pub size: usize,
     /// Byte offset from `ptr` where this instance's WASM address 0 begins.
     /// Zero for non-partitioned or first-instance use.
-    pub partition_start_bytes: usize,
+    pub partition_start_bytes: u32,
     /// Number of frames at the start of the UMEM exclusively reserved for WASM plugins.
     /// Byte range: [0, reserved_frames * frame_size).
     pub reserved_frames: u32,
@@ -50,7 +50,7 @@ impl UmemHandle {
     /// This covers both the instance's own scratchpad partition and all packet frames above.
     #[inline]
     pub fn window_size_bytes(&self) -> usize {
-        self.size - self.partition_start_bytes
+        self.size - (self.partition_start_bytes as usize)
     }
 }
 
@@ -69,7 +69,7 @@ unsafe impl LinearMemory for UmemHandle {
     /// WASM address 0 maps to `ptr + partition_start_bytes`.
     fn as_ptr(&self) -> *mut u8 {
         // SAFETY: partition_start_bytes is always <= size, validated at construction.
-        unsafe { self.ptr.add(self.partition_start_bytes) }
+        unsafe { self.ptr.add(self.partition_start_bytes as usize) }
     }
 }
 
@@ -199,9 +199,9 @@ impl WasmManager {
     ///
     /// # Panics
     /// Panics if `partition_start_bytes >= self.umem.size`.
-    pub fn make_partition_handle(&self, partition_start_bytes: usize) -> Arc<UmemHandle> {
+    pub fn make_partition_handle(&self, partition_start_bytes: u32) -> Arc<UmemHandle> {
         assert!(
-            partition_start_bytes < self.umem.size,
+            (partition_start_bytes as usize) < self.umem.size,
             "partition_start_bytes ({}) must be less than total Umem size ({})",
             partition_start_bytes,
             self.umem.size

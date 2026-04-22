@@ -85,8 +85,8 @@ async fn main() -> anyhow::Result<()> {
     // DATA PLANE LIFECYCLE LOOP (State Machine)
     // ==========================================================
 
-    // We start in the STOPPED state. The API is up, but no hardware is touched.
-    let mut dataplane_active = false;
+    // We start in the RUNNING state when launched from the console.
+    let mut dataplane_active = true;
 
     loop {
         let mut next_cmd = SystemCommand::Shutdown; // Default failsafe

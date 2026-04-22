@@ -48,7 +48,7 @@ impl PipelineFactory {
         #[cfg(feature = "wasm")]
         wasm_instance_totals: &[usize],
         #[cfg(feature = "wasm")]
-        wasm_instance_counters: &mut Vec<usize>,
+        wasm_instance_counters: &mut Vec<u32>,
     ) -> Result<Vec<Box<dyn Node>>, String> {
         // --- PASS 1: ID Resolution ---
         // Map "string_id" -> NodeId
@@ -189,10 +189,12 @@ impl PipelineFactory {
                         .clone();
 
                     // Get UMEM ID
-                    if node_conf.umem.is_empty() {
-                        return Err(format!("PacketGenerator {} missing 'umem' field", node_conf.id));
-                    }
-                    let umem_group_id = node_conf.umem[0];
+                    let umem_group_id = node_conf
+                        .args
+                        .get("umem")
+                        .ok_or(format!("PacketGenerator {} missing 'umem' in args", node_conf.id))?
+                        .parse::<usize>()
+                        .map_err(|_| format!("PacketGenerator {} 'umem' must be a number", node_conf.id))?;
                     let pps = node_conf.pps.unwrap_or(1_000);
                     // Get packets per iteration (default to 32, max 128)
                     let batch_size = node_conf
@@ -426,7 +428,7 @@ impl PipelineFactory {
                     let total_instances = wasm_instance_totals[umem_id].max(1);
                     let frames_per_instance = manager.umem().reserved_frames / total_instances as u32;
                     let partition_start_bytes =
-                        instance_idx as usize * frames_per_instance as usize * manager.umem().frame_size as usize;
+                        instance_idx * frames_per_instance * manager.umem().frame_size;
                     wasm_instance_counters[umem_id] += 1;
 
                     Box::new(WasmInspectorNode::new(my_id.clone(), manager, wasm_path, routing_table, None, telemetry_metrics, partition_start_bytes))

@@ -223,8 +223,6 @@ pub struct NodeConfig {
     pub default: Option<String>,
     #[serde(default)]
     pub queues: Vec<u32>,
-    #[serde(default)]
-    pub umem: Vec<usize>,
     pub pps: Option<usize>,
     #[serde(default)]
     pub labels: Vec<String>,
@@ -337,11 +335,11 @@ impl XBricksConfig {
                     routes: vec![],
                     default: None,
                     queues: vec![],
-                    umem: vec![0],
                     pps: Some(pps as usize),
                     labels: vec![],
                     args: {
                         let mut args = HashMap::new();
+                        args.insert("umem".to_string(), "0".to_string());
                         args.insert("batch_size".to_string(), batch_sz.to_string());
                         args.insert("packets_to_generate".to_string(), packets_to_generate.to_string());
                         if let Some(ip) = dst_ip {
@@ -361,7 +359,6 @@ impl XBricksConfig {
                     routes: vec![],
                     default: None,
                     queues: vec![0],
-                    umem: vec![],
                     pps: None,
                     labels: vec![],
                     args: {
@@ -472,11 +469,11 @@ impl XBricksConfig {
                         routes: vec![],
                         default: None,
                         queues: vec![],
-                        umem: vec![0],
                         pps: Some(pps_per_worker as usize),
                         labels: vec![],
                         args: {
                             let mut args = HashMap::new();
+                            args.insert("umem".to_string(), "0".to_string());
                             args.insert("batch_size".to_string(), batch_sz.to_string());
                             args.insert("packets_to_generate".to_string(), packets_for_this_worker.to_string());
                             if let Some(ip) = dst_ip {
@@ -496,7 +493,6 @@ impl XBricksConfig {
                         routes: vec![],
                         default: None,
                         queues: vec![worker_id as u32],
-                        umem: vec![],
                         pps: None,
                         labels: vec![],
                         args: {
@@ -1241,7 +1237,6 @@ impl XBricksConfig {
                         routes: node_conf.routes.clone(),
                         default: node_conf.default.clone(),
                         queues: assigned_queue,
-                        umem: node_conf.umem.clone(),
                         pps: node_conf.pps.clone(),
                         labels: node_conf.labels.clone(),
                         args: node_conf.args.clone(),

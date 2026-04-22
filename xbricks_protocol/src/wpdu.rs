@@ -148,7 +148,7 @@ impl WPdu {
     }
     #[inline(always)]
     pub fn base_addr(&self, umem_addr: usize) -> usize {
-        (umem_addr + self.local_frame_offset())
+        umem_addr + self.local_frame_offset() 
     }
     #[inline]
     pub fn headers(&self) -> &HeaderStack {

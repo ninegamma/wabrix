@@ -22,7 +22,8 @@ fq_size = 65536
 cq_size = 16384
 head_room = 128
 partitions = 2
-reserved = 2048
+reserved = 20480
+reserved_partitions=10
 
 [[xbricks.umem]]
 id = 1
@@ -98,12 +99,11 @@ queues = [
     0,
     1,
 ]
-umem = []
 labels = []
 
 [pipelines.nodes.args]
-batch_size = "512"
 interface = "enp2s0f0np0"
+batch_size = "512"
 
 [[pipelines.nodes]]
 id = "nd_parser"
@@ -111,7 +111,6 @@ type = "FastParserNode"
 next = "nd_wasm_inspector"
 routes = []
 queues = []
-umem = []
 labels = []
 
 [pipelines.nodes.args]
@@ -124,7 +123,6 @@ routes = [
     "nd_veth_sink",
 ]
 queues = []
-umem = []
 labels = [
     "d-port 0",
     "d-port 1",
@@ -140,8 +138,8 @@ labels = [
 ]
 
 [pipelines.nodes.args]
-wasm_file_path = "/home/rainer1956/rust/xbrix/target/wasm32-wasip2/release/filter_plugin.wasm"
 umem = "0"
+wasm_file_path = "/home/rainer1956/rust/xbrix/target/wasm32-wasip2/release/filter_plugin.wasm"
 
 [[pipelines.nodes]]
 id = "nd_veth_sink"
@@ -151,7 +149,6 @@ queues = [
     0,
     1,
 ]
-umem = []
 labels = []
 
 [pipelines.nodes.args]
@@ -162,7 +159,6 @@ id = "nd_drop"
 type = "DropNode"
 routes = []
 queues = []
-umem = []
 labels = []
 
 [pipelines.nodes.args]
@@ -177,7 +173,6 @@ type = "BatchRxNode"
 next = "nd_transmitter"
 routes = []
 queues = [0]
-umem = []
 labels = []
 
 [pipelines.nodes.args]
@@ -188,55 +183,26 @@ id = "nd_transmitter"
 type = "BatchTxNode"
 routes = []
 queues = [0]
-umem = []
 labels = []
 
 [pipelines.nodes.args]
 interface = "enp2s0f0np0"
 
-[layout.nd_veth_sink]
-x = 446.53772
-y = 753.6632
-
-[layout.nd_receiver]
-x = -303.46228
-y = 678.6632
-
 [layout.iface_enp2s0f0np0]
 x = -205.53893
 y = 99.901024
 
-[layout.nd_wasm_inspector]
-x = 196.53772
+[layout.nd_receiver]
+x = -303.46228
 y = 678.6632
 
 [layout.worker_1]
 x = 217.4041
 y = 342.43478
 
-[layout.worker_0]
-x = -12.533943
-y = 343.08667
-
-[layout.nd_parser]
-x = -53.462276
-y = 678.6632
-
-[layout.umem_1]
-x = 294.9635
-y = 31.100178
-
-[layout.xsk_0]
-x = -333.80734
-y = 289.88306
-
-[layout.nd_drop]
-x = 441.22922
-y = 617.19543
-
-[layout.nd_veth_source]
-x = -303.46228
-y = 828.6632
+[layout.xsk_1]
+x = 492.68945
+y = 324.47424
 
 [layout.nd_transmitter]
 x = -54.40471
@@ -246,10 +212,38 @@ y = 827.72076
 x = 30.46025
 y = 31.100178
 
+[layout.nd_parser]
+x = -53.462276
+y = 678.6632
+
+[layout.xsk_0]
+x = -333.80734
+y = 289.88306
+
+[layout.nd_veth_sink]
+x = 446.53772
+y = 753.6632
+
 [layout.iface_veth_xbricks]
 x = 512.3637
 y = 31.100178
 
-[layout.xsk_1]
-x = 492.68945
-y = 324.47424
+[layout.nd_wasm_inspector]
+x = 196.53772
+y = 678.6632
+
+[layout.worker_0]
+x = -12.533943
+y = 343.08667
+
+[layout.nd_drop]
+x = 441.22922
+y = 617.19543
+
+[layout.nd_veth_source]
+x = -303.46228
+y = 828.6632
+
+[layout.umem_1]
+x = 294.9635
+y = 31.100178
