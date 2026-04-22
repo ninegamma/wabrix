@@ -65,6 +65,7 @@ fn default_ifaces() -> Vec<InterfaceConfig> {
         peer: None,
         mac_if: None,
         ipnet: None,
+        master: None,
     }]
 }
 fn default_umem_configs() -> Vec<UmemConfig> {
@@ -112,6 +113,8 @@ pub struct InterfaceConfig {
     pub mac_if: Option<String>,
     #[serde(default)]
     pub ipnet: Option<String>,
+    #[serde(default)]
+    pub master: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, TS)]
@@ -638,11 +641,14 @@ impl XBricksConfig {
                 }
             } else {
                 // Validate veth-specific fields
-                if iface_cfg.namespace.is_none() {
-                    return Err(anyhow!("Veth interface '{}' requires 'namespace' field", iface_cfg.name));
-                }
                 if iface_cfg.peer.is_none() {
                     return Err(anyhow!("Veth interface '{}' requires 'peer' field", iface_cfg.name));
+                }
+                if iface_cfg.namespace.is_none() && iface_cfg.master.is_none() {
+                    return Err(anyhow!(
+                        "Veth interface '{}' requires either 'namespace' or 'master' field",
+                        iface_cfg.name
+                    ));
                 }
             }
         }

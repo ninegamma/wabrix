@@ -188,8 +188,23 @@ impl Pdu {
     /// try get Umem pointer from SystemBus
     #[inline(always)]
      pub unsafe fn try_umem_addr(&self) -> Option<usize> {
-        let bus = &*self.system_bus;
-        bus.umem_addr[self.umem_id() as usize]
+        // 1. Safe Null Check (Prevents Segfaults)
+        if self.system_bus.is_null() {
+            return None;
+        }
+
+        // SAFETY: We guarantee the pointer is not null.
+        // We assume the Host lifecycle guarantees it points to a valid SystemBus.
+        let bus = unsafe { &*self.system_bus };
+
+        // 2. Safe Bounds Check (Prevents Panics)
+        // .get() returns Option<&Option<usize>>
+        // .copied() turns it into Option<Option<usize>>
+        // .flatten() turns it into Option<usize>
+        bus.umem_addr
+            .get(self.umem_id() as usize)
+            .copied()
+            .flatten()
     }
 
     /// returns pointer to the first byte of the frame this Pdu represents

@@ -1155,8 +1155,6 @@ impl XSocketTx {
 }
 impl Drop for XSocketRx {
     fn drop(&mut self) {
-        // Assuming your fields are named fq, cq, rx, and tx.
-        // Adjust the variable names to match your actual struct definition!
         log::debug!(
             "RUST DROP: XSocketRx (Queue {}) dropping. Refs remaining -> FQ: {}, CQ: {}, RX: {}, TX: {}",
             self.config.queue_id,

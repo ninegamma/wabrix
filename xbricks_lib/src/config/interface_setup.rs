@@ -17,6 +17,7 @@ pub struct InterfaceSetup {
     pub peer: Option<String>,
     pub mac_if: Option<String>,
     pub ipnet: Option<String>,
+    pub master: Option<String>,
 }
 
 impl InterfaceSetup {
@@ -75,16 +76,21 @@ impl InterfaceSetup {
         Ok(())
     }
 
-    /// Setup veth pair with namespace, MAC address, and IP configuration
+    /// Setup veth pair with either bridge-master or namespace configuration
     fn setup_veth_pair(&self) -> Result<()> {
         let peer_name = self
             .peer
             .as_ref()
             .ok_or_else(|| anyhow!("Veth interface {} requires 'peer' field", self.name))?;
+
+        if let Some(ref master) = self.master {
+            return self.setup_veth_pair_bridge(peer_name, master);
+        }
+
         let namespace = self
             .namespace
             .as_ref()
-            .ok_or_else(|| anyhow!("Veth interface {} requires 'namespace' field", self.name))?;
+            .ok_or_else(|| anyhow!("Veth interface {} requires 'namespace' or 'master' field", self.name))?;
 
         info!(
             "Setting up veth pair: {} <-> {} (namespace: {})",
@@ -251,6 +257,115 @@ impl InterfaceSetup {
         info!("✓ Brought up {} in namespace", peer_name);
 
         info!("✓ Veth pair setup complete");
+        Ok(())
+    }
+
+    /// Setup veth pair with bridge master: creates the pair, enslaves the peer to the
+    /// master bridge, and brings the peer up. Errors if the master bridge does not exist.
+    fn setup_veth_pair_bridge(&self, peer_name: &str, master: &str) -> Result<()> {
+        info!(
+            "Setting up veth pair: {} <-> {} (master bridge: {})",
+            self.name, peer_name, master
+        );
+
+        // Verify the master bridge exists before doing anything
+        let check = Command::new("ip").args(&["link", "show", master]).output()?;
+        if !check.status.success() {
+            return Err(anyhow!(
+                "Master bridge '{}' does not exist — create it before starting xbricks",
+                master
+            ));
+        }
+
+        // Check if veth pair already exists
+        let check_output = Command::new("ip").args(&["link", "show", &self.name]).output()?;
+        if check_output.status.success() {
+            let existing_queues = std::fs::read_dir(format!("/sys/class/net/{}/queues", self.name))
+                .map(|entries| {
+                    entries
+                        .filter_map(|e| e.ok())
+                        .filter(|e| e.file_name().to_string_lossy().starts_with("rx-"))
+                        .count() as u32
+                })
+                .unwrap_or(1);
+
+            // Check whether the peer is already enslaved to the correct master bridge.
+            // /sys/class/net/<peer>/master is a symlink whose filename is the master name.
+            let peer_master = std::fs::read_link(format!("/sys/class/net/{}/master", peer_name))
+                .ok()
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+
+            let master_ok = peer_master.as_deref() == Some(master);
+
+            if existing_queues >= self.queues && master_ok {
+                info!("✓ Veth pair {} already exists with {} queues and correct master", self.name, existing_queues);
+                return Ok(());
+            }
+
+            if !master_ok {
+                info!(
+                    "Veth pair {} exists but peer {} has master {:?} instead of '{}' — deleting and recreating",
+                    self.name, peer_name, peer_master, master
+                );
+            } else {
+                info!(
+                    "Veth pair {} exists with {} queue(s) but {} required — deleting and recreating",
+                    self.name, existing_queues, self.queues
+                );
+            }
+
+            let del = Command::new("ip").args(&["link", "del", &self.name]).output()?;
+            if !del.status.success() {
+                let stderr = String::from_utf8_lossy(&del.stderr);
+                return Err(anyhow!("Failed to delete existing veth {}: {}", self.name, stderr));
+            }
+            info!("✓ Deleted existing veth pair {}", self.name);
+        }
+
+        // Create veth pair
+        info!("Creating veth pair: {} <-> {} ({} queues)...", self.name, peer_name, self.queues);
+        let queues_str = self.queues.to_string();
+        let output = Command::new("ip")
+            .args(&[
+                "link", "add",
+                &self.name,
+                "numtxqueues", &queues_str,
+                "numrxqueues", &queues_str,
+                "type", "veth",
+                "peer", "name", peer_name,
+                "numtxqueues", &queues_str,
+                "numrxqueues", &queues_str,
+            ])
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("Failed to create veth pair: {}", stderr));
+        }
+        info!("✓ Created veth pair");
+
+        // Enslave peer to the master bridge
+        info!("Adding {} to bridge {}...", peer_name, master);
+        let output = Command::new("ip")
+            .args(&["link", "set", peer_name, "master", master])
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("Failed to add {} to bridge {}: {}", peer_name, master, stderr));
+        }
+        info!("✓ Added {} to bridge {}", peer_name, master);
+
+        // Bring peer up
+        info!("Bringing up {}...", peer_name);
+        let output = Command::new("ip")
+            .args(&["link", "set", peer_name, "up"])
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("Failed to bring up {}: {}", peer_name, stderr));
+        }
+        info!("✓ Brought up {}", peer_name);
+
+        info!("✓ Veth pair setup complete (bridge mode)");
         Ok(())
     }
 
@@ -746,6 +861,7 @@ pub fn check_or_configure_interfaces(
                     peer: None,
                     mac_if: None,
                     ipnet: None,
+                    master: None,
                 };
 
                 match temp_setup.get_max_ring_sizes() {
@@ -781,6 +897,7 @@ pub fn check_or_configure_interfaces(
             peer: iface_cfg.peer.clone(),
             mac_if: iface_cfg.mac_if.clone(),
             ipnet: iface_cfg.ipnet.clone(),
+            master: iface_cfg.master.clone(),
         };
 
         setup.configure(b_just_check)?;
@@ -814,6 +931,7 @@ mod tests {
             peer: None,
             mac_if: None,
             ipnet: None,
+            master: None,
         };
 
         assert_eq!(setup.name, "lo");
