@@ -4,7 +4,6 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::slice;
 use xbricks_protocol::headers::HeaderKind;
-use xbricks_protocol::TELEMETRY_FLAG;
 use xbricks_protocol::wbatch::Pdu0;
 use crate::exports::xbricks::router::inspector::{Guest};
 
@@ -18,8 +17,8 @@ wit_bindgen::generate!({
 // use crate::pdu::Pdu0;
 
 // Constants for our Action Bitfield
-const ROUTE_FAST_PATH: u32 = 0;
-const ROUTE_EXCEPTION: u32 = 1;
+const ROUTE_DROP: u32 = 1;
+const ROUTE_STANDARD: u32 = 0;
 
 // DISTRIBUTE AND EXECUTE ACTIONS
 // u32 action:
@@ -45,7 +44,8 @@ impl Guest for MyInspector {
         let umem_addr = (0u32).wrapping_sub(partition_offset) as usize;
 
         for pdu in pdus {
-            let mut action = TELEMETRY_FLAG;
+            //let mut action = TELEMETRY_FLAG;
+            let mut action = 0u32;
 
             let mut is_v4 = false;
             let mut dst_port = None;
@@ -73,7 +73,7 @@ impl Guest for MyInspector {
             if is_v4 && dst_port.is_some() {
                 // action |= ROUTE_FAST_PATH;
                 // Safe to unwrap because of the if condition
-                action |= ROUTE_EXCEPTION;
+                action |= ROUTE_STANDARD;
                 let port = dst_port.unwrap();
                 let telemetry_bucket = if port <= 9 {
                     port as u32
@@ -82,7 +82,7 @@ impl Guest for MyInspector {
                 };
                 action |= telemetry_bucket << 16;
             } else {
-                action |= ROUTE_EXCEPTION;
+                action |= ROUTE_STANDARD;
                 let telemetry_bucket = 9u32;
                 action |= telemetry_bucket << 16;
             }

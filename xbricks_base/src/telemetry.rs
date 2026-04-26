@@ -117,16 +117,26 @@ pub fn spawn_pipeline_telemetry(
 pub fn spawn_telemetry(telemetry_tx: Sender<TMLiveStats>, iface_name: String, shutdown_signal: Arc<AtomicBool>) -> anyhow::Result<()> {
     tokio::spawn(async move {
         // Persistent tracking variables (Absolute counters from ethtool)
-        let mut prev_pkts = 0u64;
+        let mut prev_rx_uc = 0u64;
+        let mut prev_rx_mc = 0u64;
+        let mut prev_rx_bc = 0u64;
         let mut prev_sw_drops = 0u64;
         let mut prev_hw_drops = 0u64;
+        let mut prev_tx_uc = 0u64;
+        let mut prev_tx_mc = 0u64;
+        let mut prev_tx_bc = 0u64;
         let mut is_first_run = true;
 
         // Burst tracking variables (Relative counters for the React UI)
         let mut in_run = false;
-        let mut run_pkts = 0u64;
+        let mut run_rx_uc = 0u64;
+        let mut run_rx_mc = 0u64;
+        let mut run_rx_bc = 0u64;
         let mut run_sw_drops = 0u64;
         let mut run_hw_drops = 0u64;
+        let mut run_tx_uc = 0u64;
+        let mut run_tx_mc = 0u64;
+        let mut run_tx_bc = 0u64;
         let mut idle_ticks = 0;
 
         while !shutdown_signal.load(Ordering::Relaxed) {
@@ -137,9 +147,14 @@ pub fn spawn_telemetry(telemetry_tx: Sender<TMLiveStats>, iface_name: String, sh
             {
                 let stdout = String::from_utf8_lossy(&output.stdout);
 
-                let mut curr_pkts = 0u64;
+                let mut curr_rx_uc = 0u64;
+                let mut curr_rx_mc = 0u64;
+                let mut curr_rx_bc = 0u64;
                 let mut curr_sw_drops = 0u64;
                 let mut curr_hw_drops = 0u64;
+                let mut curr_tx_uc = 0u64;
+                let mut curr_tx_mc = 0u64;
+                let mut curr_tx_bc = 0u64;
 
                 // ==========================================
                 // 1. THE ROBUST ETHTOOL PARSER
@@ -153,9 +168,14 @@ pub fn spawn_telemetry(telemetry_tx: Sender<TMLiveStats>, iface_name: String, sh
                         let key = parts[0];
                         if let Ok(val) = parts[1].parse::<u64>() {
                             match key {
-                                "rx_unicast:" => curr_pkts = val,
-                                "rx_dropped:" => curr_sw_drops = val,
+                                "rx_unicast:"   => curr_rx_uc = val,
+                                "rx_multicast:" => curr_rx_mc = val,
+                                "rx_broadcast:" => curr_rx_bc = val,
+                                "rx_dropped:"   => curr_sw_drops = val,
                                 "rx_dropped.nic:" => curr_hw_drops = val,
+                                "tx_unicast:"   => curr_tx_uc = val,
+                                "tx_multicast:" => curr_tx_mc = val,
+                                "tx_broadcast:" => curr_tx_bc = val,
                                 _ => {} // Ignore the other 50+ stats we don't care about
                             }
                         }
@@ -165,9 +185,14 @@ pub fn spawn_telemetry(telemetry_tx: Sender<TMLiveStats>, iface_name: String, sh
                 // Initialize the baseline on the very first loop so we don't
                 // trigger a massive false "burst" of billions of packets
                 if is_first_run {
-                    prev_pkts = curr_pkts;
+                    prev_rx_uc = curr_rx_uc;
+                    prev_rx_mc = curr_rx_mc;
+                    prev_rx_bc = curr_rx_bc;
                     prev_sw_drops = curr_sw_drops;
                     prev_hw_drops = curr_hw_drops;
+                    prev_tx_uc = curr_tx_uc;
+                    prev_tx_mc = curr_tx_mc;
+                    prev_tx_bc = curr_tx_bc;
                     is_first_run = false;
                     continue; // Skip the rest of the loop for this first tick
                 }
@@ -176,30 +201,54 @@ pub fn spawn_telemetry(telemetry_tx: Sender<TMLiveStats>, iface_name: String, sh
                 // DELTA MATH
                 // ==========================================
                 // saturating_sub prevents a crash if the NIC driver resets its counters to 0
-                let delta_pkts = curr_pkts.saturating_sub(prev_pkts);
+                let delta_rx_uc    = curr_rx_uc.saturating_sub(prev_rx_uc);
+                let delta_rx_mc    = curr_rx_mc.saturating_sub(prev_rx_mc);
+                let delta_rx_bc    = curr_rx_bc.saturating_sub(prev_rx_bc);
                 let delta_sw_drops = curr_sw_drops.saturating_sub(prev_sw_drops);
                 let delta_hw_drops = curr_hw_drops.saturating_sub(prev_hw_drops);
+                let delta_tx_uc    = curr_tx_uc.saturating_sub(prev_tx_uc);
+                let delta_tx_mc    = curr_tx_mc.saturating_sub(prev_tx_mc);
+                let delta_tx_bc    = curr_tx_bc.saturating_sub(prev_tx_bc);
 
                 // Save for the next loop
-                prev_pkts = curr_pkts;
+                prev_rx_uc    = curr_rx_uc;
+                prev_rx_mc    = curr_rx_mc;
+                prev_rx_bc    = curr_rx_bc;
                 prev_sw_drops = curr_sw_drops;
                 prev_hw_drops = curr_hw_drops;
+                prev_tx_uc    = curr_tx_uc;
+                prev_tx_mc    = curr_tx_mc;
+                prev_tx_bc    = curr_tx_bc;
 
                 // ==========================================
                 // BURST LOGIC (The State Machine)
                 // ==========================================
-                if delta_pkts > 0 || delta_sw_drops > 0 || delta_hw_drops > 0 {
+                let any_activity = delta_rx_uc > 0 || delta_rx_mc > 0 || delta_rx_bc > 0
+                    || delta_sw_drops > 0 || delta_hw_drops > 0
+                    || delta_tx_uc > 0 || delta_tx_mc > 0 || delta_tx_bc > 0;
+
+                if any_activity {
                     if !in_run {
                         // We just woke up! Reset the burst counters
                         in_run = true;
-                        run_pkts = 0;
+                        run_rx_uc    = 0;
+                        run_rx_mc    = 0;
+                        run_rx_bc    = 0;
                         run_sw_drops = 0;
                         run_hw_drops = 0;
+                        run_tx_uc    = 0;
+                        run_tx_mc    = 0;
+                        run_tx_bc    = 0;
                     }
 
-                    run_pkts += delta_pkts;
+                    run_rx_uc    += delta_rx_uc;
+                    run_rx_mc    += delta_rx_mc;
+                    run_rx_bc    += delta_rx_bc;
                     run_sw_drops += delta_sw_drops;
                     run_hw_drops += delta_hw_drops;
+                    run_tx_uc    += delta_tx_uc;
+                    run_tx_mc    += delta_tx_mc;
+                    run_tx_bc    += delta_tx_bc;
                     idle_ticks = 0;
 
                 } else if in_run {
@@ -218,8 +267,16 @@ pub fn spawn_telemetry(telemetry_tx: Sender<TMLiveStats>, iface_name: String, sh
                 if in_run || idle_ticks <= 50 {
                     let stats = TMLiveStats {
                         tmstats_name: iface_name.clone(),
-                        labels: vec!["rx_uc_pkts".to_string(), "sw_drops".to_string(), "hw_drops".to_string()],
-                        counters_pkts: vec![run_pkts, run_sw_drops, run_hw_drops],
+                        labels: vec![
+                            "rx_uc_pkts".to_string(), "rx_mc_pkts".to_string(), "rx_bc_pkts".to_string(),
+                            "sw_drops".to_string(), "hw_drops".to_string(),
+                            "tx_uc_pkts".to_string(), "tx_mc_pkts".to_string(), "tx_bc_pkts".to_string(),
+                        ],
+                        counters_pkts: vec![
+                            run_rx_uc, run_rx_mc, run_rx_bc,
+                            run_sw_drops, run_hw_drops,
+                            run_tx_uc, run_tx_mc, run_tx_bc,
+                        ],
                         counters_bytes: vec![],
                         is_active_run: in_run,
                     };

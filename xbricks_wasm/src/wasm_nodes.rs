@@ -121,7 +121,7 @@ impl Node for WasmInspectorNode {
 
         // Calculate the exact byte size of the populated packets
         let active_bytes = len * size_of::<Pdu>();
-
+        log::trace!("NODE {}: Processing batch of {} packets. Partition offset: {}", self.id, len, self.partition_start_bytes);
         // Call the Component Model plugin inside a block so that `batch_bytes`
         // (a shared reference into `batch`) is dropped before we restore desc_addr.
         let action_vector = {
@@ -150,6 +150,7 @@ impl Node for WasmInspectorNode {
 
         // PREPARE DYNAMIC OUTPUTS
         let num_routes = self.routing_table.len();
+        log::trace!("NODE {}: Routing table has {} available routes.", self.id, num_routes);
         let mut outputs: Vec<Batch> = std::iter::repeat_with(Batch::new)
             .take(num_routes)
             .collect();
@@ -170,14 +171,13 @@ impl Node for WasmInspectorNode {
             let route_id = (action & 0xFF) as usize;
             let telemetry_bucket = ((action >> 16) & 0xFF) as usize; // Get the port bucket (0-10)
             let send_sample = (action & TELEMETRY_FLAG) != 0;
-
+            // TRACE LOG: Inspect the exact bitfield returned by WASM for this packet
+            log::trace!("  -> Pkt [{}]: Action Bits = {:#010X} | Extracted Route ID = {} | Tel Bucket = {}", pdu_index, action, route_id, telemetry_bucket);
             // 1. HIGH VOLUME (Atomics) -> Cost: ~10 cycles
             // (Assuming telemetry_metrics is thread-local to this worker!)
-            if send_sample {
-                if telemetry_bucket < self.telemetry_metrics.counters_pkts.len() {
-                    self.telemetry_metrics.counters_pkts[telemetry_bucket].fetch_add(1, Ordering::Relaxed);
-                    self.telemetry_metrics.counters_bytes[telemetry_bucket].fetch_add(pdu.w.data_len() as u64, Ordering::Relaxed);
-                }
+            if telemetry_bucket < self.telemetry_metrics.counters_pkts.len() {
+                self.telemetry_metrics.counters_pkts[telemetry_bucket].fetch_add(1, Ordering::Relaxed);
+                self.telemetry_metrics.counters_bytes[telemetry_bucket].fetch_add(pdu.w.data_len() as u64, Ordering::Relaxed);
             }
 /*
             // TODO
@@ -191,13 +191,17 @@ impl Node for WasmInspectorNode {
             }
 */
             // invalid route ID: pdu remains in batch, and maybe dropped later
-            if route_id >= num_routes { usize::MAX } else { route_id }
+            if route_id >= num_routes {
+                log::warn!("NODE {}: Invalid Route ID {} for Pkt [{}].", self.id, route_id, pdu_index);
+                usize::MAX
+            } else { route_id }
         });
 
         // 4. DISPATCH DIRECTIVES
         let mut split_branches = Vec::with_capacity(num_routes);
         for (i, mut output_batch) in outputs.into_iter().enumerate() {
             if !output_batch.is_empty() {
+                log::trace!("NODE {}: Branching {} packets to Target Node ID: {}", self.id, output_batch.len(), self.routing_table[i]);
                 // Route ID matches the index in our dynamic routing table
                 split_branches.push((self.routing_table[i].clone(), output_batch));
             }

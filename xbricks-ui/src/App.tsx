@@ -253,7 +253,7 @@ export default function App() {
         // 3. Construct the payload matching our Rust `NodeUpdatePayload`
         const payload = {
             pipeline_name: pipelineName,
-            node_id: selectedNode.id,
+            node_id: selectedNode.data.id as string,
             routes: parsedRoutes,
             // UI might store it as 'default' or 'default_route' depending on your topology JSON
             default_route: (selectedNode.data.default_route || selectedNode.data.default) as string | undefined,

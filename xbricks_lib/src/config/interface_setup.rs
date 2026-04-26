@@ -106,7 +106,7 @@ impl InterfaceSetup {
                 .map(|entries| entries.filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().starts_with("rx-")).count() as u32)
                 .unwrap_or(1);
 
-            if existing_queues >= self.queues {
+            if existing_queues == self.queues {
                 info!("✓ Veth pair {} already exists with {} queues", self.name, existing_queues);
                 return Ok(());
             }
@@ -297,7 +297,7 @@ impl InterfaceSetup {
 
             let master_ok = peer_master.as_deref() == Some(master);
 
-            if existing_queues >= self.queues && master_ok {
+            if existing_queues == self.queues && master_ok {
                 info!("✓ Veth pair {} already exists with {} queues and correct master", self.name, existing_queues);
                 return Ok(());
             }

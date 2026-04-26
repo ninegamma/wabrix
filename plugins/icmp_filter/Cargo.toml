@@ -1,0 +1,14 @@
+[package]
+name = "icmp_filter"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+# This is crucial for Wasm components
+crate-type = ["cdylib"]
+
+[dependencies]
+# Pull this from your workspace.dependencies
+wit-bindgen = { workspace = true }
+xbricks_protocol = { path = "../../xbricks_protocol" }

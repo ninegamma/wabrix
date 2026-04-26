@@ -217,15 +217,29 @@ async fn get_topology(State(state): State<AppState>) -> Json<TopologyResponse> {
     }
 
     // 5. Add Pipeline Nodes AND inject pipeline_name!
+    // Node IDs are scoped to their pipeline ("pipeline_name/node_id") so that
+    // nodes with the same id in different pipelines don't collide in the UI.
     for pipeline in &config_guard.pipelines {
         for node in &pipeline.nodes {
+            let scoped_id = format!("{}/{}", pipeline.name, node.id);
             let mut node_data = serde_json::to_value(node).unwrap();
             if let Some(obj) = node_data.as_object_mut() {
                 obj.insert("pipeline_name".to_string(), Value::String(pipeline.name.clone()));
+                // Scope routes/next/default so edge targets resolve to scoped node IDs.
+                let scoped_routes: Vec<Value> = node.routes.iter()
+                    .map(|r| Value::String(format!("{}/{}", pipeline.name, r)))
+                    .collect();
+                obj.insert("routes".to_string(), Value::Array(scoped_routes));
+                if let Some(ref next) = node.next {
+                    obj.insert("next".to_string(), Value::String(format!("{}/{}", pipeline.name, next)));
+                }
+                if let Some(ref default) = node.default {
+                    obj.insert("default".to_string(), Value::String(format!("{}/{}", pipeline.name, default)));
+                }
             }
             ui_nodes.push(UiNode {
-                position: saved_pos(&node.id),
-                id: node.id.clone(),
+                position: saved_pos(&scoped_id),
+                id: scoped_id,
                 r#type: node.node_type.clone(),
                 data: node_data,
             });
