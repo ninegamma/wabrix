@@ -344,17 +344,20 @@ impl Node for QueueNode {
 /// 3. Debugging/Testing throughput (Blackhole).
 pub struct DropNode {
     id: NodeId,
-    // Optional: Add a counter for telemetry
     dropped_count: u64,
+    /// Shared atomic counter published to the telemetry registry so the GUI
+    /// can display the running dropped-packet total in real time.
+    telemetry_counter: Option<Arc<AtomicU64>>,
     #[cfg(feature = "profiling")]
     total_cycles: u64,
 }
 
 impl DropNode {
-    pub fn new(id: NodeId) -> Self {
+    pub fn new(id: NodeId, telemetry_counter: Option<Arc<AtomicU64>>) -> Self {
         Self {
             id,
             dropped_count: 0,
+            telemetry_counter,
             #[cfg(feature = "profiling")]
             total_cycles: 0,
         }
@@ -373,7 +376,9 @@ impl Node for DropNode {
         let count = batch.len();
         if count > 0 {
             self.dropped_count += count as u64;
-
+            if let Some(counter) = &self.telemetry_counter {
+                counter.fetch_add(count as u64, Ordering::Relaxed);
+            }
             // 🚀 BOOM: 1-Call Amortized Bulk Drop!
             batch.bulk_drop();
         }

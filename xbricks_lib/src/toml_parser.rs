@@ -920,6 +920,108 @@ impl XBricksConfig {
                     }
                 }
             }
+
+            // Validate WasmInspectorNode upstream umem consistency via Graph Propagation:
+            // Any node that routes into a WasmInspectorNode (no matter how deep the chain)
+            // must deliver frames from the same UMEM the WasmInspectorNode is bound to.
+            {
+                // Step A: Build interface -> umem mapping
+                let mut iface_umems: HashMap<&str, Vec<usize>> = HashMap::new();
+                for xsk in &section.xsk {
+                    iface_umems.entry(xsk.iface.as_str()).or_default().push(xsk.umem);
+                }
+
+                // Step B: Build adjacency list (node -> targets)
+                let mut targets_of: HashMap<&str, Vec<&str>> = HashMap::new();
+                for node in &pipeline.nodes {
+                    let targets = targets_of.entry(node.id.as_str()).or_default();
+                    if let Some(ref next_id) = node.next {
+                        targets.push(next_id.as_str());
+                    }
+                    for route_id in &node.routes {
+                        targets.push(route_id.as_str());
+                    }
+                    if let Some(ref default_id) = node.default {
+                        targets.push(default_id.as_str());
+                    }
+                }
+
+                // Step C: Worklist for UMEM propagation
+                let mut output_umems: HashMap<&str, HashSet<usize>> = HashMap::new();
+                let mut worklist: Vec<&str> = Vec::new();
+
+                // Initialize graph sources (Rx Nodes and Generators)
+                for node in &pipeline.nodes {
+                    let mut initial_umems = HashSet::new();
+
+                    if node.node_type == "BatchRxNode" {
+                        if let Some(iface) = node.args.get("interface") {
+                            if let Some(umems) = iface_umems.get(iface.as_str()) {
+                                for &u in umems {
+                                    initial_umems.insert(u);
+                                }
+                            }
+                        }
+                    } else if node.node_type == "PacketGenerator" {
+                        if let Some(u_str) = node.args.get("umem") {
+                            if let Ok(u) = u_str.parse::<usize>() {
+                                initial_umems.insert(u);
+                            }
+                        }
+                    }
+
+                    if !initial_umems.is_empty() {
+                        output_umems.insert(node.id.as_str(), initial_umems);
+                        worklist.push(node.id.as_str());
+                    }
+                }
+
+                // Step D: Propagate UMEMs through the pipeline DAG
+                while let Some(current_id) = worklist.pop() {
+                    let current_outputs = output_umems.get(current_id).cloned().unwrap_or_default();
+                    if let Some(targets) = targets_of.get(current_id) {
+                        for &target_id in targets {
+                            let target_outputs = output_umems.entry(target_id).or_default();
+                            let mut changed = false;
+
+                            for &u in &current_outputs {
+                                if target_outputs.insert(u) {
+                                    changed = true;
+                                }
+                            }
+                            // If this node received a new UMEM, we must propagate its outputs
+                            if changed {
+                                worklist.push(target_id);
+                            }
+                        }
+                    }
+                }
+
+                // Step E: Validate WasmInspectorNodes against propagated data
+                for node in &pipeline.nodes {
+                    if node.node_type == "WasmInspectorNode" {
+                        let wasm_umem_str = node.args.get("umem").ok_or_else(|| {
+                            anyhow!("Pipeline '{}': WasmInspectorNode '{}' is missing 'umem' argument", pipeline.name, node.id)
+                        })?;
+
+                        let wasm_umem = wasm_umem_str.parse::<usize>().map_err(|_| {
+                            anyhow!("Pipeline '{}': Invalid 'umem' format for WasmInspectorNode '{}'", pipeline.name, node.id)
+                        })?;
+
+                        // Check if any propagated UMEM reaching this node differs from its bound UMEM
+                        if let Some(reached_umems) = output_umems.get(node.id.as_str()) {
+                            for &u in reached_umems {
+                                if u != wasm_umem {
+                                    return Err(anyhow!(
+                                        "Pipeline '{}': WasmInspectorNode '{}' is bound to umem {}, but can receive PDUs from umem {} via upstream nodes.",
+                                        pipeline.name, node.id, wasm_umem, u
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // 7. Validate no duplicate queue assignments across pipelines
@@ -1962,5 +2064,180 @@ mod tests {
 
         let config: XBricksConfig = toml::from_str(toml_str).unwrap();
         assert!(config.validate().is_ok());
+    }
+
+    /// Helper that builds a minimal TOML config string containing a pipeline whose
+    /// PacketGenerator feeds a WasmInspectorNode.  The `gen_umem` / `wasm_umem`
+    /// parameters control the `umem` arg on each node so we can provoke mismatches.
+    fn wasm_umem_pipeline_toml(gen_umem: usize, wasm_umem: usize) -> String {
+        format!(r#"
+            [xbricks]
+            ifaces = [
+                {{ name = "lo", rxd = 2048, txd = 2048 }}
+            ]
+            umem = [
+                {{ id = 0, frame_size = 2048, frame_count = 4096, fq_size = 1024, cq_size = 1024, head_room = 128 }},
+                {{ id = 1, frame_size = 2048, frame_count = 4096, fq_size = 1024, cq_size = 1024, head_room = 128 }}
+            ]
+            xsk = [
+                {{ iface = "lo", queues = [0], umem = 0, rxq_size = 1024, txq_size = 1024, zerocopy = true }}
+            ]
+            workers = [{{ id = 0, core = 0 }}]
+
+            [[pipelines]]
+            name = "test_pipeline"
+            workers = [0]
+                [[pipelines.nodes]]
+                id = "gen"
+                type = "PacketGenerator"
+                next = "wasm"
+                pps = 100
+                args = {{ umem = "{gen_umem}" }}
+
+                [[pipelines.nodes]]
+                id = "wasm"
+                type = "WasmInspectorNode"
+                routes = ["drop1", "drop2"]
+                args = {{ umem = "{wasm_umem}", wasm_file_path = "dummy.wasm" }}
+
+                [[pipelines.nodes]]
+                id = "drop1"
+                type = "DropNode"
+
+                [[pipelines.nodes]]
+                id = "drop2"
+                type = "DropNode"
+        "#)
+    }
+
+
+    #[test]
+    fn test_wasm_inspector_upstream_umem_match_is_accepted() {
+        let toml_str = wasm_umem_pipeline_toml(0, 0);
+        let config: XBricksConfig = toml::from_str(&toml_str).unwrap();
+        assert!(config.validate().is_ok(), "identical umem should be valid");
+    }
+
+    #[test]
+    fn test_wasm_inspector_upstream_batchrx_umem_match_is_accepted() {
+        // XSK binds "lo" to umem 0; WasmInspectorNode also uses umem 0 → valid.
+        let toml_str = r#"
+            [xbricks]
+            ifaces = [
+                { name = "lo", rxd = 2048, txd = 2048 }
+            ]
+            umem = [
+                { id = 0, frame_size = 2048, frame_count = 4096, fq_size = 1024, cq_size = 1024, head_room = 128 }
+            ]
+            xsk = [
+                { iface = "lo", queues = [0], umem = 0, rxq_size = 1024, txq_size = 1024, zerocopy = true }
+            ]
+            workers = [{ id = 0, core = 0, partitions = [{ umem = 0, count = 1 }] }]
+
+            [[pipelines]]
+            name = "test_pipeline"
+            workers = [0]
+                [[pipelines.nodes]]
+                id = "rx"
+                type = "BatchRxNode"
+                next = "wasm"
+                queues = [0]
+                args = { interface = "lo" }
+
+                [[pipelines.nodes]]
+                id = "wasm"
+                type = "WasmInspectorNode"
+                routes = ["drop1", "drop2"]
+                args = { umem = "0", wasm_file_path = "dummy.wasm" }
+
+                [[pipelines.nodes]]
+                id = "drop1"
+                type = "DropNode"
+
+                [[pipelines.nodes]]
+                id = "drop2"
+                type = "DropNode"
+        "#;
+        let config: XBricksConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.validate().is_ok(), "matching umem via XSK lookup should be valid");
+    }
+
+    #[test]
+    fn test_wasm_inspector_upstream_umem_mismatch() {
+        // We create a pipeline where:
+        // BatchRxNode (UMEM 0) -> FastParserNode -> WasmInspectorNode (UMEM 1)
+        // The validation must traverse FastParserNode and catch the 0 -> 1 mismatch.
+        let toml_str = r#"
+        [xbricks]
+        ifaces = [ { name = "lo" } ]
+
+        [[xbricks.umem]]
+        id = 0
+        frame_size = 2048
+        frame_count = 1024
+        fq_size = 512
+        cq_size = 512
+        head_room = 128
+        partitions = 1
+
+        [[xbricks.umem]]
+        id = 1
+        frame_size = 2048
+        frame_count = 1024
+        fq_size = 512
+        cq_size = 512
+        head_room = 128
+        partitions = 1
+
+        [[xbricks.xsk]]
+        iface = "lo"
+        queues = [0]
+        umem = 0
+        rxq_size = 512
+        txq_size = 512
+        zerocopy = true
+
+        [[xbricks.workers]]
+        id = 0
+        core = 0
+        partitions = [{ umem = 0, count = 1 }, { umem = 1, count = 1 }]
+
+        [[pipelines]]
+        name = "test_pipe"
+        workers = [0]
+
+        [[pipelines.nodes]]
+        id = "rx"
+        type = "BatchRxNode"
+        next = "parser"
+        queues = [0]
+        [pipelines.nodes.args]
+        interface = "lo"
+
+        [[pipelines.nodes]]
+        id = "parser"
+        type = "FastParserNode"
+        next = "wasm"
+        [pipelines.nodes.args]
+
+        [[pipelines.nodes]]
+        id = "wasm"
+        type = "WasmInspectorNode"
+        [pipelines.nodes.args]
+        umem = "1"
+        "#;
+
+        let result = XBricksConfig::from_toml_str(toml_str);
+
+        // Assert that the configuration failed validation
+        assert!(result.is_err(), "Configuration should have failed due to UMEM mismatch");
+
+        let err_msg = result.unwrap_err().to_string();
+
+        // Assert it threw the correct specific error
+        assert!(
+            err_msg.contains("WasmInspectorNode 'wasm' is bound to umem 1, but can receive PDUs from umem 0"),
+            "Error message did not match expected output. Got: {}", err_msg
+        );
     }
 }

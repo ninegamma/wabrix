@@ -335,7 +335,18 @@ impl PipelineFactory {
                 }
 
                 // === 4. Drop Node ===
-                "DropNode" => Box::new(DropNode::new(my_id.clone())),
+                "DropNode" => {
+                    let dropped_pkts = Arc::new(AtomicU64::new(0));
+                    if let Some(ref mut reg) = telemetry_registry {
+                        reg.register(
+                            node_conf.id.clone(),
+                            vec!["dropped".to_string()],
+                            vec![dropped_pkts.clone()],
+                            vec![Arc::new(AtomicU64::new(0))],
+                        );
+                    }
+                    Box::new(DropNode::new(my_id.clone(), Some(dropped_pkts)))
+                }
 
                 // === 5. FastParser Node ===
                 "FastParserNode" => {
@@ -431,7 +442,7 @@ impl PipelineFactory {
                         instance_idx * frames_per_instance * manager.umem().frame_size;
                     wasm_instance_counters[umem_id] += 1;
 
-                    Box::new(WasmInspectorNode::new(my_id.clone(), manager, wasm_path, routing_table, None, telemetry_metrics, partition_start_bytes))
+                    Box::new(WasmInspectorNode::new(my_id.clone(), manager, wasm_path, routing_table, None, telemetry_metrics, partition_start_bytes, umem_id as u8))
                 }
 
                 _ => return Err(format!("Unknown Node Type: {}", node_conf.node_type)),

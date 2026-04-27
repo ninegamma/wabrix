@@ -24,7 +24,6 @@ pub struct WasmInspectorNode {
     store: Store<MyHostState>,
     // The generated bindings struct (named after the 'world' in CamelCase)
     bindings: FilterPlugin,
-    // FLEXIBILITY UPGRADE: A dynamic routing table instead of hardcoded branches
     // Index corresponds to the Route ID returned by Wasm
     routing_table: Vec<NodeId>,
     // Telemetry dispatch channel
@@ -38,6 +37,8 @@ pub struct WasmInspectorNode {
     /// before calling the plugin, and back to absolute offsets after.
     /// Zero for the first (or only) instance.
     partition_start_bytes: u32,
+    /// The Umem this node is bound to. Every incoming PDU must carry this id.
+    umem_id: u8,
 }
 
 impl WasmInspectorNode {
@@ -49,6 +50,7 @@ impl WasmInspectorNode {
         telemetry_tx: Option<Sender<u32>>,
         telemetry_metrics: TelemetryMetrics,
         partition_start_bytes: u32,
+        umem_id: u8,
     ) -> Self {
         // 1. Fetch the Component from the Manager's DashMap cache
         // This takes nanoseconds if already loaded, avoiding disk I/O.
@@ -96,6 +98,7 @@ impl WasmInspectorNode {
             total_cycles: 0,
             telemetry_metrics,
             partition_start_bytes,
+            umem_id,
         }
     }
 }
@@ -113,6 +116,13 @@ impl Node for WasmInspectorNode {
         if len == 0 {
             return Directive::Stop;
         }
+
+        debug_assert!(
+            batch.iter().all(|pdu| pdu.w.umem_id() == self.umem_id),
+            "NODE {}: PDU from wrong Umem arrived (expected umem_id={})",
+            self.id, self.umem_id
+        );
+
         self.processed_packets += len;
 
         // ==========================================================

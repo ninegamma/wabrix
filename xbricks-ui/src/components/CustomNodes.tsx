@@ -325,6 +325,23 @@ export function PipelineNode({ data }: NodeProps<PipelineNodeType>) {
     const [showTelemetry, setShowTelemetry] = useState(false);
     const closeTelemetry = useCallback(() => setShowTelemetry(false), []);
 
+    // For DropNode: maintain an always-visible live dropped-packet counter.
+    const [droppedCount, setDroppedCount] = useState<number | null>(null);
+    useEffect(() => {
+        if (data.type !== 'DropNode') return;
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const socket = new WebSocket(`${protocol}//${window.location.host}/api/ws/telemetry`);
+        socket.onmessage = (event) => {
+            try {
+                const s: TMLiveStats = JSON.parse(event.data);
+                if (s.tmstats_name === data.id) {
+                    setDroppedCount(Number(s.counters_pkts[0] ?? 0));
+                }
+            } catch (_) {}
+        };
+        return () => { if (socket.readyState === WebSocket.OPEN) socket.close(); };
+    }, [data.id, data.type]);
+
     const label = data.id;
     const colors = pipelineColor(data.pipeline_name);
     const routes: string[] = Array.isArray(data.routes) ? data.routes : [];
@@ -401,6 +418,22 @@ export function PipelineNode({ data }: NodeProps<PipelineNodeType>) {
                     </div>
                 ))}
             </div>
+
+            {data.type === 'DropNode' && (
+                <div style={{
+                    marginTop: '6px',
+                    padding: '4px 6px',
+                    background: droppedCount !== null && droppedCount > 0 ? '#450a0a' : '#1e293b',
+                    border: `1px solid ${droppedCount !== null && droppedCount > 0 ? '#ef4444' : '#475569'}`,
+                    borderRadius: '4px',
+                    textAlign: 'center',
+                    fontSize: '12px',
+                    color: droppedCount !== null && droppedCount > 0 ? '#ef4444' : '#64748b',
+                    fontWeight: 'bold',
+                }}>
+                    {droppedCount !== null ? `${droppedCount.toLocaleString()} dropped` : 'dropped: —'}
+                </div>
+            )}
 
             {outgoing.length > 0
                 ? outgoing.map((o, i) => (
