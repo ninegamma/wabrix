@@ -66,6 +66,7 @@ fn default_ifaces() -> Vec<InterfaceConfig> {
         mac_if: None,
         ipnet: None,
         master: None,
+        checksum_offload: None,
     }]
 }
 fn default_umem_configs() -> Vec<UmemConfig> {
@@ -115,6 +116,10 @@ pub struct InterfaceConfig {
     pub ipnet: Option<String>,
     #[serde(default)]
     pub master: Option<String>,
+    /// Whether to enable TX checksum offload on this interface.
+    /// Defaults to false. For veth interfaces the ethtool command targets the peer interface.
+    #[serde(default)]
+    pub checksum_offload: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, TS)]

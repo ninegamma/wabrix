@@ -195,7 +195,7 @@ async fn main() -> anyhow::Result<()> {
         total_workers, total_workers
     );
 
-    let (handles, _) = xbricks_system.spawn_workers(false, shutdown.clone(), workers_completed.clone())?;
+    let handles = xbricks_system.spawn_workers(shutdown.clone(), workers_completed.clone())?;
 
     info!(
         "Spawned {} worker thread handles. Waiting for completion or Ctrl-C...",

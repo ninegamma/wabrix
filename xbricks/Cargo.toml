@@ -14,6 +14,7 @@ axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1.49", features = ["full"] }
 clap = { workspace = true, features = ["derive", "std"] }
 toml = "1.1"
+toml_edit = { version = "0.22", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 separator = "0.4"
 pcap-file = "3.0.0-rc1"

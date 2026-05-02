@@ -1,106 +1,39 @@
-[[xbricks.ifaces]]
-name = "enp2s0f0np0"
-rxd = 8160
-txd = 2048
-irq_core = 8
-
-[[xbricks.ifaces]]
-name = "veth_xbricks"
-rxd = 1024
-txd = 1024
-type = "veth"
-peer = "veth-br"
-master = "kvm-br"
-
-[[xbricks.umem]]
-id = 0
-frame_size = 2048
-frame_count = 262144
-fq_size = 65536
-cq_size = 16384
-head_room = 128
-partitions = 2
-reserved = 30720
-
-[[xbricks.umem]]
-id = 1
-frame_size = 2048
-frame_count = 131072
-fq_size = 16384
-cq_size = 16384
-head_room = 128
-partitions = 2
-reserved = 10240
-
-[[xbricks.xsk]]
-iface = "enp2s0f0np0"
-queues = [
-    0,
-    1,
+[xbricks]
+ifaces= [
+    { name = "enp2s0f0np0", rxd = 8096, txd = 2048, irq_core = 8 },
+    { name = "veth_xbricks", rxd = 1024, txd = 1024, type = "veth", peer = "veth-br", master = "kvm-br", checksum_offload = false },
+    { name = "enp2s0f1np1", rxd = 8096, txd = 8096 },
 ]
-umem = 0
-rxq_size = 32768
-txq_size = 4096
-zerocopy = true
-xdp_mode = "auto"
-
-[[xbricks.xsk]]
-iface = "veth_xbricks"
-queues = [
-    0,
-    1,
+umem= [
+    { id = 0, frame_size = 2048, frame_count = 262144, fq_size = 65536, cq_size = 16384, head_room = 128, partitions = 2, reserved = 30720 },
+    { id = 1, frame_size = 2048, frame_count = 131072, fq_size = 16384, cq_size = 16384, head_room = 128, partitions = 2, reserved = 10240 },
 ]
-umem = 1
-rxq_size = 4096
-txq_size = 4096
-zerocopy = false
-xdp_mode = "auto"
+xsk= [
+    { iface = "enp2s0f0np0", queues = [0], umem = 0, rxq_size = 32768, txq_size = 4096, zerocopy = true, xdp_mode = "auto" },
+    { iface = "enp2s0f0np0", queues = [1], umem = 0, rxq_size = 32768, txq_size = 4096, zerocopy = true, xdp_mode = "auto" },
+    { iface = "veth_xbricks", queues = [0, 1], umem = 1, rxq_size = 4096, txq_size = 4096, zerocopy = false, xdp_mode = "auto" },
+    { iface = "enp2s0f1np1", queues = [0], umem = 0, rxq_size = 8192, txq_size = 8192, zerocopy = true, xdp_mode = "auto" },
+]
+workers= [
+    { id = 0, core = 9, partitions = [{ umem = 0, count = 1 }, { umem = 1, count = 1 }] },
+    { id = 1, core = 7, partitions = [{ umem = 0, count = 1 }, { umem = 1, count = 1 }] },
+]
 
-[[xbricks.workers]]
-id = 0
-core = 9
-
-[[xbricks.workers.partitions]]
-umem = 0
-count = 1
-
-[[xbricks.workers.partitions]]
-umem = 1
-count = 1
-
-[[xbricks.workers]]
-id = 1
-core = 7
-
-[[xbricks.workers.partitions]]
-umem = 0
-count = 1
-
-[[xbricks.workers.partitions]]
-umem = 1
-count = 1
-
+# ===================================================================
+# PIPELINE: NIC0_IN
+# ===================================================================
 [[pipelines]]
 name = "nic0_in"
-workers = [
-    0,
-    1,
-]
+workers = [0, 1]
 
 [[pipelines.nodes]]
 id = "nd_receiver"
 type = "BatchRxNode"
 next = "nd_parser"
 routes = []
-queues = [
-    0,
-    1,
-]
+queues = [0, 1]
 labels = []
-
-[pipelines.nodes.args]
-interface = "enp2s0f0np0"
-batch_size = "256"
+args= { batch_size = "256", interface = "enp2s0f0np0" }
 
 [[pipelines.nodes]]
 id = "nd_parser"
@@ -109,40 +42,23 @@ next = "nd_wasm_inspector"
 routes = []
 queues = []
 labels = []
-
-[pipelines.nodes.args]
+args= {}
 
 [[pipelines.nodes]]
 id = "nd_wasm_inspector"
 type = "WasmInspectorNode"
-routes = [
-    "nd_veth_sink",
-    "nd_drop",
-]
+routes = ["nd_veth_sink", "nd_drop"]
 queues = []
-labels = [
-    "icmp ping",
-    "icmp reply",
-    "icmp other",
-    "any other",
-]
-
-[pipelines.nodes.args]
-wasm_file_path = "/home/rainer1956/rust/xbrix/target/wasm32-wasip2/release/icmp_filter.wasm"
-umem = "0"
+labels = ["icmp ping", "icmp reply", "icmp other", "any other"]
+args= { wasm_file_path = "/home/rainer1956/rust/xbrix/target/wasm32-wasip2/release/icmp_filter.wasm", umem = "0" }
 
 [[pipelines.nodes]]
 id = "nd_veth_sink"
 type = "BatchTxNode"
 routes = []
-queues = [
-    0,
-    1,
-]
+queues = [0, 1]
 labels = []
-
-[pipelines.nodes.args]
-interface = "veth_xbricks"
+args= { interface = "veth_xbricks" }
 
 [[pipelines.nodes]]
 id = "nd_drop"
@@ -150,29 +66,23 @@ type = "DropNode"
 routes = []
 queues = []
 labels = []
+args= {}
 
-[pipelines.nodes.args]
-
+# ===================================================================
+# PIPELINE: VETH_OUT
+# ===================================================================
 [[pipelines]]
 name = "veth_out"
-workers = [
-    0,
-    1,
-]
+workers = [0, 1]
 
 [[pipelines.nodes]]
 id = "nd_veth_source"
 type = "BatchRxNode"
 next = "nd_parser_veth"
 routes = []
-queues = [
-    0,
-    1,
-]
+queues = [0, 1]
 labels = []
-
-[pipelines.nodes.args]
-interface = "veth_xbricks"
+args= { interface = "veth_xbricks" }
 
 [[pipelines.nodes]]
 id = "nd_parser_veth"
@@ -181,27 +91,15 @@ next = "nd_icmp_filter"
 routes = []
 queues = []
 labels = []
-
-[pipelines.nodes.args]
+args= {}
 
 [[pipelines.nodes]]
 id = "nd_icmp_filter"
 type = "WasmInspectorNode"
-routes = [
-    "nd_transmitter",
-    "nd_drop",
-]
+routes = ["nd_transmitter", "nd_drop"]
 queues = []
-labels = [
-    "icmp ping",
-    "icmp reply",
-    "icmp other",
-    "any other",
-]
-
-[pipelines.nodes.args]
-wasm_file_path = "/home/rainer1956/rust/xbrix/target/wasm32-wasip2/release/icmp_filter.wasm"
-umem = "1"
+labels = ["icmp ping", "icmp reply", "icmp other", "any other"]
+args= { wasm_file_path = "/home/rainer1956/rust/xbrix/target/wasm32-wasip2/release/icmp_filter.wasm", umem = "1" }
 
 [[pipelines.nodes]]
 id = "nd_drop"
@@ -209,90 +107,129 @@ type = "DropNode"
 routes = []
 queues = []
 labels = []
-
-[pipelines.nodes.args]
+args= {}
 
 [[pipelines.nodes]]
 id = "nd_transmitter"
 type = "BatchTxNode"
 routes = []
-queues = [
-    0,
-    1,
-]
+queues = [0, 1]
 labels = []
+args= { interface = "enp2s0f0np0" }
 
-[pipelines.nodes.args]
-interface = "enp2s0f0np0"
+# ===================================================================
+# PIPELINE: GENERATOR
+# ===================================================================
+[[pipelines]]
+name = "generator"
+workers = [0]
 
-[layout.worker_0]
-x = 250.34294
-y = 285.98907
+[[pipelines.nodes]]
+id = "pctgen"
+type = "PacketGenerator"
+next = "tx_sink_1"
+routes = []
+queues = []
+pps = 1000
+labels = []
+args= { umem = "0", batch_size = "64" }
 
-[layout."veth_out/nd_transmitter"]
-x = 776.1274
-y = 814.52673
+[[pipelines.nodes]]
+id = "tx_sink_1"
+type = "BatchTxNode"
+routes = []
+queues = [0]
+labels = []
+args= { interface = "enp2s0f1np1", sink_type = "xsk" }
+
+[layout.iface_enp2s0f1np1]
+x = -281.86197
+y = 6.402201
+
+[layout.xsk_2]
+x = 770.0934
+y = 273.46548
 
 [layout."nic0_in/nd_wasm_inspector"]
-x = 526.1274
-y = 589.52673
+x = 517.896
+y = 586.78296
+
+[layout."veth_out/nd_parser_veth"]
+x = 276.12735
+y = 889.52673
 
 [layout."veth_out/nd_icmp_filter"]
 x = 526.1274
 y = 889.52673
 
-[layout."nic0_in/nd_parser"]
-x = 276.12735
-y = 589.52673
-
-[layout."nic0_in/nd_veth_sink"]
-x = 776.1274
-y = 514.52673
-
-[layout.xsk_0]
-x = -10.780318
-y = 268.16602
-
-[layout.worker_1]
-x = 522.6839
-y = 289.58252
-
-[layout.iface_veth_xbricks]
-x = 786.20276
-y = 1.1978132
-
-[layout.iface_enp2s0f0np0]
-x = 0.0
-y = 0.0
-
-[layout.umem_0]
-x = 256.00894
-y = -8.384692
-
 [layout."veth_out/nd_veth_source"]
 x = 26.12736
-y = 889.52673
-
-[layout."nic0_in/nd_receiver"]
-x = 26.12736
-y = 589.52673
-
-[layout."veth_out/nd_parser_veth"]
-x = 276.12735
 y = 889.52673
 
 [layout."veth_out/nd_drop"]
 x = 776.1274
 y = 964.52673
 
+[layout."generator/pctgen"]
+x = 25.608805
+y = 733.50934
+
+[layout.iface_veth_xbricks]
+x = 786.20276
+y = 1.1978132
+
+[layout."nic0_in/nd_veth_sink"]
+x = 776.1274
+y = 514.52673
+
+[layout."generator/tx_sink_1"]
+x = 272.55084
+y = 721.3337
+
+[layout.iface_enp2s0f0np0]
+x = 0.0
+y = 0.0
+
+[layout."nic0_in/nd_receiver"]
+x = 26.12736
+y = 589.52673
+
+[layout.umem_0]
+x = 256.00894
+y = -8.384692
+
+[layout.worker_1]
+x = 522.6839
+y = 289.58252
+
+[layout.worker_0]
+x = 250.34294
+y = 285.98907
+
+[layout.xsk_0]
+x = 24.88909
+y = 267.25143
+
+[layout."veth_out/nd_transmitter"]
+x = 776.1274
+y = 814.52673
+
+[layout.umem_1]
+x = 522.36084
+y = -8.384692
+
+[layout.xsk_3]
+x = -413.18964
+y = 264.38562
+
 [layout."nic0_in/nd_drop"]
 x = 776.1274
 y = 664.52673
 
 [layout.xsk_1]
-x = 814.9503
+x = -193.85371
 y = 265.7704
 
-[layout.umem_1]
-x = 522.36084
-y = -8.384692
+[layout."nic0_in/nd_parser"]
+x = 276.12735
+y = 589.52673

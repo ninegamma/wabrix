@@ -27,21 +27,10 @@ impl XBricksSystem {
     /// consumes itself (XBricksSystem)
     pub fn spawn_workers(
         mut self,
-        b_with_telemetry: bool,
         shutdown: Arc<AtomicBool>,
         workers_completed: Arc<AtomicUsize>,
-    ) -> anyhow::Result<(
-        Vec<JoinHandle<Result<Vec<PipelineStats>, String>>>,
-        Option<std::thread::JoinHandle<()>>,
-    )> {
-        // --- SPAWN TELEMETRY LOGGER ---
-
-        let telemetry_handle = if b_with_telemetry {
-            Some(self.spawn_telemetry(shutdown.clone())?)
-        } else {
-            None
-        };
-
+    ) -> anyhow::Result<Vec<JoinHandle<Result<Vec<PipelineStats>, String>>>> 
+    {
         // --- SPAWN WORKER THREADS ---
 
         info!("Spawning pipeline worker threads...");
@@ -80,23 +69,6 @@ impl XBricksSystem {
             );
         }
 
-        Ok((handles, telemetry_handle))
-    }
-
-    fn spawn_telemetry(&mut self, shutdown: Arc<AtomicBool>) -> anyhow::Result<std::thread::JoinHandle<()>> {
-        // --- SPAWN TELEMETRY LOGGER ---
-
-        let telemetry_interval_secs = 5; // Print telemetry every 5 seconds
-        info!(
-            "Spawned telemetry logger thread with {} second interval",
-            telemetry_interval_secs
-        );
-
-        let telemetry_handle = crate::telemetry_logger::spawn_telemetry_logger(
-            Arc::clone(&self.telemetry_registry),
-            telemetry_interval_secs,
-            Arc::clone(&shutdown),
-        );
-        Ok(telemetry_handle)
+        Ok(handles)
     }
 }

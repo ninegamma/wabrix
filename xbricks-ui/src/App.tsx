@@ -146,6 +146,9 @@ export default function App() {
     const [pendingRestart, setPendingRestart] = useState(true);
     // Tracks which menu is currently open ('File', 'System', or null)
     const [activeMenu, setActiveMenu] = useState<string | null>(null);
+    const [showIfaceXskSubmenu, setShowIfaceXskSubmenu] = useState(false);
+    const [xdpIfaceList, setXdpIfaceList] = useState<{ name: string; max_rxd: number; max_txd: number }[] | null>(null);
+    const [xdpIfacesLoading, setXdpIfacesLoading] = useState(false);
 
     const doHardwareSave = async (savePath: string) => {
         setShowFileBrowser(false);
@@ -212,7 +215,115 @@ export default function App() {
         });
     };
 
-    const sendDataplaneCommand = async (command: 'start' | 'stop' | 'restart' | 'check' | 'shutdown') => {
+    const closeAllMenus = () => {
+        setActiveMenu(null);
+        setShowIfaceXskSubmenu(false);
+    };
+
+    const fetchXdpIfaces = async () => {
+        setXdpIfacesLoading(true);
+        try {
+            const resp = await axios.get('/api/interfaces/xdp');
+            setXdpIfaceList(resp.data);
+        } catch (err) {
+            console.error('Failed to fetch XDP interfaces:', err);
+            setXdpIfaceList([]);
+        } finally {
+            setXdpIfacesLoading(false);
+        }
+    };
+
+    const handleCreateIfaceXsk = (ifaceName: string, maxRxd: number, maxTxd: number) => {
+        closeAllMenus();
+
+        const ifaceId = `iface_${ifaceName}`;
+        const existingIface = nodes.find(n => n.id === ifaceId);
+
+        const ifaceNodes = nodes.filter(n => n.type === 'iface');
+        const xskNodes = nodes.filter(n => n.type === 'xsk');
+
+        const maxXskIdx = xskNodes.reduce((max, n) => {
+            const idx = parseInt(n.id.split('_')[1]);
+            return isNaN(idx) ? max : Math.max(max, idx);
+        }, -1);
+        const nextXskIdx = maxXskIdx + 1;
+
+        const ROW_GAP = 40;
+        const newNodes: Node[] = [];
+
+        if (!existingIface) {
+            newNodes.push({
+                id: ifaceId,
+                type: 'iface',
+                position: { x: ifaceNodes.length * (NODE_W + TOP_SPACING), y: 0 },
+                data: {
+                    name: ifaceName,
+                    rxd: maxRxd,
+                    txd: maxTxd,
+                    irq_core: null,
+                    type: null,
+                    namespace: null,
+                    peer: null,
+                    mac_if: null,
+                    ipnet: null,
+                    master: null,
+                    checksum_offload: null,
+                },
+            } as Node);
+        }
+
+        newNodes.push({
+            id: `xsk_${nextXskIdx}`,
+            type: 'xsk',
+            position: { x: xskNodes.length * (NODE_W + TOP_SPACING), y: NODE_H + ROW_GAP },
+            data: {
+                iface: ifaceName,
+                queues: [0],
+                umem: 0,
+                rxq_size: 8192,
+                txq_size: 8192,
+                zerocopy: true,
+                xdp_mode: 'auto',
+            },
+        } as Node);
+
+        setNodes(nds => [...nds, ...newNodes]);
+
+        // Build edges for the new XSK node (same style as the initial topology load)
+        const xskEdgeStyle = { stroke: '#38bdf8', strokeWidth: 4 };
+        const xskId = `xsk_${nextXskIdx}`;
+        const umemId = `umem_0`;
+        const newEdges: Edge[] = [];
+
+        // XSK → Iface edge (iface node exists or was just created)
+        newEdges.push({
+            id: `e-${xskId}-iface`,
+            source: ifaceId,
+            sourceHandle: 'bottom',
+            target: xskId,
+            targetHandle: 'top',
+            animated: false,
+            style: xskEdgeStyle,
+        });
+
+        // XSK → Umem edge (only if umem_0 already exists in the graph)
+        const umemExists = nodes.some(n => n.id === umemId);
+        if (umemExists) {
+            newEdges.push({
+                id: `e-${xskId}-umem`,
+                source: umemId,
+                sourceHandle: 'bottom',
+                target: xskId,
+                targetHandle: 'top',
+                animated: false,
+                style: xskEdgeStyle,
+            });
+        }
+
+        setEdges(eds => [...eds, ...newEdges]);
+    };
+
+    const sendDataplaneCommand = async (command: 'start' | 'stop' | 'check' | 'shutdown') => {
         setActiveMenu(null);
         try {
             if (command === 'check') {
@@ -468,8 +579,7 @@ export default function App() {
 
                         {activeMenu === 'Dataplane' && (
                             <div style={dropdownMenuStyle}>
-                                <button onClick={() => sendDataplaneCommand('start')}    style={dropdownItemStyle}>▶ Start</button>
-                                <button onClick={() => sendDataplaneCommand('restart')}  style={dropdownItemStyle}>🔄 Restart</button>
+                                <button onClick={() => sendDataplaneCommand('start')}    style={dropdownItemStyle}>▶ Start / Restart</button>
                                 <button onClick={() => sendDataplaneCommand('stop')}     style={dropdownItemStyle}>⏹ Stop</button>
                                 <div style={menuSeparatorStyle} />
                                 <button onClick={() => sendDataplaneCommand('shutdown')} style={{ ...dropdownItemStyle, color: '#ef4444' }}>⏻ Shutdown</button>
@@ -494,12 +604,78 @@ export default function App() {
                         )}
                     </div>
 
+                    {/* --- CREATE MENU --- */}
+                    <div style={{ position: 'relative' }}>
+                        <button
+                            onClick={() => {
+                                if (activeMenu === 'Create') {
+                                    closeAllMenus();
+                                } else {
+                                    setShowIfaceXskSubmenu(false);
+                                    setActiveMenu('Create');
+                                }
+                            }}
+                            style={activeMenu === 'Create' ? topMenuBtnActiveStyle : topMenuBtnStyle}
+                        >
+                            Create
+                        </button>
+
+                        {activeMenu === 'Create' && (
+                            <div style={dropdownMenuStyle}>
+                                {/* Iface/Xsk entry with cascading submenu */}
+                                <div style={{ position: 'relative' }}>
+                                    <button
+                                        style={{ ...dropdownItemStyle, justifyContent: 'space-between' }}
+                                        onClick={() => {
+                                            setShowIfaceXskSubmenu(v => !v);
+                                            if (!xdpIfaceList && !xdpIfacesLoading) {
+                                                fetchXdpIfaces();
+                                            }
+                                        }}
+                                    >
+                                        <span>🔌 Iface/Xsk</span>
+                                        <span style={{ marginLeft: '16px', color: '#94a3b8' }}>▶</span>
+                                    </button>
+
+                                    {showIfaceXskSubmenu && (
+                                        <div style={{
+                                            ...dropdownMenuStyle,
+                                            position: 'absolute',
+                                            left: '100%',
+                                            top: 0,
+                                            marginTop: 0,
+                                            minWidth: '180px',
+                                        }}>
+                                            {xdpIfacesLoading ? (
+                                                <div style={{ ...dropdownItemStyle, color: '#94a3b8', cursor: 'default' }}>Loading...</div>
+                                            ) : xdpIfaceList === null || xdpIfaceList.length === 0 ? (
+                                                <div style={{ ...dropdownItemStyle, color: '#94a3b8', cursor: 'default' }}>
+                                                    {xdpIfaceList === null ? 'Loading...' : 'No XDP zerocopy interfaces found'}
+                                                </div>
+                                            ) : (
+                                                xdpIfaceList.map(iface => (
+                                                    <button
+                                                        key={iface.name}
+                                                        style={dropdownItemStyle}
+                                                        onClick={() => handleCreateIfaceXsk(iface.name, iface.max_rxd, iface.max_txd)}
+                                                    >
+                                                        {iface.name}
+                                                    </button>
+                                                ))
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+
                 </div>
 
                 {/* INVISIBLE OVERLAY: Closes menus if you click anywhere else on the screen */}
                 {activeMenu && (
                     <div
-                        onClick={() => setActiveMenu(null)}
+                        onClick={closeAllMenus}
                         style={{ position: 'fixed', top: '50px', left: 0, right: 0, bottom: 0, zIndex: 999 }}
                     />
                 )}

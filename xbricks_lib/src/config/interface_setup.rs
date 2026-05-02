@@ -18,6 +18,8 @@ pub struct InterfaceSetup {
     pub mac_if: Option<String>,
     pub ipnet: Option<String>,
     pub master: Option<String>,
+    /// Whether TX checksum offload is enabled. Defaults to false.
+    pub checksum_offload: Option<bool>,
 }
 
 impl InterfaceSetup {
@@ -36,7 +38,10 @@ impl InterfaceSetup {
         // 1. Check if interface exists
         self.check_exists()?;
 
-        // 2. Bring interface up
+        // 2. Configure TX checksum offload (always applied, regardless of b_just_check)
+        self.configure_checksum_offload()?;
+
+        // 3. Bring interface up
         self.bring_up()?;
 
         if !b_just_check {
@@ -366,6 +371,41 @@ impl InterfaceSetup {
         info!("✓ Brought up {}", peer_name);
 
         info!("✓ Veth pair setup complete (bridge mode)");
+        Ok(())
+    }
+
+    /// Configure TX checksum offload via ethtool -K.
+    /// For veth interfaces the peer name is used; for all others the interface name itself is used.
+    /// Defaults to off (false) when checksum_offload is None.
+    fn configure_checksum_offload(&self) -> Result<()> {
+        let enabled = self.checksum_offload.unwrap_or(false);
+        let onoff = if enabled { "on" } else { "off" };
+
+        let is_veth = self.iface_type.as_deref() == Some("veth");
+        let target = if is_veth {
+            match self.peer.as_deref() {
+                Some(p) => p.to_string(),
+                None => {
+                    warn!("veth interface {} has no peer set; skipping checksum offload configuration", self.name);
+                    return Ok(());
+                }
+            }
+        } else {
+            self.name.clone()
+        };
+
+        info!("Setting TX checksum offload {} on {}", onoff, target);
+        let output = Command::new("sudo")
+            .args(&["ethtool", "-K", &target, "tx", onoff])
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!("Failed to set TX checksum offload on {}: {}", target, stderr);
+        } else {
+            info!("✓ TX checksum offload {} on {}", onoff, target);
+        }
+
         Ok(())
     }
 
@@ -862,6 +902,7 @@ pub fn check_or_configure_interfaces(
                     mac_if: None,
                     ipnet: None,
                     master: None,
+                    checksum_offload: None,
                 };
 
                 match temp_setup.get_max_ring_sizes() {
@@ -898,6 +939,7 @@ pub fn check_or_configure_interfaces(
             mac_if: iface_cfg.mac_if.clone(),
             ipnet: iface_cfg.ipnet.clone(),
             master: iface_cfg.master.clone(),
+            checksum_offload: iface_cfg.checksum_offload,
         };
 
         setup.configure(b_just_check)?;
@@ -932,6 +974,7 @@ mod tests {
             mac_if: None,
             ipnet: None,
             master: None,
+            checksum_offload: None,
         };
 
         assert_eq!(setup.name, "lo");

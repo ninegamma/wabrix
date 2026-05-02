@@ -114,7 +114,7 @@ pub fn spawn_pipeline_telemetry(
     Ok(())
 }
 
-pub fn spawn_telemetry(telemetry_tx: Sender<TMLiveStats>, iface_name: String, shutdown_signal: Arc<AtomicBool>) -> anyhow::Result<()> {
+pub fn spawn_telemetry_ice(telemetry_tx: Sender<TMLiveStats>, iface_name: String, shutdown_signal: Arc<AtomicBool>) -> anyhow::Result<()> {
     tokio::spawn(async move {
         // Persistent tracking variables (Absolute counters from ethtool)
         let mut prev_rx_uc = 0u64;

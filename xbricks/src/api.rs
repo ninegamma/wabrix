@@ -23,7 +23,6 @@ pub type SharedConfig = Arc<RwLock<XBricksConfig>>;
 pub enum SystemCommand {
     Start,    // Boot the dataplane
     Stop,     // Teardown the dataplane, but keep the API alive
-    Restart,  // Teardown and immediately reboot
     Check,    // <-- NEW: Validate config without touching hardware
     Shutdown, // Kill the entire application
 }
@@ -115,10 +114,41 @@ struct UiEdge {
 use axum::response::IntoResponse;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+use toml_edit::{ser, DocumentMut, Item};
 use tower_http::services::ServeDir;
 use xbricks_base::NodeId;
 use xbricks_lib::config::hot_config::SharedSystemState;
 use xbricks_base::telemetry::{TMLiveStats};
+
+/// Information about a network interface that supports XDP native mode with zerocopy.
+#[derive(Serialize)]
+struct XdpIfaceInfo {
+    name: String,
+    max_rxd: u32,
+    max_txd: u32,
+}
+
+/// GET /api/interfaces/xdp
+/// Returns all physical interfaces that support both XDP native mode and AF_XDP zerocopy,
+/// together with their maximum hardware ring sizes.
+/// Delegates discovery to `xbricks_base::system::query_xdp_ifaces`.
+async fn list_xdp_ifaces() -> impl IntoResponse {
+    let caps = tokio::task::spawn_blocking(xbricks_base::system::query_xdp_ifaces)
+        .await
+        .unwrap_or_default();
+
+    let result: Vec<XdpIfaceInfo> = caps
+        .into_iter()
+        .filter(|c| c.xdp_native && c.xdp_zerocopy)
+        .map(|c| XdpIfaceInfo {
+            name:    c.name,
+            max_rxd: c.rx_ring_max.unwrap_or(4096),
+            max_txd: c.tx_ring_max.unwrap_or(4096),
+        })
+        .collect();
+
+    Json(result).into_response()
+}
 
 // Update the signature to return the shutdown sender AND the task handle
 pub(crate) fn spawn_management_api(state: AppState) -> (oneshot::Sender<()>, JoinHandle<()>) {
@@ -130,6 +160,7 @@ pub(crate) fn spawn_management_api(state: AppState) -> (oneshot::Sender<()>, Joi
             .route("/api/topology", get(get_topology))
             .route("/api/config", get(get_config))
             .route("/api/files", get(list_files))
+            .route("/api/interfaces/xdp", get(list_xdp_ifaces))
             .route("/api/ws/terminal", get(terminal_ws_handler))
             .route("/api/hardware/update", axum::routing::post(save_hardware_config))
             .route("/api/pipeline/update", axum::routing::post(hot_update_node))
@@ -451,7 +482,6 @@ async fn dataplane_command(
     let cmd = match payload.command.to_lowercase().as_str() {
         "start"    => SystemCommand::Start,
         "stop"     => SystemCommand::Stop,
-        "restart"  => SystemCommand::Restart,
         "check"    => SystemCommand::Check,
         "shutdown" => SystemCommand::Shutdown,
         other => {
@@ -467,13 +497,137 @@ async fn dataplane_command(
     axum::http::StatusCode::OK
 }
 
-async fn save_hardware_config(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    Query(query): Query<SaveConfigQuery>,
-    axum::Json(new_config): axum::Json<XBricksConfig>,
-) -> impl axum::response::IntoResponse {
+/// Serialize `config` to a human-readable TOML file at `path`, applying the same
+/// inline-array formatting used by `save_hardware_config`.
+fn write_config_to_disk(config: &XBricksConfig, path: &str) {
+    if let Ok(toml_string) = toml::to_string_pretty(config) {
+        if let Ok(mut doc) = toml_string.parse::<DocumentMut>() {
+            if let Some(Item::Table(xbricks)) = doc.get_mut("xbricks") {
+                for key in ["ifaces", "umem", "xsk", "workers"] {
+                    if let Some(item) = xbricks.get_mut(key) {
+                        format_vertical_array_of_inlines(item);
+                    }
+                }
+            }
+            // --- Format [[pipelines]] ---
+            if let Some(toml_edit::Item::ArrayOfTables(pipelines)) = doc.get_mut("pipelines") {
+                for pipeline in pipelines.iter_mut() {
 
-    // Determine target file; optionally redirect to a new path
+                    // --- NEW: INJECT DIVIDER COMMENTS ---
+                    // Attempt to read the pipeline's name to include it in the comment
+                    let pipeline_name = pipeline.get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("UNNAMED");
+
+                    // Set a decorative comment block right before the [[pipelines]] header
+                    let divider = format!(
+                        "\n# ===================================================================\n# PIPELINE: {}\n# ===================================================================\n",
+                        pipeline_name.to_uppercase()
+                    );
+                    pipeline.decor_mut().set_prefix(divider);
+                    // ------------------------------------
+
+                    // Make `workers = [0]` a true single-line array
+                    if let Some(workers) = pipeline.get_mut("workers") {
+                        format_single_line_inline(workers);
+                    }
+
+                    // Traverse the [[pipelines.nodes]] tables
+                    if let Some(toml_edit::Item::ArrayOfTables(nodes)) = pipeline.get_mut("nodes") {
+                        for node in nodes.iter_mut() {
+
+                            // Target ONLY the inner properties
+                            let props_to_inline = ["args", "queues", "routes", "labels"];
+
+                            for prop in props_to_inline {
+                                if let Some(item) = node.get_mut(prop) {
+                                    format_single_line_inline(item);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Err(e) = std::fs::write(path, doc.to_string()) {
+                log::error!("Failed to write config to {}: {}", path, e);
+            }
+        } else {
+            log::error!("Failed to parse TOML string into toml_edit AST.");
+        }
+    } else {
+        log::error!("Failed to serialize config to base TOML string.");
+    }
+}
+
+// Helper to format an array so it appears vertically, but its items remain inline horizontal tables
+fn format_vertical_array_of_inlines(item: &mut toml_edit::Item) {
+    // 1. Force the vertical [[table]] to become a standard array [...]
+    item.make_value();
+
+    // 2. Format the array items
+    if let toml_edit::Item::Value(toml_edit::Value::Array(arr)) = item {
+        arr.set_trailing_comma(true);
+
+        for val in arr.iter_mut() {
+            // Inject a newline and 4 spaces before each inline table
+            val.decor_mut().set_prefix("\n    ");
+
+            // --- Clean up nested arrays INSIDE the inline table ---
+            if let toml_edit::Value::InlineTable(table) = val {
+                for (_key, inner_val) in table.iter_mut() {
+                    // If the property is an array (like 'queues' or 'partitions')
+                    if let toml_edit::Value::Array(inner_arr) = inner_val {
+                        inner_arr.set_trailing(""); // Remove newline before closing ']'
+                        inner_arr.set_trailing_comma(false); // Clean up trailing comma
+
+                        // Strip newlines from the elements and replace with spaces
+                        for (i, item_val) in inner_arr.iter_mut().enumerate() {
+                            if i == 0 {
+                                item_val.decor_mut().set_prefix("");
+                            } else {
+                                item_val.decor_mut().set_prefix(" "); // Add space after comma
+                            }
+                            item_val.decor_mut().set_suffix(""); // Strip trailing newlines
+                        }
+                    }
+                }
+            }
+            // ---------------------------------------------------------------
+        }
+
+        if !arr.is_empty() {
+            arr.set_trailing("\n");
+            arr.decor_mut().set_suffix("");
+        }
+    }
+}
+
+// Helper to strip newlines from simple arrays like [0, 1] to keep them on a single line
+fn format_single_line_inline(item: &mut toml_edit::Item) {
+    item.make_value();
+
+    if let toml_edit::Item::Value(toml_edit::Value::Array(arr)) = item {
+        arr.set_trailing(""); // Remove the newline before the closing ']'
+        arr.set_trailing_comma(false); // Clean up the trailing comma for single-line arrays
+
+        for (i, val) in arr.iter_mut().enumerate() {
+            if i == 0 {
+                val.decor_mut().set_prefix("");
+            } else {
+                // Add a single space after the comma for readability: [0, 1] instead of [0,1]
+                val.decor_mut().set_prefix(" ");
+            }
+            val.decor_mut().set_suffix(""); // Strip trailing newlines from the element
+        }
+    }
+}
+
+async fn save_hardware_config(
+    State(state): State<AppState>,
+    Query(query): Query<SaveConfigQuery>,
+    Json(new_config): Json<XBricksConfig>,
+) -> impl IntoResponse {
+
     let save_path = if let Some(new_path) = query.save_path {
         let mut cp = state.config_path.write().await;
         *cp = new_path.clone();
@@ -482,33 +636,27 @@ async fn save_hardware_config(
         state.config_path.read().await.clone()
     };
 
-    // 1. Update the in-memory config; optionally persist to disk (default: true)
     {
         let mut config_guard = state.config.write().await;
         *config_guard = new_config.clone();
+
         if query.save_to_disk.unwrap_or(true) {
-            if let Ok(toml_string) = toml::to_string_pretty(&new_config) {
-                if let Err(e) = std::fs::write(&save_path, toml_string) {
-                    log::error!("Failed to write config to {}: {}", save_path, e);
-                }
-            }
+            write_config_to_disk(&new_config, &save_path);
         }
     }
 
-    // 2. Optionally trigger a Hard Restart (default: true)
     if query.restart.unwrap_or(true) {
-        if let Err(e) = state.cmd_tx.send(SystemCommand::Restart).await {
+        if let Err(e) = state.cmd_tx.send(SystemCommand::Start).await {
             log::error!("Failed to send restart command to main loop: {}", e);
             return axum::http::StatusCode::INTERNAL_SERVER_ERROR;
         }
-        log::info!("Hardware configuration saved to {}. Restarting datapath...", save_path);
+        log::info!("Hardware configuration saved to {}. Restarting...", save_path);
     } else {
         log::info!("Hardware configuration saved to {} (no restart).", save_path);
     }
 
     axum::http::StatusCode::OK
 }
-
 
 async fn hot_update_node(
     State(state): State<AppState>,
@@ -604,16 +752,8 @@ async fn hot_update_node(
             }
         }
         let config_path = state.config_path.read().await.clone();
-        match toml::to_string_pretty(&*base_config) {
-            Ok(toml_string) => {
-                if let Err(e) = std::fs::write(&config_path, toml_string) {
-                    log::error!("Failed to write config to disk: {}", e);
-                } else {
-                    log::info!("Config updated on disk.");
-                }
-            }
-            Err(e) => log::error!("Failed to serialize TOML: {}", e),
-        }
+        write_config_to_disk(&*base_config, &config_path);
+        log::info!("Config updated on disk.");
     }
 
     axum::http::StatusCode::OK

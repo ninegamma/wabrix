@@ -55,6 +55,3 @@ id = "wire.tx_sink_1"
 type = "BatchTxNode"
 queues = [0]
 args = { sink_type = "xsk", interface = "enp114s0f0" }
-
-
-

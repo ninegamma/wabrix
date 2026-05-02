@@ -14,12 +14,9 @@ use tokio::sync::{mpsc, RwLock};
 use xbricks_lib::config::hot_config::SharedSystemState;
 use logger::WsLogger;
 use xbricks_lib::probe_kernel_fds;
-use xbricks_base::telemetry::{spawn_telemetry, spawn_pipeline_telemetry, TMLiveStats};
+use xbricks_base::telemetry::{spawn_telemetry_ice, spawn_pipeline_telemetry, TMLiveStats};
 use xbricks_base::system::PlatformData;
 use crate::api::{spawn_management_api, AppState, SystemCommand};
-
-const B_WITH_TELEMETRY: bool = false;
-
 
 #[derive(Debug, Parser)]
 struct Opt {
@@ -49,6 +46,7 @@ async fn main() -> anyhow::Result<()> {
     let opt = Opt::parse();
     let platform_data = PlatformData::detect();
     info!("TSC frequency: {} Hz", platform_data.tsc_frequency.separated_string());
+    xbricks_base::system::probe_xdp_interfaces();
 
     // --- LOAD CONFIGURATION ---
     info!("Loading configuration from: {}", opt.config);
@@ -142,15 +140,15 @@ async fn main() -> anyhow::Result<()> {
                 let shutdown = Arc::new(AtomicBool::new(false));
                 let workers_completed = Arc::new(AtomicUsize::new(0));
                 let pipeline_registry = Arc::clone(&xbricks_system.telemetry_registry);
-                let (handles, telemetry_handle) = xbricks_system
-                    .spawn_workers(B_WITH_TELEMETRY, shutdown.clone(), workers_completed.clone())
+                let handles = xbricks_system
+                    .spawn_workers(shutdown.clone(), workers_completed.clone())
                     .context("Failed to spawn worker threads")?;
 
                 info!("All {} worker threads spawned. Data Plane is LIVE.", handles.len());
 
                 // TODO: We must set the interface to use
                 let iface_name = "enp2s0f0np0".to_string();
-                spawn_telemetry(telemetry_tx.clone(), iface_name, shutdown.clone())?;
+                spawn_telemetry_ice(telemetry_tx.clone(), iface_name, shutdown.clone())?;
                 spawn_pipeline_telemetry(telemetry_tx.clone(), pipeline_registry, shutdown.clone())?;
 
                 // ==========================================================
@@ -181,8 +179,6 @@ async fn main() -> anyhow::Result<()> {
                         Err(e) => error!("Worker {} join error: {}", idx, e),
                     }
                 }
-
-                if let Some(handle) = telemetry_handle { let _ = handle.join(); }
 
                 active_shared_state.store(
                     xbricks_lib::config::hot_config::SharedSystemState::new(std::collections::HashMap::new())
@@ -222,10 +218,6 @@ async fn main() -> anyhow::Result<()> {
         match next_cmd {
             SystemCommand::Start => {
                 info!("Received START command. Booting hardware...");
-                dataplane_active = true;
-            }
-            SystemCommand::Restart => {
-                info!("Received RESTART command. Rebooting hardware...");
                 dataplane_active = true;
             }
             SystemCommand::Stop => {

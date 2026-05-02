@@ -168,16 +168,16 @@ impl SystemBuilder {
 
             let xsk_umem_config = xsk_rs::config::UmemConfig::builder()
                 .frame_size(FrameSize::new(umem_conf.frame_size)?)
+                .frame_count(std::num::NonZeroU32::new(umem_conf.frame_count).unwrap())
                 .fill_queue_size(QueueSize::try_from(umem_conf.fq_size)?)
                 .comp_queue_size(QueueSize::try_from(umem_conf.cq_size)?)
                 .frame_headroom(umem_conf.head_room)
-                .build()
+                .build_opts()
                 .map_err(|e| format!("Failed to create UMEM for group {}: {}", group_id, e))?;
 
             // xsk-rs returns the umem and the pre-calculated descriptors
-            let (umem, umem_descs) = Umem::new(
+            let (umem, umem_descs) = Umem::new_with_opts(
                 xsk_umem_config,
-                std::num::NonZeroU32::new(umem_conf.frame_count).unwrap(),
                 true,
             )?;
 

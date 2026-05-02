@@ -8,7 +8,6 @@ pub mod pipeline;
 //pub(crate) mod telemetry_logger;
 pub mod toml_parser;
 pub(crate) mod system_runner;
-mod telemetry_logger;
 
 // Include the generated BPF skeleton code
 pub mod xscrubber_skel {

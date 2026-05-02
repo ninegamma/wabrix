@@ -17,9 +17,10 @@ license = "MIT"
 
 [workspace.dependencies]
 # Define the exact version here once
-libbpf-rs = "=0.26.0-beta.1"
+# libbpf-rs = "=0.26.0-beta.1"
+libbpf-rs = "^0.26.2"
 #libbpf-sys = "=1.6.1+v1.6.1"
-libbpf-sys = { version = "1.6", default-features = false }
+libbpf-sys = { version = "1.7", default-features = false }
 #xsk-rs = { git = "https://github.com/rstade/xsk-rs", branch = "rstade", version = "0.8.1" }
 xsk-rs = { path = "../xsk-rs" }
 # Add these for the Wasm side of the house:

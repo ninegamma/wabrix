@@ -481,6 +481,162 @@ pub fn check_irdma_mod_unloaded() -> bool {
     }
 }
 
+/// XDP capability information for a single network interface.
+#[derive(Clone, Debug)]
+pub struct XdpIfaceCapabilities {
+    pub name:         String,
+    pub driver:       String,
+    pub version:      String,
+    /// NETDEV_XDP_ACT_BASIC — native XDP (driver mode)
+    pub xdp_native:   bool,
+    /// NETDEV_XDP_ACT_XSK_ZEROCOPY — AF_XDP zero-copy
+    pub xdp_zerocopy: bool,
+    /// Maximum RX ring size from ethtool -g Pre-set maximums
+    pub rx_ring_max:  Option<u32>,
+    /// Maximum TX ring size from ethtool -g Pre-set maximums
+    pub tx_ring_max:  Option<u32>,
+}
+
+/// Query all physical network interfaces and return their XDP capabilities.
+/// Uses `ethtool -i` for driver/version, `xdp-loader features` for XDP flags,
+/// and `ethtool -g` for maximum ring sizes.
+pub fn query_xdp_ifaces() -> Vec<XdpIfaceCapabilities> {
+    use std::process::Command;
+
+    let net_dir = Path::new("/sys/class/net");
+    let mut ifaces: Vec<String> = Vec::new();
+
+    if let Ok(entries) = fs::read_dir(net_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == "lo" { continue; }
+            if net_dir.join(&name).join("device").exists() {
+                ifaces.push(name);
+            }
+        }
+    }
+
+    ifaces.sort();
+
+    let mut result = Vec::new();
+
+    for iface in &ifaces {
+        let mut driver       = "?".to_string();
+        let mut version      = "?".to_string();
+        let mut xdp_native   = false;
+        let mut xdp_zerocopy = false;
+        let mut rx_ring_max: Option<u32> = None;
+        let mut tx_ring_max: Option<u32> = None;
+
+        // --- ethtool -i <iface> ---
+        if let Ok(out) = Command::new("ethtool").args(["-i", iface]).output() {
+            if out.status.success() {
+                for line in String::from_utf8_lossy(&out.stdout).lines() {
+                    if let Some(v) = line.strip_prefix("driver: ") {
+                        driver = v.trim().to_string();
+                    } else if let Some(v) = line.strip_prefix("version: ") {
+                        version = v.trim().to_string();
+                    }
+                }
+            }
+        }
+
+        // --- xdp-loader features <iface> ---
+        // Output format (kernel NETDEV_XDP_ACT flags):
+        //   NETDEV_XDP_ACT_BASIC:           yes/no
+        //   NETDEV_XDP_ACT_XSK_ZEROCOPY:    yes/no
+        if let Ok(out) = Command::new("xdp-loader").args(["features", iface]).output() {
+            if out.status.success() {
+                for line in String::from_utf8_lossy(&out.stdout).lines() {
+                    let is_yes = line.trim_end().ends_with("yes");
+                    if line.contains("NETDEV_XDP_ACT_BASIC") {
+                        xdp_native = is_yes;
+                    } else if line.contains("NETDEV_XDP_ACT_XSK_ZEROCOPY") {
+                        xdp_zerocopy = is_yes;
+                    }
+                }
+            }
+        }
+
+        // --- ethtool -g <iface> — Pre-set maximums ---
+        if let Ok(out) = Command::new("ethtool").args(["-g", iface]).output() {
+            if out.status.success() {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let mut in_preset = false;
+                for line in stdout.lines() {
+                    if line.starts_with("Pre-set maximums:") {
+                        in_preset = true;
+                        continue;
+                    }
+                    if in_preset {
+                        if line.starts_with("Current hardware settings:") {
+                            break;
+                        }
+                        if rx_ring_max.is_none() && line.trim_start().starts_with("RX:") {
+                            rx_ring_max = line.split(':').nth(1)
+                                .and_then(|v| v.trim().parse().ok());
+                        } else if tx_ring_max.is_none() && line.trim_start().starts_with("TX:") {
+                            tx_ring_max = line.split(':').nth(1)
+                                .and_then(|v| v.trim().parse().ok());
+                        }
+                    }
+                }
+            }
+        }
+
+        result.push(XdpIfaceCapabilities {
+            name: iface.clone(),
+            driver,
+            version,
+            xdp_native,
+            xdp_zerocopy,
+            rx_ring_max,
+            tx_ring_max,
+        });
+    }
+
+    result
+}
+
+/// Probe all physical network interfaces for XDP capabilities.
+/// Uses `ethtool -i` for driver/version and `xdp-loader features` for XDP support.
+/// Prints a formatted table via log::info.
+pub fn probe_xdp_interfaces() {
+    let rows = query_xdp_ifaces();
+
+    if rows.is_empty() {
+        info!("No physical network interfaces found.");
+        return;
+    }
+
+    // Column widths
+    let w = [20usize, 12, 24, 12, 12, 10, 10];
+    let header = format!(
+        "{:<w0$} {:<w1$} {:<w2$} {:<w3$} {:<w4$} {:>w5$} {:>w6$}",
+        "Interface", "Driver", "Version", "XDP Native", "ZeroCopy", "Ring Max RX", "Ring Max TX",
+        w0=w[0], w1=w[1], w2=w[2], w3=w[3], w4=w[4], w5=w[5], w6=w[6],
+    );
+    let sep = "─".repeat(header.len());
+
+    info!("=== Physical Interface XDP Capabilities ===");
+    info!("{}", header);
+    info!("{}", sep);
+    for r in &rows {
+        info!(
+            "{:<w0$} {:<w1$} {:<w2$} {:<w3$} {:<w4$} {:>w5$} {:>w6$}",
+            r.name,
+            r.driver,
+            r.version,
+            if r.xdp_native   { "yes" } else { "no" },
+            if r.xdp_zerocopy { "yes" } else { "no" },
+            r.rx_ring_max.map(|v| v.to_string()).unwrap_or_else(|| "?".to_string()),
+            r.tx_ring_max.map(|v| v.to_string()).unwrap_or_else(|| "?".to_string()),
+            w0=w[0], w1=w[1], w2=w[2], w3=w[3], w4=w[4], w5=w[5], w6=w[6],
+        );
+    }
+    info!("{}", sep);
+}
+
 /// Perform system checks for irqbalance, CPU governor, and IRQ affinity
 ///
 /// # Arguments
