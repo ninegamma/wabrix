@@ -29,43 +29,34 @@ workers = [0, 1]
 [[pipelines.nodes]]
 id = "nd_receiver"
 type = "BatchRxNode"
-next = "nd_parser"
-routes = []
+routes = ["nd_parser"]
 queues = [0, 1]
-labels = []
-args= { batch_size = "256", interface = "enp2s0f0np0" }
+args= { interface = "enp2s0f0np0", batch_size = "256" }
 
 [[pipelines.nodes]]
 id = "nd_parser"
 type = "FastParserNode"
-next = "nd_wasm_inspector"
-routes = []
-queues = []
-labels = []
+routes = ["nd_wasm_inspector"]
 args= {}
 
 [[pipelines.nodes]]
 id = "nd_wasm_inspector"
 type = "WasmInspectorNode"
 routes = ["nd_veth_sink", "nd_drop"]
-queues = []
 labels = ["icmp ping", "icmp reply", "icmp other", "any other"]
-args= { wasm_file_path = "/home/rainer1956/rust/xbrix/target/wasm32-wasip2/release/icmp_filter.wasm", umem = "0" }
+args= { umem = "0", wasm_file_path = "/home/rainer1956/rust/xbrix/target/wasm32-wasip2/release/icmp_filter.wasm" }
 
 [[pipelines.nodes]]
 id = "nd_veth_sink"
 type = "BatchTxNode"
 routes = []
 queues = [0, 1]
-labels = []
 args= { interface = "veth_xbricks" }
 
 [[pipelines.nodes]]
 id = "nd_drop"
 type = "DropNode"
 routes = []
-queues = []
-labels = []
 args= {}
 
 # ===================================================================
@@ -78,35 +69,27 @@ workers = [0, 1]
 [[pipelines.nodes]]
 id = "nd_veth_source"
 type = "BatchRxNode"
-next = "nd_parser_veth"
-routes = []
+routes = ["nd_parser_veth"]
 queues = [0, 1]
-labels = []
 args= { interface = "veth_xbricks" }
 
 [[pipelines.nodes]]
 id = "nd_parser_veth"
 type = "FastParserNode"
-next = "nd_icmp_filter"
-routes = []
-queues = []
-labels = []
+routes = ["nd_icmp_filter"]
 args= {}
 
 [[pipelines.nodes]]
 id = "nd_icmp_filter"
 type = "WasmInspectorNode"
 routes = ["nd_transmitter", "nd_drop"]
-queues = []
 labels = ["icmp ping", "icmp reply", "icmp other", "any other"]
-args= { wasm_file_path = "/home/rainer1956/rust/xbrix/target/wasm32-wasip2/release/icmp_filter.wasm", umem = "1" }
+args= { umem = "1", wasm_file_path = "/home/rainer1956/rust/xbrix/target/wasm32-wasip2/release/icmp_filter.wasm" }
 
 [[pipelines.nodes]]
 id = "nd_drop"
 type = "DropNode"
 routes = []
-queues = []
-labels = []
 args= {}
 
 [[pipelines.nodes]]
@@ -114,7 +97,6 @@ id = "nd_transmitter"
 type = "BatchTxNode"
 routes = []
 queues = [0, 1]
-labels = []
 args= { interface = "enp2s0f0np0" }
 
 # ===================================================================
@@ -122,114 +104,122 @@ args= { interface = "enp2s0f0np0" }
 # ===================================================================
 [[pipelines]]
 name = "generator"
-workers = [0]
+workers = [1]
 
 [[pipelines.nodes]]
 id = "pctgen"
 type = "PacketGenerator"
-next = "tx_sink_1"
-routes = []
-queues = []
+routes = ["tx_sink_1"]
 pps = 1000
-labels = []
-args= { umem = "0", batch_size = "64" }
+args= { batch_size = "64", umem = "0" }
 
 [[pipelines.nodes]]
 id = "tx_sink_1"
 type = "BatchTxNode"
 routes = []
 queues = [0]
-labels = []
-args= { interface = "enp2s0f1np1", sink_type = "xsk" }
-
-[layout.iface_enp2s0f1np1]
-x = -281.86197
-y = 6.402201
-
-[layout.xsk_2]
-x = 770.0934
-y = 273.46548
-
-[layout."nic0_in/nd_wasm_inspector"]
-x = 517.896
-y = 586.78296
-
-[layout."veth_out/nd_parser_veth"]
-x = 276.12735
-y = 889.52673
+args= { sink_type = "xsk", interface = "enp2s0f1np1" }
 
 [layout."veth_out/nd_icmp_filter"]
-x = 526.1274
-y = 889.52673
-
-[layout."veth_out/nd_veth_source"]
-x = 26.12736
-y = 889.52673
-
-[layout."veth_out/nd_drop"]
-x = 776.1274
-y = 964.52673
-
-[layout."generator/pctgen"]
-x = 25.608805
-y = 733.50934
-
-[layout.iface_veth_xbricks]
-x = 786.20276
-y = 1.1978132
-
-[layout."nic0_in/nd_veth_sink"]
-x = 776.1274
-y = 514.52673
-
-[layout."generator/tx_sink_1"]
-x = 272.55084
-y = 721.3337
-
-[layout.iface_enp2s0f0np0]
-x = 0.0
-y = 0.0
-
-[layout."nic0_in/nd_receiver"]
-x = 26.12736
-y = 589.52673
-
-[layout.umem_0]
-x = 256.00894
-y = -8.384692
-
-[layout.worker_1]
-x = 522.6839
-y = 289.58252
-
-[layout.worker_0]
-x = 250.34294
-y = 285.98907
-
-[layout.xsk_0]
-x = 24.88909
-y = 267.25143
-
-[layout."veth_out/nd_transmitter"]
-x = 776.1274
-y = 814.52673
-
-[layout.umem_1]
-x = 522.36084
-y = -8.384692
-
-[layout.xsk_3]
-x = -413.18964
-y = 264.38562
-
-[layout."nic0_in/nd_drop"]
-x = 776.1274
-y = 664.52673
-
-[layout.xsk_1]
-x = -193.85371
-y = 265.7704
+x = 500.0
+y = 1195.0
 
 [layout."nic0_in/nd_parser"]
-x = 276.12735
-y = 589.52673
+x = 250.0
+y = 895.0
+
+[layout."veth_out/nd_veth_source"]
+x = 0.0
+y = 1195.0
+
+[layout.xsk_3]
+x = -459.35837
+y = 569.54266
+
+[layout.umem_0]
+x = 254.03413
+y = 322.78497
+
+[layout."nic0_in/nd_receiver"]
+x = 0.0
+y = 895.0
+
+[layout."nic0_in/nd_veth_sink"]
+x = 750.0
+y = 820.0
+
+[layout."veth_out/nd_parser_veth"]
+x = 250.0
+y = 1195.0
+
+[layout."veth_out/nd_transmitter"]
+x = 750.0
+y = 1120.0
+
+[layout."veth_out/nd_drop"]
+x = 750.0
+y = 1270.0
+
+[layout."generator/pctgen"]
+x = 0.0
+y = 1345.0
+
+[layout."generator/tx_sink_1"]
+x = 250.0
+y = 1345.0
+
+[layout."pipeline_header/nic0_in"]
+x = -253.70648
+y = 921.1331
+
+[layout."pipeline_header/veth_out"]
+x = -256.10922
+y = 1216.2867
+
+[layout."pipeline_header/generator"]
+x = -257.25598
+y = 1340.6279
+
+[layout."nic0_in/nd_drop"]
+x = 750.0
+y = 970.0
+
+[layout.iface_veth_xbricks]
+x = 728.10236
+y = 325.29694
+
+[layout.xsk_0]
+x = 6.279859
+y = 567.0307
+
+[layout.worker_1]
+x = 491.19455
+y = 619.1127
+
+[layout.iface_enp2s0f0np0]
+x = 3.7679086
+y = 324.04095
+
+[layout.xsk_2]
+x = 755.05804
+y = 577.0785
+
+[layout.umem_1]
+x = 491.5222
+y = 324.04095
+
+[layout."nic0_in/nd_wasm_inspector"]
+x = 500.0
+y = 895.0
+
+[layout.iface_enp2s0f1np1]
+x = -231.9795
+y = 321.52902
+
+[layout.xsk_1]
+x = -225.96588
+y = 567.0307
+
+[layout.worker_0]
+x = 262.4983
+y = 616.6007

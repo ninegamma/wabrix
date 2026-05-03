@@ -25,6 +25,8 @@ export type PipelineNodeData = NodeConfig & { pipeline_name?: string };
 export type XskNodeType = Node<XskMapping, 'xsk'>;
 export type WorkerNodeType = Node<WorkerConfig, 'worker'>;
 export type PipelineNodeType = Node<PipelineNodeData, 'pipeline'>;
+export type PipelineHeaderData = { name: string; workers: number[] };
+export type PipelineHeaderNodeType = Node<PipelineHeaderData, 'pipeline_header'>;
 
 // ==========================================
 // 1. THE FLOATING TELEMETRY POPOVER
@@ -300,6 +302,37 @@ export function WorkerNode({ data }: NodeProps<WorkerNodeType>) {
 }
 
 // ==========================================
+// 4a. PIPELINE HEADER NODE
+// ==========================================
+
+export function PipelineHeaderNode({ data }: NodeProps<PipelineHeaderNodeType>) {
+    const c = pipelineColor(data.name);
+    return (
+        <div style={{
+            background: c.bg,
+            border: `2px solid ${c.border}`,
+            borderRadius: '8px',
+            padding: '12px',
+            minWidth: '180px',
+            color: '#f8fafc',
+            fontFamily: 'monospace',
+            boxShadow: '0 4px 6px rgba(0,0,0,0.3)',
+        }}>
+            <div style={{ borderBottom: `1px solid ${c.divider}`, paddingBottom: '8px', marginBottom: '8px' }}>
+                <strong style={{ fontSize: '14px', color: c.title }}>&#x2261; {data.name}</strong>
+            </div>
+            <div style={{ fontSize: '11px', lineHeight: '1.6', color: '#cbd5e1' }}>
+                <div>
+                    <strong style={{ color: '#94a3b8' }}>workers:</strong>{' '}
+                    <span style={{ color: c.handle }}>[{data.workers.join(', ')}]</span>
+                </div>
+            </div>
+            <Handle type="source" position={Position.Bottom} style={{ background: c.handle, width: 12, height: 3, borderRadius: 1 }} />
+        </div>
+    );
+}
+
+// ==========================================
 // 4. PIPELINE NODE (generic for all node types)
 // ==========================================
 
@@ -314,7 +347,7 @@ const PIPELINE_PALETTE: Array<{ bg: string; border: string; divider: string; tit
     { bg: '#0c0a1e', border: '#a855f7', divider: '#3b0764', title: '#d8b4fe', handle: '#a855f7' }, // violet
 ];
 
-function pipelineColor(name: string | undefined) {
+export function pipelineColor(name: string | undefined) {
     if (!name) return PIPELINE_PALETTE[0];
     let hash = 0;
     for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
@@ -408,8 +441,8 @@ export function PipelineNode({ data }: NodeProps<PipelineNodeType>) {
                 {data.queues && data.queues.length > 0 && (
                     <div><strong style={{ color: '#94a3b8' }}>queues:</strong> {data.queues.join(', ')}</div>
                 )}
-                {data.umem && data.umem.length > 0 && (
-                    <div><strong style={{ color: '#94a3b8' }}>umem:</strong> {data.umem.join(', ')}</div>
+                {(data as any).umem && (data as any).umem.length > 0 && (
+                    <div><strong style={{ color: '#94a3b8' }}>umem:</strong> {(data as any).umem.join(', ')}</div>
                 )}
                 {args && Object.entries(args).map(([k, v]) => (
                     <div key={k}>

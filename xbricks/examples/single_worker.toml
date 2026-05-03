@@ -48,7 +48,7 @@ workers = [0]
 [[pipelines.nodes]]
 id = "wire.pctgen"
 type = "PacketGenerator"
-next = "wire.ethertype_stats"
+routes = ["wire.ethertype_stats"]
 pps = 10_000_000
 args = { umem = "0", batch_size = "64" }
 
@@ -56,7 +56,7 @@ args = { umem = "0", batch_size = "64" }
 [[pipelines.nodes]]
 id = "wire.ethertype_stats"
 type = "TelemetryNode"
-next = "wire.tx_sink_1"
+routes = ["wire.tx_sink_1"]
 
 [pipelines.nodes.args]
 algo = "ethertype"
@@ -79,7 +79,7 @@ workers = [0]
 [[pipelines.nodes]]
 id = "wire.rx_source_1"
 type = "BatchRxNode"
-next = "wire.ethertype_stats_10"
+routes = ["wire.ethertype_stats_10"]
 queues = [0]
 args = { source_type = "xsk", interface = "enp114s0f1"}
 
@@ -87,7 +87,7 @@ args = { source_type = "xsk", interface = "enp114s0f1"}
 [[pipelines.nodes]]
 id = "wire.ethertype_stats_10"
 type = "TelemetryNode"
-next = "wire.tx_sink_0"
+routes = ["wire.tx_sink_0"]
 
 [pipelines.nodes.args]
 algo = "ethertype"

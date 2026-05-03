@@ -218,22 +218,21 @@ where
     deserializer.deserialize_map(ArgsVisitor)
 }
 
+
 #[derive(Debug, Deserialize, Serialize, Clone, TS)]
 pub struct NodeConfig {
     pub id: String,
     #[serde(rename = "type")]
     pub node_type: String,
     #[serde(default)]
-    pub next: Option<String>,
-    #[serde(default)]
     pub routes: Vec<String>,
     #[serde(default)]
     pub default: Option<String>,
     #[serde(default)]
-    pub queues: Vec<u32>,
+    pub queues: Option<Vec<u32>>,
     pub pps: Option<usize>,
     #[serde(default)]
-    pub labels: Vec<String>,
+    pub labels: Option<Vec<String>>,
     #[serde(default, deserialize_with = "deserialize_args")]
     pub args: HashMap<String, String>,
 }
@@ -339,12 +338,11 @@ impl XBricksConfig {
                 NodeConfig {
                     id: "wire.pctgen".to_string(),
                     node_type: "PacketGenerator".to_string(),
-                    next: Some("wire.tx_sink_1".to_string()),
-                    routes: vec![],
+                    routes: vec!["wire.tx_sink_1".to_string()],
                     default: None,
-                    queues: vec![],
+                    queues: None,
                     pps: Some(pps as usize),
-                    labels: vec![],
+                    labels: None,
                     args: {
                         let mut args = HashMap::new();
                         args.insert("umem".to_string(), "0".to_string());
@@ -363,12 +361,11 @@ impl XBricksConfig {
                 NodeConfig {
                     id: "wire.tx_sink_1".to_string(),
                     node_type: "BatchTxNode".to_string(),
-                    next: None,
                     routes: vec![],
                     default: None,
-                    queues: vec![0],
+                    queues: None,
                     pps: None,
-                    labels: vec![],
+                    labels: None,
                     args: {
                         let mut args = HashMap::new();
                         args.insert("sink_type".to_string(), "xsk".to_string());
@@ -473,12 +470,11 @@ impl XBricksConfig {
                     NodeConfig {
                         id: format!("wire.pctgen_{}", worker_id),
                         node_type: "PacketGenerator".to_string(),
-                        next: Some(format!("wire.tx_sink_{}", worker_id)),
-                        routes: vec![],
+                        routes: vec![format!("wire.tx_sink_{}", worker_id)],
                         default: None,
-                        queues: vec![],
+                        queues: None,
                         pps: Some(pps_per_worker as usize),
-                        labels: vec![],
+                        labels: None,
                         args: {
                             let mut args = HashMap::new();
                             args.insert("umem".to_string(), "0".to_string());
@@ -497,12 +493,11 @@ impl XBricksConfig {
                     NodeConfig {
                         id: format!("wire.tx_sink_{}", worker_id),
                         node_type: "BatchTxNode".to_string(),
-                        next: None,
                         routes: vec![],
                         default: None,
-                        queues: vec![worker_id as u32],
+                        queues: Some(vec![worker_id as u32]),
                         pps: None,
-                        labels: vec![],
+                        labels: None,
                         args: {
                             let mut args = HashMap::new();
                             args.insert("sink_type".to_string(), "xsk".to_string());
@@ -822,19 +817,8 @@ impl XBricksConfig {
                 }
             }
 
-            // Validate node references (next, routes, default)
+            // Validate node references (routes, default)
             for node in &pipeline.nodes {
-                if let Some(ref next_id) = node.next {
-                    if !node_ids.contains(next_id) {
-                        return Err(anyhow!(
-                            "Pipeline '{}': node '{}' references non-existent node '{}'",
-                            pipeline.name,
-                            node.id,
-                            next_id
-                        ));
-                    }
-                }
-
                 for route_id in &node.routes {
                     if !node_ids.contains(route_id) {
                         return Err(anyhow!(
@@ -880,12 +864,12 @@ impl XBricksConfig {
 
                 // Validate Rx/Tx nodes have queues array matching workers array length
                 if node.node_type == "BatchRxNode" || node.node_type == "BatchTxNode" {
-                    if !node.queues.is_empty() && node.queues.len() != pipeline.workers.len() {
+                    if node.queues.is_some() && node.queues.as_ref().unwrap().len() != pipeline.workers.len() {
                         return Err(anyhow!(
                             "Pipeline '{}': node '{}' queues array length ({}) must match workers array length ({})",
                             pipeline.name,
                             node.id,
-                            node.queues.len(),
+                            node.queues.as_ref().unwrap().len(),
                             pipeline.workers.len()
                         ));
                     }
@@ -903,7 +887,7 @@ impl XBricksConfig {
                         }
 
                         // Validate that each queue referenced has a corresponding XSK socket
-                        for &queue_id in &node.queues {
+                        if node.queues.is_some() { for &queue_id in node.queues.as_ref().unwrap() {
                             let has_xsk_socket = section
                                 .xsk
                                 .iter()
@@ -921,7 +905,7 @@ impl XBricksConfig {
                                     queue_id
                                 ));
                             }
-                        }
+                        }}
                     }
                 }
             }
@@ -940,9 +924,6 @@ impl XBricksConfig {
                 let mut targets_of: HashMap<&str, Vec<&str>> = HashMap::new();
                 for node in &pipeline.nodes {
                     let targets = targets_of.entry(node.id.as_str()).or_default();
-                    if let Some(ref next_id) = node.next {
-                        targets.push(next_id.as_str());
-                    }
                     for route_id in &node.routes {
                         targets.push(route_id.as_str());
                     }
@@ -1041,7 +1022,7 @@ impl XBricksConfig {
                 if node.node_type == "BatchRxNode" || node.node_type == "BatchTxNode" {
                     if let Some(interface) = node.args.get("interface") {
                         // Each queue in the node's queues array is assigned to a corresponding worker
-                        for (idx, &queue_id) in node.queues.iter().enumerate() {
+                        if node.queues.is_some() { for (idx, &queue_id) in node.queues.as_ref().unwrap().iter().enumerate() {
                             if idx < pipeline.workers.len() {
                                 let worker_id = pipeline.workers[idx];
                                 let key = (interface.clone(), queue_id);
@@ -1052,7 +1033,7 @@ impl XBricksConfig {
                                     worker_id,
                                 ));
                             }
-                        }
+                        }}
                     }
                 }
             }
@@ -1097,7 +1078,7 @@ impl XBricksConfig {
                 if node.node_type == "BatchRxNode" || node.node_type == "BatchTxNode" {
                     if let Some(interface) = node.args.get("interface") {
                         // Each queue maps to a worker (queues[i] -> workers[i])
-                        for (idx, &queue_id) in node.queues.iter().enumerate() {
+                        if node.queues.is_some() { for (idx, &queue_id) in node.queues.as_ref().unwrap().iter().enumerate() {
                             if idx < pipeline.workers.len() {
                                 let worker_id = pipeline.workers[idx];
 
@@ -1134,7 +1115,7 @@ impl XBricksConfig {
                                     }
                                 }
                             }
-                        }
+                        }}
                     }
                 }
             }
@@ -1160,14 +1141,14 @@ impl XBricksConfig {
         for pipeline in &self.pipelines {
             for node in &pipeline.nodes {
                 // If a node has explicit queues assigned (e.g. Rx/Tx nodes)
-                if !node.queues.is_empty() {
+                if node.queues.is_some() {
                     // Validation: Ensure queues match workers 1:1
-                    if node.queues.len() != pipeline.workers.len() {
+                    if node.queues.as_ref().unwrap().len() != pipeline.workers.len() {
                         return Err(anyhow!(
                             "Pipeline '{}': Node '{}' has {} queues but {} workers. Must be equal.",
                             pipeline.name,
                             node.id,
-                            node.queues.len(),
+                            node.queues.as_ref().unwrap().len(),
                             pipeline.workers.len()
                         ));
                     }
@@ -1175,7 +1156,7 @@ impl XBricksConfig {
                     // Try to identify the interface. Usually passed in 'args'.
                     // If 'interface' is missing, we skip mapping (assuming it's not a hardware-bound node).
                     if let Some(iface) = node.args.get("interface") {
-                        for (i, &queue_id) in node.queues.iter().enumerate() {
+                        if node.queues.is_some() { for (i, &queue_id) in node.queues.as_ref().unwrap().iter().enumerate() {
                             let worker_id = pipeline.workers[i];
 
                             // Detect conflicts: Two workers cannot own the same queue
@@ -1191,7 +1172,7 @@ impl XBricksConfig {
                                 }
                             }
                             queue_owner_map.insert((iface.clone(), queue_id), worker_id);
-                        }
+                        }}
                     }
                 }
             }
@@ -1325,31 +1306,30 @@ impl XBricksConfig {
                     // 2nd iteration (Worker 2) gets '3'.
                     // The architecture dictates a 1:1 map: queues[i] -> workers[i]
                     let mut assigned_queue = Vec::new();
-                    if !node_conf.queues.is_empty() {
+                    if node_conf.queues.is_some() {
                         // Safety check: Ensure the node has enough queues for the assigned workers.
                         // (This should be caught by validate(), but good to check here).
-                        if worker_idx_in_pipeline >= node_conf.queues.len() {
+                        if worker_idx_in_pipeline >= node_conf.queues.as_ref().unwrap().len() {
                             return Err(anyhow!(
                                 "Configuration Error: Pipeline '{}', Node '{}' has fewer queues ({}) than workers ({})",
                                 pipeline_conf.name,
                                 node_conf.id,
-                                node_conf.queues.len(),
+                                node_conf.queues.as_ref().unwrap().len(),
                                 pipeline_conf.workers.len()
                             ));
                         }
 
                         // Get the specific queue ID for this worker
-                        assigned_queue = Vec::from([node_conf.queues[worker_idx_in_pipeline]]);
+                        assigned_queue = Vec::from([node_conf.queues.as_ref().unwrap()[worker_idx_in_pipeline]]);
                     }
 
                     // Create the node config for the builder
                     pipeline_instance_nodes.push(NodeConfig {
                         id: node_conf.id.clone(),
                         node_type: node_conf.node_type.clone(),
-                        next: node_conf.next.clone(),
                         routes: node_conf.routes.clone(),
                         default: node_conf.default.clone(),
-                        queues: assigned_queue,
+                        queues: Some(assigned_queue),
                         pps: node_conf.pps.clone(),
                         labels: node_conf.labels.clone(),
                         args: node_conf.args.clone(),
@@ -1789,21 +1769,21 @@ mod tests {
         let rx_node = &l2_reflector.nodes[0];
         assert_eq!(rx_node.id, "l2_reflector.rx_root");
         assert_eq!(rx_node.node_type, "BatchRxNode");
-        assert_eq!(rx_node.queues, vec![0, 1], "RX node should have queues [0, 1]");
+        assert_eq!(rx_node.queues, Some(vec![0, 1]), "RX node should have queues [0, 1]");
         assert_eq!(rx_node.args.get("interface"), Some(&"enp2s0f0np0".to_string()));
 
         // Verify TX node has queues at node level
         let tx_node = &l2_reflector.nodes[3];
         assert_eq!(tx_node.id, "l2_reflector.tx_sink");
         assert_eq!(tx_node.node_type, "BatchTxNode");
-        assert_eq!(tx_node.queues, vec![0, 1], "TX node should have queues [0, 1]");
+        assert_eq!(tx_node.queues, Some(vec![0, 1]), "TX node should have queues [0, 1]");
         assert_eq!(tx_node.args.get("interface"), Some(&"enp2s0f0np0".to_string()));
 
         // Verify classifier node has no queues (processing node)
         let classifier_node = &l2_reflector.nodes[1];
         assert_eq!(classifier_node.id, "l2_reflector.classifier");
         assert_eq!(classifier_node.node_type, "ClassifierNode");
-        assert!(classifier_node.queues.is_empty(), "Classifier should have no queues");
+        assert!(classifier_node.queues.is_none(), "Classifier should have no queues");
 
         // Verify drop_if_1 pipeline with 4 workers
         let drop_if_1 = &config.pipelines[2];
@@ -1813,7 +1793,7 @@ mod tests {
             "drop_if_1 should have 4 instances on worker 2"
         );
         let rx_node = &drop_if_1.nodes[0];
-        assert_eq!(rx_node.queues, vec![0, 1, 2, 3], "drop_if_1 RX should have 4 queues");
+        assert_eq!(rx_node.queues, Some(vec![0, 1, 2, 3]), "drop_if_1 RX should have 4 queues");
     }
 
     #[test]
@@ -1832,8 +1812,8 @@ mod tests {
 
         // Verify first pipeline nodes have queues at node level
         let pipeline1 = &config.pipelines[0];
-        assert_eq!(pipeline1.nodes[0].queues, vec![0, 1]);
-        assert_eq!(pipeline1.nodes[2].queues, vec![0, 1]);
+        assert_eq!(pipeline1.nodes[0].queues, Some(vec![0, 1]));
+        assert_eq!(pipeline1.nodes[2].queues, Some(vec![0, 1]));
 
         // Verify telemetry node configuration with HashMap args
         let telemetry_node = &pipeline1.nodes[1];

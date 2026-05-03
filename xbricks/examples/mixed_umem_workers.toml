@@ -53,7 +53,7 @@ workers = [0, 1]
 [[pipelines.nodes]]
 id = "wire.rx_source_0"
 type = "BatchRxNode"
-next = "wire.ethertype_stats_01"
+routes = ["wire.ethertype_stats_01"]
 queues = [0, 1]
 args = { source_type = "xsk", interface = "enp2s0f0np0" }
 
@@ -61,7 +61,7 @@ args = { source_type = "xsk", interface = "enp2s0f0np0" }
 [[pipelines.nodes]]
 id = "wire.ethertype_stats_01"
 type = "TelemetryNode"
-next = "wire.tx_sink_1"
+routes = ["wire.tx_sink_1"]
 
 [pipelines.nodes.args]
 algo = "ethertype"
@@ -84,7 +84,7 @@ workers = [0, 1]
 [[pipelines.nodes]]
 id = "wire.rx_source_1"
 type = "BatchRxNode"
-next = "wire.ethertype_stats_10"
+routes = ["wire.ethertype_stats_10"]
 queues = [0, 1]
 args = { source_type = "xsk", interface = "enp2s0f1np1"}
 
@@ -92,7 +92,7 @@ args = { source_type = "xsk", interface = "enp2s0f1np1"}
 [[pipelines.nodes]]
 id = "wire.ethertype_stats_10"
 type = "TelemetryNode"
-next = "wire.tx_sink_0"
+routes = ["wire.tx_sink_0"]
 
 [pipelines.nodes.args]
 algo = "ethertype"

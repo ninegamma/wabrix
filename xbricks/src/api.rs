@@ -55,11 +55,18 @@ pub struct Position {
 }
 
 #[derive(Serialize)]
+pub struct PipelineSummary {
+    name: String,
+    workers: Vec<usize>,
+}
+
+#[derive(Serialize)]
 pub struct TopologyResponse {
     nodes: Vec<UiNode>,
     edges: Vec<UiEdge>,
     has_saved_layout: bool,
     config_path: String,
+    pipelines: Vec<PipelineSummary>,
 }
 
 #[derive(Serialize)]
@@ -256,14 +263,11 @@ async fn get_topology(State(state): State<AppState>) -> Json<TopologyResponse> {
             let mut node_data = serde_json::to_value(node).unwrap();
             if let Some(obj) = node_data.as_object_mut() {
                 obj.insert("pipeline_name".to_string(), Value::String(pipeline.name.clone()));
-                // Scope routes/next/default so edge targets resolve to scoped node IDs.
+                // Scope routes/default so edge targets resolve to scoped node IDs.
                 let scoped_routes: Vec<Value> = node.routes.iter()
                     .map(|r| Value::String(format!("{}/{}", pipeline.name, r)))
                     .collect();
                 obj.insert("routes".to_string(), Value::Array(scoped_routes));
-                if let Some(ref next) = node.next {
-                    obj.insert("next".to_string(), Value::String(format!("{}/{}", pipeline.name, next)));
-                }
                 if let Some(ref default) = node.default {
                     obj.insert("default".to_string(), Value::String(format!("{}/{}", pipeline.name, default)));
                 }
@@ -277,12 +281,24 @@ async fn get_topology(State(state): State<AppState>) -> Json<TopologyResponse> {
         }
     }
 
+    // 6. Add PipelineHeader nodes — one per pipeline, carries name+workers, has saved position
+    for pipeline in &config_guard.pipelines {
+        let id = format!("pipeline_header/{}", pipeline.name);
+        let data = serde_json::json!({ "name": pipeline.name, "workers": pipeline.workers });
+        ui_nodes.push(UiNode { position: saved_pos(&id), id, r#type: "pipeline_header".to_string(), data });
+    }
+
+    let pipeline_summaries: Vec<PipelineSummary> = config_guard.pipelines.iter()
+        .map(|p| PipelineSummary { name: p.name.clone(), workers: p.workers.clone() })
+        .collect();
+
     let config_path = state.config_path.read().await.clone();
     Json(TopologyResponse {
         nodes: ui_nodes,
         edges: vec![],
         has_saved_layout,
         config_path,
+        pipelines: pipeline_summaries,
     })
 }
 

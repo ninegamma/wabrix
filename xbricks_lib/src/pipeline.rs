@@ -134,9 +134,9 @@ impl PipelineFactory {
                 // === 1. RX Node ===
                 "BatchRxNode" => {
                     let next_str = node_conf
-                        .next
-                        .as_ref()
-                        .ok_or(format!("Node {} missing 'next'", node_conf.id))?;
+                        .routes
+                        .first()
+                        .ok_or(format!("Node {} missing routes[0]", node_conf.id))?;
                     let next_id = id_map
                         .get(next_str)
                         .ok_or(format!("Node {} points to unknown next '{}'", node_conf.id, next_str))?
@@ -147,8 +147,9 @@ impl PipelineFactory {
                         .get("interface")
                         .ok_or(format!("RxNode {} missing 'interface' arg", node_conf.id))?;
 
-                    assert_eq!(node_conf.queues.len(), 1);
-                    let queue_id = node_conf.queues[0] as usize;
+                    assert!(node_conf.queues.is_some());
+                    assert_eq!(node_conf.queues.as_ref().unwrap().len(), 1);
+                    let queue_id = node_conf.queues.as_ref().unwrap()[0] as usize;
 
                     // Parse batch_size from args (default: 64, max: MAX_BATCH_SIZE)
                     let batch_size = node_conf
@@ -180,9 +181,9 @@ impl PipelineFactory {
                 // === 2. PacketGenerator Node ===
                 "PacketGenerator" => {
                     let next_str = node_conf
-                        .next
-                        .as_ref()
-                        .ok_or(format!("Node {} missing 'next'", node_conf.id))?;
+                        .routes
+                        .first()
+                        .ok_or(format!("Node {} missing routes[0]", node_conf.id))?;
                     let next_id = id_map
                         .get(next_str)
                         .ok_or(format!("Node {} points to unknown next '{}'", node_conf.id, next_str))?
@@ -240,7 +241,7 @@ impl PipelineFactory {
                             }
 
                             // Move to next node if it exists
-                            if let Some(next) = &current_node.next {
+                            if let Some(next) = current_node.routes.first() {
                                 current_node_id = next.clone();
                             } else {
                                 // Reached end of chain
@@ -323,8 +324,9 @@ impl PipelineFactory {
                         .get("interface")
                         .ok_or(format!("TxNode {} missing 'interface' arg", node_conf.id))?;
 
-                    assert_eq!(node_conf.queues.len(), 1);
-                    let queue_id = node_conf.queues[0] as usize;
+                    assert!(node_conf.queues.is_some());
+                    assert_eq!(node_conf.queues.as_ref().unwrap().len(), 1);
+                    let queue_id = node_conf.queues.as_ref().unwrap()[0] as usize;
 
                     // Take ownership of the TX component of the socket
                     let tx_sink = xsocket_mgr
@@ -351,9 +353,9 @@ impl PipelineFactory {
                 // === 5. FastParser Node ===
                 "FastParserNode" => {
                     let next_str = node_conf
-                        .next
-                        .as_ref()
-                        .ok_or(format!("Node {} missing 'next'", node_conf.id))?;
+                        .routes
+                        .first()
+                        .ok_or(format!("Node {} missing routes[0]", node_conf.id))?;
                     let next_id = id_map
                         .get(next_str)
                         .ok_or(format!("Node {} points to unknown next '{}'", node_conf.id, next_str))?
@@ -410,7 +412,7 @@ impl PipelineFactory {
                     let routing_table = vec![fast_path_id, exception_path_id];
 
                     let labels = node_conf.labels.clone();
-                    let num_buckets = labels.len();
+                    let num_buckets = labels.as_ref().map_or(0, |l| l.len());
                     let counters_pkts: Vec<Arc<AtomicU64>> = (0..num_buckets)
                         .map(|_| Arc::new(AtomicU64::new(0)))
                         .collect();
@@ -421,7 +423,7 @@ impl PipelineFactory {
                     if let Some(registry) = telemetry_registry.as_mut() {
                         registry.register(
                             node_conf.id.clone(),
-                            labels.clone(),
+                            labels.clone().unwrap_or_default(),
                             counters_pkts.clone(),
                             counters_bytes.clone(),
                         );
@@ -429,7 +431,7 @@ impl PipelineFactory {
 
                     let telemetry_metrics = xbricks_base::telemetry::TelemetryMetrics {
                         node_id: node_conf.id.clone(),
-                        labels,
+                        labels: labels.unwrap_or_default(),
                         counters_pkts,
                         counters_bytes,
                     };

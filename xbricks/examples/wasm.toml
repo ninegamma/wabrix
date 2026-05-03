@@ -93,8 +93,7 @@ workers = [
 [[pipelines.nodes]]
 id = "nd_receiver"
 type = "BatchRxNode"
-next = "nd_parser"
-routes = []
+routes = ["nd_parser"]
 queues = [
     0,
     1,
@@ -108,8 +107,7 @@ batch_size = "512"
 [[pipelines.nodes]]
 id = "nd_parser"
 type = "FastParserNode"
-next = "nd_wasm_inspector"
-routes = []
+routes = ["nd_wasm_inspector"]
 queues = []
 labels = []
 
@@ -170,8 +168,7 @@ workers = [0]
 [[pipelines.nodes]]
 id = "nd_veth_source"
 type = "BatchRxNode"
-next = "nd_transmitter"
-routes = []
+routes = ["nd_transmitter"]
 queues = [0]
 labels = []
 

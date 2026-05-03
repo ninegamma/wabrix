@@ -45,7 +45,7 @@ workers = [0]
 [[pipelines.nodes]]
 id = "wire.pctgen"
 type = "PacketGenerator"
-next = "wire.tx_sink_1"
+routes = ["wire.tx_sink_1"]
 pps = 1_000
 args = { umem = "0", batch_size = "64" }
 

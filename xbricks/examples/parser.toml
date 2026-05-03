@@ -60,7 +60,7 @@ workers = [0]
     [[pipelines.nodes]]
     id = "nd_receiver"
     type = "BatchRxNode"
-    next = "nd_parser"
+    routes = ["nd_parser"]
     queues = [0]
     args = { interface = "enp2s0f0np0", batch_size= "512" }
 
@@ -68,7 +68,7 @@ workers = [0]
     [[pipelines.nodes]]
     id = "nd_parser"
     type = "FastParserNode"
-    next = "nd_exception"
+    routes = ["nd_exception"]
     args = {}
 
     [[pipelines.nodes]]
@@ -80,7 +80,7 @@ workers = [0]
     [[pipelines.nodes]]
     id = "nd_port_counter"
     type = "DstPortCntNode"
-    next = "nd_drop"
+    routes = ["nd_drop"]
     args = { port_ranges = "0-10,80" }
 
     # --- Veth tx ---
@@ -105,7 +105,7 @@ workers = [0]
     [[pipelines.nodes]]
     id = "nd_veth_source"
     type = "BatchRxNode"
-    next = "nd_transmitter"
+    routes = ["nd_transmitter"]
     queues = [0]
     args = {  interface = "veth_xbricks"}
 

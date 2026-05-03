@@ -4,7 +4,7 @@ import type { Node, Edge } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import axios from 'axios';
 import dagre from 'dagre';
-import { IfaceNode, UmemNode, XskNode, WorkerNode, PipelineNode } from './components/CustomNodes.tsx';
+import { IfaceNode, UmemNode, XskNode, WorkerNode, PipelineNode, PipelineHeaderNode } from './components/CustomNodes.tsx';
 import { TerminalWindow } from './TerminalWindow';
 import {FileBrowserDialog} from "./components/FileBrowserDialog.tsx";
 
@@ -14,6 +14,7 @@ const nodeTypes = {
     xsk: XskNode,
     worker: WorkerNode,
     pipeline: PipelineNode,
+    pipeline_header: PipelineHeaderNode,
 };
 
 const NODE_W = 200;
@@ -21,9 +22,10 @@ const NODE_H = 100;
 const TOP_GAP = 300;    // vertical gap between top row and pipeline nodes
 const TOP_SPACING = 40; // horizontal gap between top-row nodes
 
-const ROW0_TYPES = new Set(['iface', 'umem']); // top row
-const ROW1_TYPES = new Set(['xsk']);              // second row
-const ROW2_TYPES = new Set(['worker']);           // third row
+const ROW0_TYPES = new Set(['iface', 'umem']);        // top row
+const ROW1_TYPES = new Set(['xsk']);                  // second row
+const ROW2_TYPES = new Set(['worker']);               // third row
+const ROW3_TYPES = new Set(['pipeline_header']);      // fourth row
 
 // Fields that should render as radio buttons instead of a text input
 const ENUM_OPTIONS: Record<string, string[]> = {
@@ -34,8 +36,10 @@ const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'LR') => 
     const row0 = nodes.filter(n => ROW0_TYPES.has(n.type ?? ''));
     const row1 = nodes.filter(n => ROW1_TYPES.has(n.type ?? ''));
     const row2 = nodes.filter(n => ROW2_TYPES.has(n.type ?? ''));
+    const row3 = nodes.filter(n => ROW3_TYPES.has(n.type ?? ''));
     const pipelineNodes = nodes.filter(n =>
-        !ROW0_TYPES.has(n.type ?? '') && !ROW1_TYPES.has(n.type ?? '') && !ROW2_TYPES.has(n.type ?? ''));
+        !ROW0_TYPES.has(n.type ?? '') && !ROW1_TYPES.has(n.type ?? '') &&
+        !ROW2_TYPES.has(n.type ?? '') && !ROW3_TYPES.has(n.type ?? ''));
 
     // Run Dagre only on pipeline nodes
     const g = new dagre.graphlib.Graph();
@@ -54,7 +58,8 @@ const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'LR') => 
     const ROW_GAP = 40;
     const row1Y = row1.length > 0 ? NODE_H + ROW_GAP : 0;
     const row2Y = row2.length > 0 ? row1Y + (row1.length > 0 ? NODE_H + ROW_GAP : 0) : row1Y;
-    const pipelineOffsetY = row2Y + (row2.length > 0 ? NODE_H + TOP_GAP : row1.length > 0 ? NODE_H + TOP_GAP : row0.length > 0 ? NODE_H + TOP_GAP : 0);
+    const row3Y = row3.length > 0 ? row2Y + (row2.length > 0 ? NODE_H + ROW_GAP : 0) : row2Y;
+    const pipelineOffsetY = row3Y + (row3.length > 0 ? NODE_H + TOP_GAP : row2.length > 0 ? NODE_H + TOP_GAP : row1.length > 0 ? NODE_H + TOP_GAP : row0.length > 0 ? NODE_H + TOP_GAP : 0);
 
     pipelineNodes.forEach(node => {
         const pos = g.node(node.id);
@@ -72,6 +77,9 @@ const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'LR') => 
     });
     row2.forEach((node, i) => {
         node.position = { x: i * (NODE_W + TOP_SPACING), y: row2Y };
+    });
+    row3.forEach((node, i) => {
+        node.position = { x: i * (NODE_W + TOP_SPACING), y: row3Y };
     });
 
     return { nodes, edges };
@@ -171,6 +179,12 @@ export default function App() {
                 .sort((a, b) => (a.data.id as number) - (b.data.id as number))
                 .map(n => n.data);
 
+            nodes.filter(n => n.type === 'pipeline_header').forEach(n => {
+                const ph = n.data as { name: string; workers: number[] };
+                const p = (fullConfig.pipelines as any[]).find((p: any) => p.name === ph.name);
+                if (p) p.workers = ph.workers;
+            });
+
             const layout: Record<string, { x: number; y: number }> = {};
             nodes.forEach(n => { layout[n.id] = n.position; });
             fullConfig.layout = layout;
@@ -210,6 +224,11 @@ export default function App() {
             .filter(n => n.type === 'worker')
             .sort((a, b) => (a.data.id as number) - (b.data.id as number))
             .map(n => n.data);
+        nodes.filter(n => n.type === 'pipeline_header').forEach(n => {
+            const ph = n.data as { name: string; workers: number[] };
+            const p = (fullConfig.pipelines as any[]).find((p: any) => p.name === ph.name);
+            if (p) p.workers = ph.workers;
+        });
         await axios.post('/api/hardware/update', fullConfig, {
             params: { restart: false, save_to_disk: false },
         });
@@ -383,7 +402,7 @@ export default function App() {
     useEffect(() => {
         axios.get('/api/topology')
             .then((response) => {
-                const knownTypes = new Set(['iface', 'umem', 'xsk', 'worker']);
+                const knownTypes = new Set(['iface', 'umem', 'xsk', 'worker', 'pipeline_header']);
 
                 const hasSavedLayout = !!response.data?.has_saved_layout;
                 if (response.data?.config_path) {
@@ -818,7 +837,7 @@ export default function App() {
                                     );
                                 })}
                         </div>
-                        {!['iface', 'umem', 'xsk', 'worker'].includes(selectedNode.type ?? '') && (
+                        {!['iface', 'umem', 'xsk', 'worker', 'pipeline_header'].includes(selectedNode.type ?? '') && (
                             <button
                                 onClick={handleLiveUpdate}
                                 style={{
