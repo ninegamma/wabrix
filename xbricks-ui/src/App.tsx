@@ -185,6 +185,30 @@ export default function App() {
                 if (p) p.workers = ph.workers;
             });
 
+            // Write back pipeline node args (and pps) edited in the sidebar
+            nodes.filter(n => n.type === 'pipeline').forEach(n => {
+                const nd = n.data as any;
+                const pipelineName = nd.pipeline_name as string;
+                const nodeId = nd.id as string;
+                if (!pipelineName || !nodeId) return;
+                const pipeline = (fullConfig.pipelines as any[]).find((p: any) => p.name === pipelineName);
+                if (!pipeline) return;
+                const pipelineNode = (pipeline.nodes as any[]).find((pn: any) => pn.id === nodeId);
+                if (!pipelineNode) return;
+                if (nd.args !== undefined) {
+                    const args = { ...nd.args };
+                    // Write dst_ip / dst_mac separately; drop combined dst
+                    if (args.dst) {
+                        const colonPos = (args.dst as string).indexOf(':');
+                        if (!args.dst_ip) args.dst_ip = colonPos >= 0 ? (args.dst as string).substring(0, colonPos) : '';
+                        if (!args.dst_mac) args.dst_mac = colonPos >= 0 ? (args.dst as string).substring(colonPos + 1) : '';
+                        delete args.dst;
+                    }
+                    pipelineNode.args = args;
+                }
+                if (nd.pps !== null && nd.pps !== undefined) pipelineNode.pps = nd.pps;
+            });
+
             const layout: Record<string, { x: number; y: number }> = {};
             nodes.forEach(n => { layout[n.id] = n.position; });
             fullConfig.layout = layout;
@@ -228,6 +252,28 @@ export default function App() {
             const ph = n.data as { name: string; workers: number[] };
             const p = (fullConfig.pipelines as any[]).find((p: any) => p.name === ph.name);
             if (p) p.workers = ph.workers;
+        });
+        nodes.filter(n => n.type === 'pipeline').forEach(n => {
+            const nd = n.data as any;
+            const pipelineName = nd.pipeline_name as string;
+            const nodeId = nd.id as string;
+            if (!pipelineName || !nodeId) return;
+            const pipeline = (fullConfig.pipelines as any[]).find((p: any) => p.name === pipelineName);
+            if (!pipeline) return;
+            const pipelineNode = (pipeline.nodes as any[]).find((pn: any) => pn.id === nodeId);
+            if (!pipelineNode) return;
+            if (nd.args !== undefined) {
+                const args = { ...nd.args };
+                // Write dst_ip / dst_mac separately; drop combined dst
+                if (args.dst) {
+                    const colonPos = (args.dst as string).indexOf(':');
+                    if (!args.dst_ip) args.dst_ip = colonPos >= 0 ? (args.dst as string).substring(0, colonPos) : '';
+                    if (!args.dst_mac) args.dst_mac = colonPos >= 0 ? (args.dst as string).substring(colonPos + 1) : '';
+                    delete args.dst;
+                }
+                pipelineNode.args = args;
+            }
+            if (nd.pps !== null && nd.pps !== undefined) pipelineNode.pps = nd.pps;
         });
         await axios.post('/api/hardware/update', fullConfig, {
             params: { restart: false, save_to_disk: false },
@@ -517,10 +563,55 @@ export default function App() {
     // No-op: layout is only persisted when the user explicitly saves to disk.
     const handleNodeDragStop = () => {};
 
+    // Exposed for CustomNodes buttons: update args.cmd in React state and push to backend hot-config
+    useEffect(() => {
+        (window as any).__xbricksSendCmdToNode = async (
+            nodeId: string,
+            pipelineName: string,
+            nodeDataId: string,
+            cmd: string,
+        ) => {
+            // Update React state so the button toggles immediately
+            setNodes(nds => nds.map(n => {
+                if (n.id !== nodeId) return n;
+                return { ...n, data: { ...n.data, args: { ...(n.data as any).args, cmd } } };
+            }));
+            // Push cmd into the live RCU hot config via the pipeline/update endpoint
+            try {
+                await axios.post('/api/pipeline/update', {
+                    pipeline_name: pipelineName,
+                    node_id: nodeDataId,
+                    args: { cmd },
+                });
+            } catch (err) {
+                console.error('Failed to send cmd to node:', err);
+            }
+        };
+        return () => { delete (window as any).__xbricksSendCmdToNode; };
+    }, [setNodes]);
+
     const updateNodeData = (nodeId: string, key: string, value: string | number | number[] | boolean) => {
         setNodes((nds) =>
             nds.map((node) => {
                 if (node.id === nodeId) {
+                    // Special handling for PacketGenerator parameters that live in 'args'
+                    const isPacketGen = (node.data as any).type === 'PacketGenerator';
+                    const packetGenArgs = ['pps', 'umem', 'batch_size', 'no-packets', 'dst_ip', 'dst_mac', 'autostart'];
+
+                    if (isPacketGen && packetGenArgs.includes(key)) {
+                        const currentArgs = { ...((node.data as any).args || {}) };
+                        currentArgs[key] = String(value);
+
+                        if ((key === 'dst_ip' || key === 'dst_mac') && currentArgs.dst) {
+                            // Expand combined `dst` into separate fields, then drop it
+                            const colonPos = currentArgs.dst.indexOf(':');
+                            if (!currentArgs.dst_ip) currentArgs.dst_ip = colonPos >= 0 ? currentArgs.dst.substring(0, colonPos) : '192.168.177.1';
+                            if (!currentArgs.dst_mac) currentArgs.dst_mac = colonPos >= 0 ? currentArgs.dst.substring(colonPos + 1) : '08:bf:b8:0a:0b:0c';
+                            delete currentArgs.dst;
+                        }
+
+                        return { ...node, data: { ...node.data, args: currentArgs } };
+                    }
                     return { ...node, data: { ...node.data, [key]: value } };
                 }
                 return node;
@@ -738,15 +829,63 @@ export default function App() {
                             Edit {selectedNode.type === 'iface' ? 'Interface' : selectedNode.type === 'umem' ? 'UMEM' : (selectedNode.data as any).type || selectedNode.id}
                         </h2>
                         <div style={{ marginTop: '20px', display: 'flex', flexDirection: 'column', gap: '15px' }}>
-                            {Object.entries(selectedNode.data)
-                                .filter(([_, value]) => {
-                                    if (value === null || value === undefined) return false;
-                                    // Skip array-of-objects (e.g. partitions) — not safely inline-editable
-                                    if (Array.isArray(value) && value.length > 0 && typeof value[0] === 'object') return false;
-                                    // Skip plain objects
-                                    if (!Array.isArray(value) && typeof value === 'object') return false;
-                                    return true;
-                                })
+                            {(() => {
+                                const isPacketGen = (selectedNode.data as any).type === 'PacketGenerator';
+                                const data = selectedNode.data as any;
+
+                                // 1. Start with top-level fields (except args)
+                                let entries = Object.entries(data)
+                                    .filter(([key, value]) => {
+                                        if (value === null || value === undefined) return false;
+                                        if (key === 'args') return false;
+                                        if (key === 'type') return false;
+                                        // For PacketGenerator, pps lives in args (supports "1M" / "100K" format)
+                                        if (isPacketGen && key === 'pps') return false;
+                                        if (Array.isArray(value) && value.length > 0 && typeof value[0] === 'object') return false;
+                                        if (!Array.isArray(value) && typeof value === 'object') return false;
+                                        return true;
+                                    });
+
+                                // 2. If PacketGenerator, add/override with specific parameters from args or defaults
+                                if (isPacketGen) {
+                                    const args = data.args || {};
+                                    
+                                    // Special: Extract dst_ip/dst_mac from combined 'dst' if present
+                                    let derivedDstIp = undefined;
+                                    let derivedDstMac = undefined;
+                                    if (args.dst && args.dst.includes(':')) {
+                                        const pos = args.dst.indexOf(':');
+                                        derivedDstIp = args.dst.substring(0, pos);
+                                        derivedDstMac = args.dst.substring(pos + 1);
+                                    }
+
+                                    const pgParams = [
+                                        { key: 'pps', default: '1000', type: 'string' },
+                                        { key: 'umem', default: '0', type: 'number' },
+                                        { key: 'batch_size', default: '32', type: 'number' },
+                                        { key: 'no-packets', default: '0', type: 'string' },
+                                        { key: 'dst_ip', default: derivedDstIp || '192.168.177.1', type: 'string' },
+                                        { key: 'dst_mac', default: derivedDstMac || '08:bf:b8:0a:0b:0c', type: 'string' },
+                                        { key: 'autostart', default: false, type: 'boolean' },
+                                    ];
+
+                                    pgParams.forEach(p => {
+                                        // If not already in entries, add it from args or default
+                                        if (!entries.find(([k]) => k === p.key)) {
+                                            let val = args[p.key];
+                                            if (val === undefined) {
+                                                val = p.default;
+                                            } else if (p.type === 'number') {
+                                                val = Number(val);
+                                            } else if (p.type === 'boolean') {
+                                                val = val === 'true';
+                                            }
+                                            entries.push([p.key, val]);
+                                        }
+                                    });
+                                }
+                                return entries;
+                            })()
                                 .map(([key, value]) => {
                                     const isNumArr = Array.isArray(value) && (value.length === 0 || typeof value[0] === 'number');
                                     const isNumber = typeof value === 'number';

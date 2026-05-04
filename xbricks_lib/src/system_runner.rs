@@ -29,6 +29,7 @@ impl XBricksSystem {
         mut self,
         shutdown: Arc<AtomicBool>,
         workers_completed: Arc<AtomicUsize>,
+        is_one_shot: bool,  // ipblower's one-shot mode
     ) -> anyhow::Result<Vec<JoinHandle<Result<Vec<PipelineStats>, String>>>> 
     {
         // --- SPAWN WORKER THREADS ---
@@ -59,6 +60,7 @@ impl XBricksSystem {
                 shutdown_clone,
                 workers_completed_clone,
                 &self.platform_data,
+                is_one_shot,
             );
 
             handles.push(handle);

@@ -141,7 +141,7 @@ async fn main() -> anyhow::Result<()> {
                 let workers_completed = Arc::new(AtomicUsize::new(0));
                 let pipeline_registry = Arc::clone(&xbricks_system.telemetry_registry);
                 let handles = xbricks_system
-                    .spawn_workers(shutdown.clone(), workers_completed.clone())
+                    .spawn_workers(shutdown.clone(), workers_completed.clone(), false)
                     .context("Failed to spawn worker threads")?;
 
                 info!("All {} worker threads spawned. Data Plane is LIVE.", handles.len());

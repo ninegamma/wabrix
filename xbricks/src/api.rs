@@ -46,6 +46,9 @@ pub struct NodeUpdatePayload {
     pub node_id: String,
     pub routes: Option<Vec<String>>,
     pub default_route: Option<String>,
+    /// Arbitrary args to merge into the node's hot-config args (e.g. cmd = "start" / "stop").
+    /// These are applied to the live RCU only — not persisted to disk.
+    pub args: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -166,6 +169,7 @@ pub(crate) fn spawn_management_api(state: AppState) -> (oneshot::Sender<()>, Joi
         let app = Router::new()
             .route("/api/topology", get(get_topology))
             .route("/api/config", get(get_config))
+            .route("/api/version", get(get_version))
             .route("/api/files", get(list_files))
             .route("/api/interfaces/xdp", get(list_xdp_ifaces))
             .route("/api/ws/terminal", get(terminal_ws_handler))
@@ -736,7 +740,14 @@ async fn hot_update_node(
         }
     }
 
-    // 6. UPDATE: Atomically swap the pointer.
+    // 6. MERGE ARGS (e.g. cmd = "start" / "stop") — live RCU only, not persisted
+    if let Some(new_args) = &payload.args {
+        new_config.fast_nodes[target_node_index].args.extend(
+            new_args.iter().map(|(k, v)| (k.clone(), v.clone()))
+        );
+    }
+
+    // 7. UPDATE: Atomically swap the pointer.
     // The next time a worker running this pipeline hits a batch boundary,
     // it will instantly use the new routing array.
     pipeline_rcu.store(Arc::new(new_config));
@@ -790,4 +801,7 @@ async fn save_layout(
 
     log::debug!("Layout updated in-memory ({} nodes)", config.layout.len());
     axum::http::StatusCode::OK
+}
+async fn get_version() -> impl IntoResponse {
+    Json(serde_json::json!({ "version": env!("CARGO_PKG_VERSION") }))
 }

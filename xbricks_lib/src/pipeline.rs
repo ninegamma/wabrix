@@ -196,7 +196,15 @@ impl PipelineFactory {
                         .ok_or(format!("PacketGenerator {} missing 'umem' in args", node_conf.id))?
                         .parse::<usize>()
                         .map_err(|_| format!("PacketGenerator {} 'umem' must be a number", node_conf.id))?;
-                    let pps = node_conf.pps.unwrap_or(1_000);
+                    // pps can come from the dedicated node field or from args (e.g. args = { pps = "1M" })
+                    let pps: u64 = if let Some(pps_val) = node_conf.pps {
+                        pps_val as u64
+                    } else if let Some(pps_str) = node_conf.args.get("pps") {
+                        crate::toml_parser::parse_pps(pps_str)
+                            .map_err(|e| format!("PacketGenerator {}: invalid pps: {}", node_conf.id, e))?
+                    } else {
+                        1_000
+                    };
                     // Get packets per iteration (default to 32, max 128)
                     let batch_size = node_conf
                         .args
@@ -212,11 +220,18 @@ impl PipelineFactory {
                         ));
                     }
 
-                    // Get packets_to_generate (default to 0 = unlimited)
+                    // Get packets_to_generate: accepts "packets_to_generate" (raw number) or
+                    // "no-packets" (human-readable like ipblower's --no-packets, e.g. "100K")
                     let packets_to_generate = node_conf
                         .args
                         .get("packets_to_generate")
                         .and_then(|s| s.parse::<usize>().ok())
+                        .or_else(|| {
+                            node_conf
+                                .args
+                                .get("no-packets")
+                                .and_then(|s| crate::toml_parser::parse_pps(s).ok().map(|v| v as usize))
+                        })
                         .unwrap_or(0);
 
                     // Find the eventual sink node by traversing the chain
@@ -274,11 +289,38 @@ impl PipelineFactory {
                             MacAddr6::new(0, 0, 0, 0, 0, 0)
                         }
                     };
+                    // Parse combined "dst" arg: "ip:mac" format (e.g. "192.168.177.1:08:bf:b8:0a:0b:0c"),
+                    // matching ipblower's --dst option but using ':' as the ip/mac separator.
+                    // Individual "dst_ip" and "dst_mac" args take precedence if also present.
+                    let (dst_from_combined_ip, dst_from_combined_mac) = node_conf
+                        .args
+                        .get("dst")
+                        .and_then(|s| {
+                            // The IP is dotted-decimal; split on the first ':' to separate it from the MAC.
+                            s.find(':').map(|pos| (&s[..pos], &s[pos + 1..]))
+                        })
+                        .map(|(ip_str, mac_str)| {
+                            let ip = ip_str.parse::<std::net::Ipv4Addr>().ok();
+                            let mac = {
+                                let parts: Vec<&str> = mac_str.split(':').collect();
+                                if parts.len() == 6 {
+                                    let bytes: Result<Vec<u8>, _> =
+                                        parts.iter().map(|p| u8::from_str_radix(p, 16)).collect();
+                                    bytes.ok().map(|b| MacAddr6::new(b[0], b[1], b[2], b[3], b[4], b[5]))
+                                } else {
+                                    None
+                                }
+                            };
+                            (ip, mac)
+                        })
+                        .unwrap_or((None, None));
+
                     // Parse destination IP from args (default to 192.168.177.1)
                     let dst_ip = node_conf
                         .args
                         .get("dst_ip")
                         .and_then(|s| s.parse::<std::net::Ipv4Addr>().ok())
+                        .or(dst_from_combined_ip)
                         .unwrap_or(std::net::Ipv4Addr::new(192, 168, 177, 1));
 
                     // Parse destination MAC from args (default to 08:bf:b8:0a:0b:0c)
@@ -294,6 +336,7 @@ impl PipelineFactory {
                                 None
                             }
                         })
+                        .or(dst_from_combined_mac)
                         .unwrap_or(MacAddr6::new(0x08, 0xbf, 0xb8, 0x0a, 0x0b, 0x0c));
 
                     const PATCH_CYCLES: u64 = 2000;
@@ -303,6 +346,13 @@ impl PipelineFactory {
                         "PacketGenerator {}: pps={}, batch_size={}, packets_to_generate={}, min_interbatch_gap={}, src_mac={}, dst_ip={}, dst_mac={}",
                         node_conf.id, pps, batch_size, packets_to_generate, min_interbatch_gap, src_mac, dst_ip, dst_mac
                     );
+
+                    // Detect if this generator should start immediately (ipblower)
+                    // or start idle (xbricks GUI). Default to false. ipblower sets autostart="true".
+                    let autostart = node_conf.args.get("autostart")
+                        .map(|s| s.to_lowercase() == "true")
+                        .unwrap_or(false);
+
                     Box::new(PacketGenNode::new(
                         my_id.clone(),
                         next_id,
@@ -314,6 +364,10 @@ impl PipelineFactory {
                         src_mac,
                         dst_ip,
                         dst_mac,
+                        // NEW: Pass the hot config state down so the GUI can control it
+                        shared_state.clone(),
+                        pipeline_instance.name.clone(),
+                        autostart,
                     ))
                 }
 
@@ -889,6 +943,7 @@ pub fn spawn_worker_pipelines(
     shutdown: Arc<AtomicBool>,
     workers_completed: Arc<AtomicUsize>,
     platform_data: &PlatformData,
+    is_one_shot: bool,
 ) -> tokio::task::JoinHandle<Result<Vec<PipelineStats>, String>> {
     let tsc_freq = platform_data.tsc_frequency;
 
@@ -959,29 +1014,31 @@ pub fn spawn_worker_pipelines(
         loop {
             // 1. Check shutdown signal
             if shutdown.load(Ordering::Acquire) {
-                debug!(
-                    "Worker {} received shutdown signal after {} iterations",
+                debug!( "Worker {} received shutdown signal after {} iterations",
                     worker_id, iteration_count
                 );
                 break;
             }
 
-            // Check if all generators in this worker are finished
-            let mut any_generator = false;
-            let mut all_generators_finished = true;
-            for runner in &runners {
-                if runner.has_generator() {
-                    any_generator = true;
-                    if !runner.has_all_finished_generators() {
-                        all_generators_finished = false;
-                        break;
+            // 2. ONLY shut down automatically if we are in one-shot mode (ipblower)
+            if is_one_shot {
+                // Check if all generators in this worker are finished
+                let mut any_generator = false;
+                let mut all_generators_finished = true;
+                for runner in &runners {
+                    if runner.has_generator() {
+                        any_generator = true;
+                        if !runner.has_all_finished_generators() {
+                            all_generators_finished = false;
+                            break;
+                        }
                     }
                 }
-            }
 
-            if any_generator && all_generators_finished {
-                debug!("Worker {}: All PacketGenerators finished, worker shutting down", worker_id);
-                break;
+                if any_generator && all_generators_finished {
+                    debug!("Worker {}: All PacketGenerators finished, worker shutting down", worker_id);
+                    break;
+                }
             }
 
             // 2. Process frame returns from the bus (Keep this!)

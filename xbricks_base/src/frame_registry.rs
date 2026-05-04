@@ -234,7 +234,7 @@ impl FrameRegistry {
             let to_take = std::cmp::min(available, dst.len());
 
             if to_take == 0 {
-                log::trace!(
+                log::warn!(
                     "Worker {}: Starvation! No frames available in UMEM {}",
                     self.worker_id,
                     umem_id

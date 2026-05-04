@@ -253,7 +253,7 @@ pub struct WorkerBuilderConfig {
     pub pipelines: Vec<PipelineInstance>, // List of pipelines this worker runs
 }
 
-fn parse_pps(pps_str: &str) -> Result<u64> {
+pub(crate) fn parse_pps(pps_str: &str) -> Result<u64> {
     let s = pps_str.to_lowercase();
 
     // 1. Handle the "max" case
@@ -348,6 +348,7 @@ impl XBricksConfig {
                         args.insert("umem".to_string(), "0".to_string());
                         args.insert("batch_size".to_string(), batch_sz.to_string());
                         args.insert("packets_to_generate".to_string(), packets_to_generate.to_string());
+                        args.insert("autostart".to_string(), "true".to_string());
                         if let Some(ip) = dst_ip {
                             args.insert("dst_ip".to_string(), ip.to_string());
                         }
@@ -852,11 +853,34 @@ impl XBricksConfig {
                             ));
                         }
                         None => {
-                            return Err(anyhow!(
-                                "Pipeline '{}': node '{}' (PacketGenerator) requires 'pps' parameter",
-                                pipeline.name,
-                                node.id
-                            ));
+                            // Accept pps from args (e.g. args = { pps = "1M" })
+                            match node.args.get("pps") {
+                                None => {
+                                    return Err(anyhow!(
+                                        "Pipeline '{}': node '{}' (PacketGenerator) requires 'pps' parameter",
+                                        pipeline.name,
+                                        node.id
+                                    ));
+                                }
+                                Some(pps_str) => match parse_pps(pps_str) {
+                                    Err(_) => {
+                                        return Err(anyhow!(
+                                            "Pipeline '{}': node '{}' (PacketGenerator) invalid pps value '{}'",
+                                            pipeline.name,
+                                            node.id,
+                                            pps_str
+                                        ));
+                                    }
+                                    Ok(0) => {
+                                        return Err(anyhow!(
+                                            "Pipeline '{}': node '{}' (PacketGenerator) pps must be greater than 0",
+                                            pipeline.name,
+                                            node.id
+                                        ));
+                                    }
+                                    Ok(_) => {} // Valid
+                                },
+                            }
                         }
                         _ => {} // Valid (Some(val) where val > 0)
                     }

@@ -354,7 +354,7 @@ export function pipelineColor(name: string | undefined) {
     return PIPELINE_PALETTE[hash % PIPELINE_PALETTE.length];
 }
 
-export function PipelineNode({ data }: NodeProps<PipelineNodeType>) {
+export function PipelineNode({ data, id }: NodeProps<PipelineNodeType>) {
     const [showTelemetry, setShowTelemetry] = useState(false);
     const closeTelemetry = useCallback(() => setShowTelemetry(false), []);
 
@@ -467,6 +467,36 @@ export function PipelineNode({ data }: NodeProps<PipelineNodeType>) {
                     {droppedCount !== null ? `${droppedCount.toLocaleString()} dropped` : 'dropped: —'}
                 </div>
             )}
+
+            {data.type === 'PacketGenerator' && (() => {
+                const isRunning = (data as any).args?.cmd === 'start';
+                return (
+                    <button
+                        onMouseDown={e => e.stopPropagation()}
+                        onClick={e => {
+                            e.stopPropagation();
+                            const cmd = isRunning ? 'stop' : 'start';
+                            const handler = (window as any).__xbricksSendCmdToNode;
+                            if (handler) handler(id, (data as any).pipeline_name, (data as any).id, cmd);
+                        }}
+                        style={{
+                            marginTop: '6px',
+                            width: '100%',
+                            padding: '4px 0',
+                            background: isRunning ? '#7f1d1d' : '#14532d',
+                            border: `1px solid ${isRunning ? '#ef4444' : '#22c55e'}`,
+                            borderRadius: '4px',
+                            color: isRunning ? '#ef4444' : '#22c55e',
+                            cursor: 'pointer',
+                            fontFamily: 'monospace',
+                            fontSize: '12px',
+                            fontWeight: 'bold',
+                        }}
+                    >
+                        {isRunning ? '⏹ Stop' : '▶ Start'}
+                    </button>
+                );
+            })()}
 
             {outgoing.length > 0
                 ? outgoing.map((o, i) => (

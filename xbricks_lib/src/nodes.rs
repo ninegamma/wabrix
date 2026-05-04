@@ -199,12 +199,11 @@ impl Node for BatchTxNode {
         #[cfg(feature = "profiling")]
         let start_cycles = unsafe { _rdtsc() };
 
-        // 1. Check if there is anything to send
-        if batch.len() == 0 {
-            return Directive::Stop;
-        }
+        // WE DO NOT RETURN EARLY ON EMPTY BATCHES.
+        // We must call transmit_batch() so the underlying XSocket can read the
+        // hardware Completion Queue (CQ) and free the previous frames!
 
-        // 2. Attempt transmission
+        // Attempt transmission
         // The sink is responsible for:
         // - Checking ring capacity (nb_free)
         // - Creating descriptors
@@ -409,7 +408,7 @@ use core::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
 use std::mem::MaybeUninit;
 use xbricks_base::frame_registry::get_worker_frame_registry;
 use xbricks_base::{Directive, Node, NodeId};
-
+use crate::config::hot_config::SharedSystemState;
 
 /// Fast parser node with prefetching optimization.
 /// Parses packet headers with data prefetching to minimize cache misses.
@@ -528,7 +527,20 @@ pub struct PacketGenNode {
     scratch_pdus: [core::mem::MaybeUninit<Pdu>; crate::MAX_BATCH_SIZE],
     #[cfg(feature = "profiling")]
     total_cycles: u64,
+    // new fields for GUI controlled generator
+    state: GenState,
+    packets_generated_this_run: usize,
+    shared_state: Arc<SharedSystemState>,
+    pipeline_name: String,
 }
+
+#[derive(PartialEq, Debug)]
+enum GenState {
+    Idle,
+    Generating,
+    Finished,
+}
+
 
 impl PacketGenNode {
     pub fn new(
@@ -542,6 +554,9 @@ impl PacketGenNode {
         src_mac: MacAddr6,
         dst_ip: Ipv4Addr,
         dst_mac: MacAddr6,
+        shared_state: Arc<SharedSystemState>,
+        pipeline_name: String,
+        autostart: bool,
     ) -> Self {
         Self {
             id,
@@ -568,6 +583,10 @@ impl PacketGenNode {
             scratch_pdus: unsafe { MaybeUninit::uninit().assume_init() },
             #[cfg(feature = "profiling")]
             total_cycles: 0,
+            state: if autostart { GenState::Generating } else { GenState::Idle },
+            packets_generated_this_run: 0,
+            shared_state,
+            pipeline_name,
         }
     }
 
@@ -670,9 +689,61 @@ impl Node for PacketGenNode {
         #[cfg(feature = "profiling")]
         let start_cycles = unsafe { _rdtsc() };
 
-        // Check if already finished
+        // =========================================================
+        // 1. DYNAMIC HOT-CONFIG (GUI CONTROL)
+        // =========================================================
+        if let Some(rcu) = self.shared_state.pipelines.get(&self.pipeline_name) {
+            let hot_config = rcu.load();
+            if let Some(idx) = hot_config.name_to_index.get(&self.id.id) {
+                let node_data = &hot_config.fast_nodes[*idx];
+
+                // Process start/stop commands from the frontend
+                if let Some(cmd) = node_data.args.get("cmd") {
+                    // EDGE-TRIGGER: Only start if we are explicitly Idle!
+                    if cmd == "start" && self.state == GenState::Idle {
+                        self.state = GenState::Generating;
+                        self.packets_generated_this_run = 0;
+                        self.finished = false;
+
+                        // Reset burst timers for accurate PPS on subsequent runs
+                        self.first_burst_timestamp = 0;
+                        self.first_burst_instant = None;
+                        self.last_burst_timestamp = 0;
+                        self.last_burst_instant = None;
+                        self.lastbatch_timestamp = 0;
+
+                        log::info!("PacketGenNode {}: GUI triggered START!", self.id);
+                    }
+                    // RESET LATCH: Any time we receive 'stop', reset back to Idle
+                    else if cmd == "stop" && self.state != GenState::Idle {
+                        self.state = GenState::Idle;
+                        log::info!("PacketGenNode {}: GUI triggered STOP! Reset to Idle.", self.id);
+                    }
+                }
+
+                // Allow dynamic adjustment of the packet limit mid-run
+                if let Some(new_limit) = node_data.args.get("packets_to_generate") {
+                    if let Ok(limit) = new_limit.parse::<usize>() {
+                        self.packets_to_generate = limit;
+                    }
+                }
+            }
+        }
+
+        // =========================================================
+        // 2. STATE MACHINE CHECKS
+        // =========================================================
+
+        // If we are Idle OR Finished waiting for a reset, pass the empty batch forward!
+        if self.state == GenState::Idle || self.state == GenState::Finished {
+            batch.clear();
+            return Directive::Next(self.next_node.clone());
+        }
+
+        // Failsafe for CLI mode
         if self.finished {
-            return Directive::Stop;
+            batch.clear();
+            return Directive::Next(self.next_node.clone());
         }
 
         let now = unsafe { _rdtsc() };
@@ -680,26 +751,38 @@ impl Node for PacketGenNode {
             self.start_time = now;
         }
 
-        // Check if we've reached the packet limit
-        if self.packets_to_generate > 0 && self.total_generated >= self.packets_to_generate {
+        // Check if we've reached the packet limit FOR THIS SPECIFIC RUN
+        if self.packets_to_generate > 0 && self.packets_generated_this_run >= self.packets_to_generate {
+            // LATCH TRIGGERED: Lock into the Finished state!
+            self.state = GenState::Finished;
             self.finished = true;
             self.last_burst_instant = Some(std::time::Instant::now());
+
             info!(
-                "PacketGenerator {}: Finished generating {} packets",
-                self.id, self.total_generated
+                "PacketGenerator {}: Finished generating {} packets this run. Waiting for STOP signal.",
+                self.id, self.packets_generated_this_run
             );
-            return Directive::Stop;
+            batch.clear();
+            return Directive::Next(self.next_node.clone());
         }
 
-        // Check timing constraints
-        if !((now - self.lastbatch_timestamp) >= self.min_interbatch_gap && (now - self.start_time) >= self.start_delay) {
-            return Directive::Stop;
+        // Force the very first batch of a run to fire instantly
+        let is_first_batch = self.packets_generated_this_run == 0;
+
+        if !is_first_batch {
+            // Only enforce interbatch timing AFTER the first batch has fired
+            if !((now - self.lastbatch_timestamp) >= self.min_interbatch_gap && (now - self.start_time) >= self.start_delay) {
+                batch.clear();
+                return Directive::Next(self.next_node.clone());
+            }
         }
 
-        // Ensure the batch is empty
+        // =========================================================
+        // 3. PACKET GENERATION
+        // =========================================================
+
         batch.clear();
 
-        // Access the worker's frame registry from thread-local storage
         let registry_ptr = get_worker_frame_registry();
         if registry_ptr.is_null() {
             warn!("PacketGenNode {}: Frame registry not available", self.id);
@@ -707,75 +790,63 @@ impl Node for PacketGenNode {
         }
         let frame_registry = unsafe { &mut *registry_ptr };
 
-        // Allocate frames and get PDUs
-        // Calculate how many packets we can still generate to not exceed the limit
+        // Calculate how many packets we can still generate THIS RUN to not exceed the limit
         let remaining = if self.packets_to_generate > 0 {
-            self.packets_to_generate.saturating_sub(self.total_generated)
+            self.packets_to_generate.saturating_sub(self.packets_generated_this_run)
         } else {
             usize::MAX
         };
         let frames_to_generate = std::cmp::min(std::cmp::min(self.batch_size, remaining), crate::MAX_BATCH_SIZE);
 
-        // Don't allocate if we've reached the limit
         if frames_to_generate == 0 {
+            self.state = GenState::Idle;
             self.finished = true;
-            info!(
-                "PacketGenerator {}: Finished generating {} packets",
-                self.id, self.total_generated
-            );
-            return Directive::Stop;
+            batch.clear();
+            return Directive::Next(self.next_node.clone());
         }
 
-        // here we allocate pdus using descriptors from the umem group
         let allocated = frame_registry.allocate_pdus_into(self.umem_group_id, &mut self.scratch_pdus[..frames_to_generate]);
 
         if allocated == 0 {
-            return Directive::Stop;
+            // We are temporarily out of frames (RX socket is hoarding, or TX ring is full).
+            // Pass an empty batch forward to force BatchTxNode to poll the Completion Queue!
+            batch.clear();
+            return Directive::Next(self.next_node.clone());
         }
 
         let mut generated = 0;
-        // Process each allocated PDU
+
         for i in 0..allocated {
-            // Read the PDU out of the uninit slot (leaves the raw bytes behind, but Rust won't drop them)
             let mut pdu = unsafe { self.scratch_pdus[i].assume_init_read() };
-            let seq_num = self.total_generated as u32 + generated;
+            let seq_num = self.total_generated as u32 + generated; // Use total for unique TCP seqs
             let dst_port = self.worker_id as u16;
+
             if let Err(e) = self.initialize_pdu(&mut pdu, seq_num, dst_port) {
                 warn!("Failed to create headers: {:?}", e);
-                // If it fails, the PDU (and its frame) will drop here and be released.
                 continue;
             }
 
-            // debug!("PacketGenNode {}: Generated packet { }", self.id, pdu);
-            // Add to batch
             if batch.push(pdu).is_ok() {
                 generated += 1;
             } else {
-                // Batch is full, drop remaining PDU (Drop impl will release frame)
                 break;
             }
-        }
-
-        for pdu in batch.iter() {
-            log::trace!("PacketGenNode at worker {}: Generated packet: {}", self.worker_id, pdu);
         }
 
         self.lastbatch_timestamp = now;
 
         if generated > 0 {
-            // Record first and last burst timestamps for accurate PPS calculation
-            //let instant_now = std::time::Instant::now();
             if self.first_burst_timestamp == 0 {
                 self.first_burst_timestamp = now;
                 self.first_burst_instant = Some(std::time::Instant::now());
             }
             self.last_burst_timestamp = now;
 
+            // Increment both counters!
             self.total_generated += generated as usize;
+            self.packets_generated_this_run += generated as usize;
 
-            // Check if we crossed a LOG_INTERVAL boundary
             const LOG_INTERVAL: usize = 1_000_000;
-
             if self.total_generated >= self.next_log_threshold {
                 log::trace!("PacketGenNode {}: Generated {} packets", self.id, self.total_generated);
                 self.next_log_threshold += LOG_INTERVAL;
@@ -792,6 +863,7 @@ impl Node for PacketGenNode {
             Directive::Stop
         }
     }
+
     #[inline]
     fn processed_packets(&self) -> usize {
         self.total_generated
