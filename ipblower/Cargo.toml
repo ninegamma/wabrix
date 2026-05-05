@@ -4,7 +4,7 @@ version = "0.2.0"
 edition.workspace = true
 
 [dependencies]
-xbricks_lib = { path = "../xbricks_lib" }
+xbricks_lib = { path = "../xbricks_lib", default-features = false }
 xbricks_base = { path= "../xbricks_base" }
 log = "0.4.29"
 anyhow = { version = "1", default-features = true }

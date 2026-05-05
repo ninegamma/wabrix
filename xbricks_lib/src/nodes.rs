@@ -212,7 +212,7 @@ impl Node for BatchTxNode {
             Ok(sent_count) => {
                 self.sent_packets += sent_count as u64;
                 // Telemetry (optional)
-                debug!("Node {}: Sent {} packets", self.id, sent_count);
+                if sent_count >0 { log::trace!("Node {}: Sent {} packets", self.id, sent_count); }
 
                 // 3. Handle Partial Sends / Congestion
                 // If sent_count < original batch.len(), the remaining packets

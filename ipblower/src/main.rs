@@ -122,29 +122,22 @@ async fn main() -> anyhow::Result<()> {
     let mut config = xbricks_lib::toml_parser::XBricksConfig::from_toml_str(toml_data)?;
     config.set_interface_0(&opt.interface);
     let (dst_ip, dst_mac) = parse_dst_config(opt.dst.as_deref());
+    let base_core = opt.core.unwrap_or(0);
 
-    // Use multi-worker configuration if workers > 1, otherwise use single-worker
-    if opt.workers > 1 {
-        let base_core = opt.core.unwrap_or(0);
-        config.create_multi_worker_generator_pipeline(
-            opt.workers,
-            base_core,
-            opt.batch_sz,
-            &opt.pps,
-            &opt.no_packets,
-            dst_ip,
-            dst_mac,
-        );
-        // Apply zerocopy setting to all XSK mappings
-        for xsk in &mut config.xbricks.xsk {
-            xsk.zerocopy = opt.zerocopy;
-        }
-    } else {
-        config.create_generator_pipeline(opt.batch_sz, &opt.pps, &opt.no_packets, dst_ip, dst_mac);
-        config.set_zerocopy(opt.zerocopy);
-        if let Some(core) = opt.core {
-            config.set_worker_core(core);
-        }
+    // One unified function call for both single and multi-worker modes
+    config.create_generator_pipeline(
+        opt.workers,
+        base_core,
+        opt.batch_sz,
+        &opt.pps,
+        &opt.no_packets,
+        dst_ip,
+        dst_mac,
+    );
+
+    // Apply zerocopy setting to all generated XSK mappings
+    for xsk in &mut config.xbricks.xsk {
+        xsk.zerocopy = opt.zerocopy;
     }
 
     // --- SYSTEM CHECKS ---

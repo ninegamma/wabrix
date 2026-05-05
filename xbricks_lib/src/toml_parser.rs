@@ -320,68 +320,6 @@ impl XBricksConfig {
 
     pub fn create_generator_pipeline(
         &mut self,
-        batch_sz: usize,
-        pps: &str,
-        no_packets: &str,
-        dst_ip: Option<&str>,
-        dst_mac: Option<&str>,
-    ) {
-        let pps = parse_pps(pps).unwrap();
-        let packets_to_generate = parse_pps(no_packets).unwrap_or(0);
-
-        // Create the generator pipeline based on simple_generator.toml template
-        let pipeline = PipelineConfig {
-            name: "generator".to_string(),
-            workers: vec![0],
-            nodes: vec![
-                // Node 1: PacketGenerator source
-                NodeConfig {
-                    id: "wire.pctgen".to_string(),
-                    node_type: "PacketGenerator".to_string(),
-                    routes: vec!["wire.tx_sink_1".to_string()],
-                    default: None,
-                    queues: None,
-                    pps: Some(pps as usize),
-                    labels: None,
-                    args: {
-                        let mut args = HashMap::new();
-                        args.insert("umem".to_string(), "0".to_string());
-                        args.insert("batch_size".to_string(), batch_sz.to_string());
-                        args.insert("packets_to_generate".to_string(), packets_to_generate.to_string());
-                        args.insert("autostart".to_string(), "true".to_string());
-                        if let Some(ip) = dst_ip {
-                            args.insert("dst_ip".to_string(), ip.to_string());
-                        }
-                        if let Some(mac) = dst_mac {
-                            args.insert("dst_mac".to_string(), mac.to_string());
-                        }
-                        args
-                    },
-                },
-                // Node 2: BatchTxNode sink
-                NodeConfig {
-                    id: "wire.tx_sink_1".to_string(),
-                    node_type: "BatchTxNode".to_string(),
-                    routes: vec![],
-                    default: None,
-                    queues: None,
-                    pps: None,
-                    labels: None,
-                    args: {
-                        let mut args = HashMap::new();
-                        args.insert("sink_type".to_string(), "xsk".to_string());
-                        args.insert("interface".to_string(), self.xbricks.ifaces[0].name.clone());
-                        args
-                    },
-                },
-            ],
-        };
-
-        self.pipelines.push(pipeline);
-    }
-
-    pub fn create_multi_worker_generator_pipeline(
-        &mut self,
         num_workers: usize,
         base_core: usize,
         batch_sz: usize,
@@ -390,7 +328,7 @@ impl XBricksConfig {
         dst_ip: Option<&str>,
         dst_mac: Option<&str>,
     ) {
-        let total_pps = parse_pps(pps).unwrap();
+        let total_pps = parse_pps(pps).unwrap_or(u64::MAX);
         let total_packets = parse_pps(no_packets).unwrap_or(0);
 
         // Calculate per-worker values for PPS
@@ -401,19 +339,13 @@ impl XBricksConfig {
         };
 
         // Calculate batch distribution
-        // For packet count, distribute complete batches evenly across workers
         let packets_per_worker_vec: Vec<u64> = if total_packets == 0 {
-            // Unlimited packets - each worker generates indefinitely
             vec![0; num_workers]
         } else {
-            // Calculate total number of batches needed (round up)
             let total_batches = (total_packets + batch_sz as u64 - 1) / batch_sz as u64;
-
-            // Distribute batches as evenly as possible
             let base_batches_per_worker = total_batches / num_workers as u64;
             let extra_batches = total_batches % num_workers as u64;
 
-            // Create distribution: some workers get base_batches, others get base_batches + 1
             (0..num_workers)
                 .map(|i| {
                     let batches = if i < extra_batches as usize {
@@ -426,14 +358,12 @@ impl XBricksConfig {
                 .collect()
         };
 
-        // Update UMEM configuration to use partitions (Option B - more memory efficient)
+        // Safely structure UMEM configuration to use partitions
         self.xbricks.umem[0].partitions = num_workers as u32;
-        // Scale frame count with number of workers to maintain per-worker frame availability
         self.xbricks.umem[0].frame_count = 65536 * num_workers as u32;
-        // Increase headroom to ensure sufficient space for packet headers
         self.xbricks.umem[0].head_room = 256;
 
-        // Clear default worker and create new workers
+        // Clear and build Workers dynamically
         self.xbricks.workers.clear();
         for worker_id in 0..num_workers {
             let worker = WorkerConfig {
@@ -444,7 +374,7 @@ impl XBricksConfig {
             self.xbricks.workers.push(worker);
         }
 
-        // Create XSK mappings for each queue
+        // Clear and build XSK mappings for each queue
         self.xbricks.xsk.clear();
         for queue_id in 0..num_workers {
             let xsk_mapping = XskMapping {
@@ -463,6 +393,7 @@ impl XBricksConfig {
         for worker_id in 0..num_workers {
             let packets_for_this_worker = packets_per_worker_vec[worker_id];
 
+            // Naming standard: Even for a single worker, it becomes "generator_0"
             let pipeline = PipelineConfig {
                 name: format!("generator_{}", worker_id),
                 workers: vec![worker_id],
@@ -481,6 +412,7 @@ impl XBricksConfig {
                             args.insert("umem".to_string(), "0".to_string());
                             args.insert("batch_size".to_string(), batch_sz.to_string());
                             args.insert("packets_to_generate".to_string(), packets_for_this_worker.to_string());
+                            args.insert("autostart".to_string(), "true".to_string());
                             if let Some(ip) = dst_ip {
                                 args.insert("dst_ip".to_string(), ip.to_string());
                             }
