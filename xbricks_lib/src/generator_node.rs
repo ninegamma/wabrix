@@ -23,6 +23,7 @@ use wasmtime_wasi::WasiCtxBuilder;
 #[cfg(feature = "wasm")]
 use xbricks_wasm::wasm_manager::{MyHostState, WasmManager};
 
+#[cfg(feature = "wasm")]
 bindgen!({
     path: "../wit/xbricks.wit",
     world: "generator-plugin", // Tells bindgen to generate the generator code

@@ -148,8 +148,8 @@ impl Guest for MyGenerator {
         };
 
         for pdu in pdus {
-            let base_addr = pdu.base_addr(umem_addr);
-            let wasm_ptr = base_addr as *mut u8;
+            let data_ptr = pdu.data_ptr(umem_addr);
+            let wasm_ptr = data_ptr as *mut u8;
 
             // RESOLVE SOURCE IP: Random if seed exists, Static if None
             let source_ip_u32 = if let Some(mut seed) = local_config.rng_seed {
