@@ -1,6 +1,6 @@
 .PHONY: build clean
 
-NATIVE_MEMBERS = -p ipblower -p xbricks -p xbricks_protocol
+NATIVE_MEMBERS = -p ipblower 
 
 # The default action when you just type 'make'
 build:
@@ -10,7 +10,7 @@ build:
 	docker run --rm \
 		-v /home/rainer1956/rust:/app \
 		-w /app/xbrix \
-		ebpfl-builder cargo build --release $(NATIVE_MEMBERS)
+		ebpfl-builder cargo build --release --no-default-features $(NATIVE_MEMBERS)
 
 	sudo chown -R $(shell id -u):$(shell id -g) target/
 

@@ -381,7 +381,8 @@ impl SystemBuilder {
             for worker in &self.workers {
                 for pipeline in &worker.pipelines {
                     for node in &pipeline.nodes {
-                        if node.node_type == "WasmInspectorNode" {
+                        if node.node_type == "WasmInspectorNode"
+                            || (node.node_type == "PacketGenerator" && node.args.contains_key("wasm_file_path")) {
                             if let Some(id_str) = node.args.get("umem") {
                                 if let Ok(uid) = id_str.parse::<usize>() {
                                     if uid < MAX_UMEM {

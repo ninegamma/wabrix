@@ -27,4 +27,5 @@ xsk-rs = { path = "../xsk-rs" }
 wit-bindgen = "0.54"
 wasmtime = { version = "43.0", features = ["component-model"] }
 clap = { version = "4.5", features = ["derive", "std"] }
-
+network-types = { version = "0.2", default-features = false }
+macaddr = { version = "1.0.1", default-features = false }

@@ -5,10 +5,10 @@ version.workspace = true
 
 [dependencies]
 xsk-rs = { workspace = true }
+macaddr = { workspace = true }
 xbricks_protocol = { path = "../xbricks_protocol" }
 crossbeam-channel = "0.5"
 log = "0.4.29"
-macaddr = "1.0.1"
 tokio = { version = "1.40", features = ["full"] }
 anyhow = "1.0"
 separator = "0.4.1"

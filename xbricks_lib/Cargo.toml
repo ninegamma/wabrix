@@ -17,9 +17,9 @@ spin = "0.10"
 xsk-rs = { workspace = true }
 libbpf-rs = { workspace = true }
 libbpf-sys = { workspace = true }
-network-types = "0.1"
+network-types = { workspace = true }
 ipnet = "2.12"
-macaddr = { version = "1.0", default-features = false }
+macaddr = { workspace = true }
 
 # Serialization & Config
 serde = { version = "1.0", features = ["derive"] }
@@ -40,6 +40,8 @@ xbricks_protocol = { path = "../xbricks_protocol" }
 
 # Wasm
 xbricks_wasm = { path = "../xbricks_wasm", optional = true }
+wasmtime = "43.0.1"
+wasmtime-wasi = "43.0.1"
 
 [build-dependencies]
 anyhow = "1.0"

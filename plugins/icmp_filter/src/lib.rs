@@ -5,13 +5,13 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::slice;
 use core::sync::atomic::{AtomicU64, Ordering};
-use xbricks_protocol::headers::{HeaderKind, IcmpHeader};
+use xbricks_protocol::headers::{HeaderKind};
 use xbricks_protocol::wbatch::Pdu0;
-use crate::exports::xbricks::router::inspector::Guest;
+use crate::exports::xbricks::plugins::inspector::Guest;
 
 // Point this to the EXACT SAME .wit file you used for your first plugin!
 wit_bindgen::generate!({
-    path: "../../wit/inspector.wit",
+    path: "../../wit/xbricks.wit",
     world: "filter-plugin",
 });
 
@@ -31,6 +31,8 @@ const ROUTE_DROP: u32 = 1;
 const ROUTE_STANDARD: u32 = 0;
 
 impl Guest for IcmpFilter {
+    fn init_data(_data: Vec<(alloc::string::String, alloc::string::String)>) {}
+
     fn inspect_batch(batch_bytes: Vec<u8>, partition_offset: u32) -> Vec<u32> {
         let pdus = unsafe {
             slice::from_raw_parts(

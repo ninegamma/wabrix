@@ -6,7 +6,6 @@ use log::{debug, info};
 use crate::toml_parser::PipelineInstance;
 pub(crate) use crate::nodes::{
     BatchRxNode, BatchTxNode, DropNode, FastParserNode,
-    PacketGenNode,
 };
 
 pub(crate) use crate::{BatchRx, BatchTx, MAX_BATCH_SIZE};
@@ -18,6 +17,7 @@ use crate::config::hot_config::{HotNodeData, HotPipelineConfig};
 #[cfg(feature = "wasm")]
 use xbricks_wasm::wasm_manager::WasmManager;
 use xbricks_base::telemetry::TelemetryRegistry;
+use crate::generator_node::GeneratorNode;
 
 /// Trait for managing XDP socket access
 /// This abstracts away the details of how XDP sockets are stored and retrieved
@@ -353,7 +353,30 @@ impl PipelineFactory {
                         .map(|s| s.to_lowercase() == "true")
                         .unwrap_or(false);
 
-                    Box::new(PacketGenNode::new(
+                    // =========================================================
+                    // NEW: Resolve WASM properties if the feature is enabled
+                    // =========================================================
+                    #[cfg(feature = "wasm")]
+                    let (wasm_mgr_opt, wasm_path_opt, partition_start_bytes) = if let Some(path) = node_conf.args.get("wasm_file_path") {
+                        let manager = wasm_managers[umem_group_id]
+                            .as_ref()
+                            .ok_or(format!("PacketGenerator {}: no WasmManager for umem {}", node_conf.id, umem_group_id))?;
+
+                        // Compute this instance's reserved-memory partition
+                        let instance_idx = wasm_instance_counters[umem_group_id];
+                        let total_instances = wasm_instance_totals[umem_group_id].max(1);
+                        let frames_per_instance = manager.umem().reserved_frames / total_instances as u32;
+                        let p_start = instance_idx * frames_per_instance * manager.umem().frame_size;
+
+                        // Increment the counter so the next plugin gets the next memory slice
+                        wasm_instance_counters[umem_group_id] += 1;
+
+                        (Some(manager.as_ref()), Some(path.as_str()), p_start)
+                    } else {
+                        (None, None, 0)
+                    };
+
+                    Box::new(GeneratorNode::new(
                         my_id.clone(),
                         next_id,
                         umem_group_id,
@@ -368,6 +391,15 @@ impl PipelineFactory {
                         shared_state.clone(),
                         pipeline_instance.name.clone(),
                         autostart,
+                        // Inject the conditionally compiled WASM arguments
+                        #[cfg(feature = "wasm")]
+                        wasm_mgr_opt,
+                        #[cfg(feature = "wasm")]
+                        wasm_path_opt,
+                        #[cfg(feature = "wasm")]
+                        partition_start_bytes,
+                        #[cfg(feature = "wasm")]
+                        node_conf.wasm_data.clone().unwrap_or_default(),
                     ))
                 }
 
@@ -498,7 +530,7 @@ impl PipelineFactory {
                         instance_idx * frames_per_instance * manager.umem().frame_size;
                     wasm_instance_counters[umem_id] += 1;
 
-                    Box::new(WasmInspectorNode::new(my_id.clone(), manager, wasm_path, routing_table, None, telemetry_metrics, partition_start_bytes, umem_id as u8))
+                    Box::new(WasmInspectorNode::new(my_id.clone(), manager, wasm_path, routing_table, None, telemetry_metrics, partition_start_bytes, umem_id as u8, node_conf.wasm_data.clone().unwrap_or_default()))
                 }
 
                 _ => return Err(format!("Unknown Node Type: {}", node_conf.node_type)),
@@ -734,7 +766,7 @@ impl PipelineRunner {
                 // Check if this is a PacketGenNode to get burst duration
                 let node_ref = &**node as &dyn Any;
                 let (burst_duration_cycles, burst_duration) =
-                    if let Some(gen_node) = node_ref.downcast_ref::<crate::nodes::PacketGenNode>() {
+                    if let Some(gen_node) = node_ref.downcast_ref::<GeneratorNode>() {
                         (Some(gen_node.get_burst_duration_cycles()), gen_node.get_burst_duration())
                     } else {
                         (None, None)
@@ -796,7 +828,7 @@ impl PipelineRunner {
         use std::any::Any;
         for node in &self.nodes {
             let node_ref = &**node as &dyn Any;
-            if let Some(_gen_node) = node_ref.downcast_ref::<crate::nodes::PacketGenNode>() {
+            if let Some(_gen_node) = node_ref.downcast_ref::<GeneratorNode>() {
                 return true;
             }
         }
@@ -811,7 +843,7 @@ impl PipelineRunner {
         for node in &self.nodes {
             // Try to downcast to PacketGenNode
             let node_ref = &**node as &dyn Any;
-            if let Some(gen_node) = node_ref.downcast_ref::<crate::nodes::PacketGenNode>() {
+            if let Some(gen_node) = node_ref.downcast_ref::<GeneratorNode>() {
                 found_generator = true;
                 if !gen_node.is_finished() {
                     return false; // Found an unfinished generator

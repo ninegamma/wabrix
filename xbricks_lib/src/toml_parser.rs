@@ -218,6 +218,12 @@ where
     deserializer.deserialize_map(ArgsVisitor)
 }
 
+fn deserialize_wasm_data<'de, D>(deserializer: D) -> Result<Option<HashMap<String, String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_args(deserializer).map(Some)
+}
 
 #[derive(Debug, Deserialize, Serialize, Clone, TS)]
 pub struct NodeConfig {
@@ -235,6 +241,8 @@ pub struct NodeConfig {
     pub labels: Option<Vec<String>>,
     #[serde(default, deserialize_with = "deserialize_args")]
     pub args: HashMap<String, String>,
+    #[serde(default, deserialize_with = "deserialize_wasm_data")]
+    pub wasm_data: Option<HashMap<String, String>>,
 }
 
 /// Represents a specific instance of a pipeline assigned to a worker.
@@ -421,6 +429,7 @@ impl XBricksConfig {
                             }
                             args
                         },
+                        wasm_data: None,
                     },
                     // Node 2: BatchTxNode sink
                     NodeConfig {
@@ -437,6 +446,7 @@ impl XBricksConfig {
                             args.insert("interface".to_string(), self.xbricks.ifaces[0].name.clone());
                             args
                         },
+                        wasm_data: None,
                     },
                 ],
             };
@@ -444,6 +454,62 @@ impl XBricksConfig {
             self.pipelines.push(pipeline);
         }
     }
+
+    /// Validates that the defined UMEM resources are mathematically sufficient
+    /// to support the requested XSK rings, hardware queues, and reserved frames.
+    pub fn validate_umem_resources(&self) -> Result<()> {
+        for umem in &self.xbricks.umem {
+            let mut hardware_locked_frames = 0;
+            let mut socket_count = 0;
+
+            // Find all XSK mappings that use this UMEM
+            for xsk in &self.xbricks.xsk {
+                if xsk.umem == umem.id {
+                    let queues = xsk.queues.len() as u32;
+                    socket_count += queues;
+
+                    // The driver aggressively fills the RX ring from the Fill Queue (FQ).
+                    // To be mathematically safe, we assume the hardware can lock up:
+                    // FQ + RX ring + TX ring frames per socket.
+                    hardware_locked_frames += queues * (umem.fq_size + xsk.rxq_size + xsk.txq_size);
+                }
+            }
+
+            let total_required = umem.reserved + hardware_locked_frames;
+
+            // We need frames left over for the application pipelines to actually generate/buffer packets
+            // We assume a minimum safe buffer of ~4096 frames per partition.
+            let app_breathing_room = 4096 * umem.partitions;
+            let safe_minimum = total_required + app_breathing_room;
+
+            if umem.frame_count <= total_required {
+                anyhow::bail!(
+                    "🔥 UMEM {} Configuration Trap! Total frames ({}) cannot support the requested hardware rings.\n\
+                    Reserved: {}, Hardware Locked (FQ+RX+TX across {} sockets): {}.\n\
+                    Shortfall: {} frames.\n\
+                    Fix: Increase `frame_count` or decrease ring sizes (fq_size, rxq_size) in your TOML!",
+                    umem.id, umem.frame_count,
+                    umem.reserved, socket_count, hardware_locked_frames,
+                    total_required - umem.frame_count
+                );
+            } else if umem.frame_count < safe_minimum {
+                log::warn!(
+                    "⚠️ UMEM {} is dangerously low on free frames.\n\
+                    Total: {}, Hardware+Reserved: {}. Leaves only {} frames for {} workers to share.\n\
+                    This may cause 'Starvation!' warnings under load. Consider increasing frame_count.",
+                    umem.id, umem.frame_count, total_required,
+                    umem.frame_count - total_required, umem.partitions
+                );
+            } else {
+                log::info!(
+                    "✓ UMEM {} memory math verified (Total: {}, Hardware Locked: {}, Free for app: {})",
+                    umem.id, umem.frame_count, total_required, umem.frame_count - total_required
+                );
+            }
+        }
+        Ok(())
+    }
+
 
     /// Validate the configuration for consistency and correctness
     fn validate(&self) -> Result<()> {
@@ -1077,6 +1143,8 @@ impl XBricksConfig {
             }
         }
 
+        self.validate_umem_resources()?;
+
         Ok(())
     }
 
@@ -1289,6 +1357,7 @@ impl XBricksConfig {
                         pps: node_conf.pps.clone(),
                         labels: node_conf.labels.clone(),
                         args: node_conf.args.clone(),
+                        wasm_data: node_conf.wasm_data.clone(),
                     });
                 }
 

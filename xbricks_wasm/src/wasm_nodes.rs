@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use crate::wasm_manager::{MyHostState, WasmManager}; // Assuming WasmManager is defined here
 use wasmtime::Store;
@@ -13,7 +14,7 @@ use xbricks_protocol::TELEMETRY_FLAG;
 // 1. Generate bindings.
 // Note: `async: true` is required to use `instantiate_async` and `call_async`
 bindgen!({
-    path: "../wit/inspector.wit",
+    path: "../wit/xbricks.wit",
     world: "filter-plugin",
     // async: true,
 });
@@ -51,6 +52,7 @@ impl WasmInspectorNode {
         telemetry_metrics: TelemetryMetrics,
         partition_start_bytes: u32,
         umem_id: u8,
+        wasm_data: HashMap<String, String>,
     ) -> Self {
         // 1. Fetch the Component from the Manager's DashMap cache
         // This takes nanoseconds if already loaded, avoiding disk I/O.
@@ -86,6 +88,13 @@ impl WasmInspectorNode {
         //    We use the Manager's shared Linker, which already has WASI registered.
         let bindings = FilterPlugin::instantiate(&mut store, &component, manager.linker())
             .expect("Failed to instantiate Wasm component");
+
+        if !wasm_data.is_empty() {
+            let data: Vec<(String, String)> = wasm_data.into_iter().collect();
+            bindings.xbricks_plugins_inspector()
+                .call_init_data(&mut store, &data)
+                .expect("Failed to call init-data on Wasm inspector");
+        }
 
         Self {
             id,
@@ -141,7 +150,7 @@ impl Node for WasmInspectorNode {
             };
 
             self.bindings
-                .xbricks_router_inspector()
+                .xbricks_plugins_inspector()
                 .call_inspect_batch(&mut self.store, batch_bytes, self.partition_start_bytes)
                 .unwrap_or_else(|e| {
                     log::error!("Wasm execution failed: {}", e);

@@ -13,5 +13,5 @@ fn main() {
 
     // Rebuild if the BPF C code OR the Wasm Contract changes
     println!("cargo:rerun-if-changed=src/bpf/xscrubber.bpf.c");
-    println!("cargo:rerun-if-changed=wit/inspector.wit");
+    println!("cargo:rerun-if-changed=wit/xbricks.wit");
 }

@@ -1088,6 +1088,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "generator_plugin"
+version = "0.1.0"
+dependencies = [
+ "macaddr",
+ "network-types",
+ "spin",
+ "wit-bindgen 0.54.0",
+ "xbricks_protocol",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1781,15 +1792,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "memoffset"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
-dependencies = [
- "autocfg",
-]
-
-[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1824,11 +1826,12 @@ dependencies = [
 
 [[package]]
 name = "network-types"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f06f1863cb5565864300c6bfb012312969908878d2ca5881eaf0bbdb8b519c23"
+checksum = "5b2a639fbb002e28c2db28571f31aacc167fe7b36b33eaf650412b8d5efff26a"
 dependencies = [
- "memoffset",
+ "num-derive",
+ "num-traits",
 ]
 
 [[package]]
@@ -1860,6 +1863,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "num-derive"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed3955f1a9c7c0c15e092f9c887db08b1fc683305fdf6eb6684f22555355e202"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -4130,6 +4144,8 @@ dependencies = [
  "tokio",
  "toml 1.1.2+spec-1.1.0",
  "ts-rs",
+ "wasmtime",
+ "wasmtime-wasi",
  "xbricks_base",
  "xbricks_protocol",
  "xbricks_wasm",
