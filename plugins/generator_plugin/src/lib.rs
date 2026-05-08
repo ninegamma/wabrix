@@ -84,8 +84,7 @@ fn fast_rand(mut state: u32) -> u32 {
 }
 
 impl Guest for MyGenerator {
-
-    fn init_data(data: Vec<(alloc::string::String, alloc::string::String)>) {
+    fn init_data(data: Vec<(alloc::string::String, alloc::string::String)>, worker_id: u32) {
         let mut config = GeneratorConfig::default();
 
         // Parse strings into structured bytes ONCE at startup
@@ -120,145 +119,73 @@ impl Guest for MyGenerator {
 
         // Safely store the parsed config in our global state
         *CONFIG.lock() = Some(config);
-    }
-
-    fn init(worker_id: u32) {
         WORKER_ID.store(worker_id, Ordering::Relaxed);
         SEQ_COUNTER.store(0, Ordering::Relaxed);
     }
 
-    fn generate_batch(batch_bytes: Vec<u8>, partition_offset: u32) -> Vec<u32> {
-        let pdus = unsafe {
-            slice::from_raw_parts(
-                batch_bytes.as_ptr() as *const Pdu0,
-                batch_bytes.len() / core::mem::size_of::<Pdu0>(),
-            )
-        };
+    fn generate_batch(mut batch_bytes: Vec<u8>, partition_offset: u32) -> Vec<u32> {
+        let pdus = Pdu0::slice_from_bytes(&mut batch_bytes);
 
-        let mut lengths = Vec::with_capacity(pdus.len());
-        let umem_addr = (0u32).wrapping_sub(partition_offset) as usize;
-
-        // Load the state into local variables for the hot loop
         let worker_id = WORKER_ID.load(Ordering::Relaxed) as u16;
-        let mut current_seq = SEQ_COUNTER.load(Ordering::Relaxed);
+        let mut seq = SEQ_COUNTER.load(Ordering::Relaxed);
+        let mut config = CONFIG.lock().clone().unwrap_or_default();
 
-        // LOCK ONCE PER BATCH: Copy the config locally
-        let mut local_config = {
-            CONFIG.lock().clone().unwrap_or_default()
-        };
+        // Pre-calculate static fields outside the loop for maximum performance
+        let dst_mac = MacAddr6::from(config.dst_mac.unwrap_or([0xff; 6]));
+        let src_mac = MacAddr6::from(config.src_mac.unwrap_or([1, 2, 3, 4, 5, 6]));
+        let dst_ip = Ipv4Addr::from(config.dst_ip.unwrap_or([192, 168, 177, 222]));
+        let base_src_ip = config.src_ip.unwrap_or([192, 168, 177, 2]);
 
-        for pdu in pdus {
-            let data_ptr = pdu.data_ptr(umem_addr);
-            let wasm_ptr = data_ptr as *mut u8;
-
-            // RESOLVE SOURCE IP: Random if seed exists, Static if None
-            let source_ip_u32 = if let Some(mut seed) = local_config.rng_seed {
-                seed = fast_rand(seed);
-                local_config.rng_seed = Some(seed); // Save it for the next iteration
-                seed
+        let lengths: Vec<u32> = pdus.iter_mut().map(|pdu| {
+            // 1. Calculate dynamic fields per-packet
+            let src_ip_u32 = if let Some(seed) = config.rng_seed {
+                let new_seed = fast_rand(seed);
+                config.rng_seed = Some(new_seed);
+                new_seed
             } else {
-                // Fallback to static IP. If missing from config, default to 192.168.177.2
-                let sip = local_config.src_ip.unwrap_or([192, 168, 177, 2]);
-                u32::from_be_bytes(sip)
+                u32::from_be_bytes(base_src_ip)
             };
 
-            // Call write_headers with ALL the required parameters
-            let total_size = write_headers(
-                wasm_ptr,
-                current_seq,
-                worker_id,
-                &local_config,
-                source_ip_u32
-            );
+            // 2. Build MacHeader
+            let mut mac = MacHeader::new();
+            mac.src = src_mac;
+            mac.dst = dst_mac;
+            mac.set_ethertype(EtherType::Ipv4);
 
-            lengths.push(total_size);
+            // 3. Build IpHeader
+            let mut ip = IpHeader::new();
+            ip.set_src(src_ip_u32);
+            ip.set_dst_address(dst_ip);
+            ip.set_ttl(128);
+            ip.set_version(4);
+            ip.set_protocol(6); // TCP
+            ip.set_ihl(5);
+            ip.set_length(40);
+            ip.set_flags(0x2); // DF=1
 
-            // Increment the local sequence counter
-            current_seq = current_seq.wrapping_add(1);
-        }
+            // 4. Build TcpHeader
+            let mut tcp = TcpHeader::new();
+            tcp.set_syn_flag();
+            tcp.set_src_port(111);
+            tcp.set_dst_port(worker_id);
+            tcp.set_data_offset(5);
+            tcp.set_seq_num(seq);
 
-        // Save the updated sequence counter and RNG seed back to global state
-        SEQ_COUNTER.store(current_seq, Ordering::Relaxed);
+            // 5. Serialize directly into Wasm memory
+            let len = pdu.write_tcp_ipv4_headers(&mac, &ip, &tcp, partition_offset);
+
+            seq = seq.wrapping_add(1);
+            len
+        }).collect();
+
+        // Save state
+        SEQ_COUNTER.store(seq, Ordering::Relaxed);
         if let Some(ref mut c) = *CONFIG.lock() {
-            c.rng_seed = local_config.rng_seed;
+            c.rng_seed = config.rng_seed;
         }
 
         lengths
     }
-}
-
-fn write_headers(
-    wasm_ptr: *mut u8,
-    seq: u32,
-    dst_port: u16,
-    config: &GeneratorConfig,
-    src_ip: u32
-) -> u32 {
-    // ==========================================
-    // 1. Initialize MAC Header
-    // ==========================================
-    let mut mac = MacHeader::new();
-
-    // Unwrap options: Use user config, or fallback to sensible defaults
-    let sm = config.src_mac.unwrap_or([1, 2, 3, 4, 5, 6]);
-    mac.src = MacAddr6::new(sm[0], sm[1], sm[2], sm[3], sm[4], sm[5]);
-
-    // Default to Broadcast MAC if not specified
-    let dm = config.dst_mac.unwrap_or([0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
-    mac.dst = MacAddr6::new(dm[0], dm[1], dm[2], dm[3], dm[4], dm[5]);
-
-    mac.set_ethertype(EtherType::Ipv4);
-
-    // ==========================================
-    // 2. Initialize IP Header
-    // ==========================================
-    let mut ip = IpHeader::new();
-    ip.set_src(src_ip); // Comes from PRNG or static u32 from the loop
-
-    // Unwrap Option array into Ipv4Addr
-    let dip = config.dst_ip.unwrap_or([192, 168, 177, 222]);
-    let dst_ipv4 = Ipv4Addr::new(dip[0], dip[1], dip[2], dip[3]);
-    ip.set_dst_address(dst_ipv4);
-
-    ip.set_ttl(128);
-    ip.set_version(4);
-    ip.set_protocol(6); // TCP
-    ip.set_ihl(5);
-    ip.set_length(40);
-    ip.set_flags(0x2); // DF=1, MF=0 (don't fragment)
-
-    // ==========================================
-    // 3. Initialize TCP Header
-    // ==========================================
-    let mut tcp = TcpHeader::new();
-    tcp.set_syn_flag();
-    tcp.set_src_port(111);
-    tcp.set_dst_port(dst_port); // Derived from worker ID
-    tcp.set_data_offset(5);
-    tcp.set_seq_num(seq);
-
-    // ==========================================
-    // 4. Write Directly to WASM Memory
-    // ==========================================
-    let mac_size = core::mem::size_of::<MacHeader>();
-    let ip_size = core::mem::size_of::<IpHeader>();
-    let tcp_size = core::mem::size_of::<TcpHeader>();
-    let total_size = mac_size + ip_size + tcp_size;
-
-    unsafe {
-        // Cast raw pointer to struct pointers at specific offsets
-        let mac_ptr = wasm_ptr as *mut MacHeader;
-        let ip_ptr = wasm_ptr.add(mac_size) as *mut IpHeader;
-        let tcp_ptr = wasm_ptr.add(mac_size + ip_size) as *mut TcpHeader;
-
-        // Copy the structs into the WASM linear memory
-        ptr::copy_nonoverlapping(&mac, mac_ptr, 1);
-        ptr::copy_nonoverlapping(&ip, ip_ptr, 1);
-        ptr::copy_nonoverlapping(&tcp, tcp_ptr, 1);
-    }
-
-    // Return the payload length
-    total_size as u32
 }
 
 // Export the implementation to the runtime

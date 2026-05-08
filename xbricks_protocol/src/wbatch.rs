@@ -1,6 +1,8 @@
+use alloc::vec::Vec;
 use core::mem::MaybeUninit;
 use core::ops::{Bound, RangeBounds};
 use core::ptr;
+use crate::headers::{IpHeader, MacHeader, TcpHeader};
 use crate::wpdu::WPdu;
 
 /// The maximum number of packets in a single batch.
@@ -40,8 +42,65 @@ impl Drop for Pdu0 {
     }
 }
 
+impl Pdu0 {
+    #[inline]
+    pub fn slice_from_bytes(bytes: &mut [u8]) -> &mut [Self] {
+        let count = bytes.len() / core::mem::size_of::<Self>();
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                bytes.as_mut_ptr() as *mut Self,
+                count,
+            )
+        }
+    }
+
+    /// Returns a mutable slice to the packet data.
+    /// `offset` is the partition_offset provided by the Host.
+    #[inline(always)]
+    pub unsafe fn data_mut(&mut self, offset: u32) -> &mut [u8] {
+        let umem_addr = (0u32).wrapping_sub(offset) as usize;
+        let ptr = self.w.data_ptr(umem_addr);
+        // Assuming a standard MTU or max buffer size, e.g., 2048
+        core::slice::from_raw_parts_mut(ptr, self.frame_size())
+    }
+
+
+    /// Serializes fully formed MAC, IPv4, and TCP headers into Wasm linear memory.
+    /// Returns the total length of the written headers.
+    #[inline(always)]
+    pub fn write_tcp_ipv4_headers(
+        &mut self,
+        mac: &MacHeader,
+        ip: &IpHeader,
+        tcp: &TcpHeader,
+        partition_offset: u32,
+    ) -> u32 {
+        let data = unsafe { self.data_mut(partition_offset) };
+
+        let mac_len = core::mem::size_of::<MacHeader>();
+        let ip_len = core::mem::size_of::<IpHeader>();
+        let tcp_len = core::mem::size_of::<TcpHeader>();
+
+        unsafe {
+            // Treat the structs as raw byte slices
+            let mac_bytes = core::slice::from_raw_parts(mac as *const _ as *const u8, mac_len);
+            let ip_bytes = core::slice::from_raw_parts(ip as *const _ as *const u8, ip_len);
+            let tcp_bytes = core::slice::from_raw_parts(tcp as *const _ as *const u8, tcp_len);
+
+            // Copy them sequentially into the packet buffer
+            data[0..mac_len].copy_from_slice(mac_bytes);
+            data[mac_len..mac_len + ip_len].copy_from_slice(ip_bytes);
+            data[mac_len + ip_len..mac_len + ip_len + tcp_len].copy_from_slice(tcp_bytes);
+        }
+
+        (mac_len + ip_len + tcp_len) as u32
+    }
+}
+
 
 const _: () = assert!(size_of::<Pdu0>() == 64);
+
+
 pub struct WBatch {
     /// A dense array of uninitialized memory.
     /// NO padding between PDUs.

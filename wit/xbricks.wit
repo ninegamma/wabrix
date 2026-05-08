@@ -11,11 +11,9 @@ interface inspector {
 
 /// The interface for nodes that generate new synthetic traffic.
 interface generator {
-    /// Called once at startup to set the worker ID and internal sequence state
-    init: func(worker-id: u32);
-
     /// Called once at startup with admin key/value data from the node config (wasm_data field)
-    init-data: func(data: list<tuple<string, string>>);
+    /// and to set the worker ID and internal sequence state
+    init-data: func(data: list<tuple<string, string>>, worker-id: u32);
 
     /// Takes an empty batch of PDUs, writes headers, returns packet lengths
     generate-batch: func(batch-bytes: list<u8>, partition-offset: u32) -> list<u32>;

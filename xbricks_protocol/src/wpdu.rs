@@ -9,29 +9,29 @@ use crate::headers::{
 #[repr(C)]
 #[derive(Clone, Debug)]
 pub struct WPdu {
-    /// [0..24] 24 Bytes: HeaderStack
+    /// 16 Bytes: HeaderStack
     header_stack: HeaderStack,
 
-    /// [24..32] 8 Bytes: The data pointer (absolute UMEM offset)
+    /// 8 Bytes: The data pointer (absolute UMEM offset)
     /// Corresponds to FrameDesc.addr
     pub desc_addr: u64,
 
-    /// [32..36] 4 Bytes: Data length
+    /// 4 Bytes: Data length
     /// Corresponds to FrameDesc.lengths.data
     pub desc_len: u32,
 
-    /// [36..40] 4 Bytes: XDP Options
+    /// 4 Bytes: XDP Options
     /// Corresponds to FrameDesc.options
     pub desc_options: u32,
 
-    /// [40..48] 8 Bytes: Metadata
+    /// 16 Bytes: Metadata
     global_frame_idx: u32, // 4 bytes, identifies the frame over all UMEM instances and partitions
     pub frame_size_log2: u8, // 1 byte - log2(frame_size) for bit-shift calculations
     owner_id: u8,            // 1 byte
     pub flags: u8,           // 1 byte
     pub _padding: [u8; 9],   // 9 byte
 
-    /// [48..56] 8 Bytes: Telemetry
+    /// 8 Bytes: Telemetry
     pub timestamp: u64,
 }
 
@@ -81,7 +81,7 @@ impl WPdu {
 
     /// Helper: Get the frame size in bytes
     #[inline(always)]
-    fn frame_size(&self) -> usize {
+    pub(crate) fn frame_size(&self) -> usize {
         1usize << self.frame_size_log2
     }
 

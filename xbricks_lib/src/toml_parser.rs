@@ -222,7 +222,47 @@ fn deserialize_wasm_data<'de, D>(deserializer: D) -> Result<Option<HashMap<Strin
 where
     D: Deserializer<'de>,
 {
-    deserialize_args(deserializer).map(Some)
+    struct WasmDataVisitor;
+
+    impl<'de> Visitor<'de> for WasmDataVisitor {
+        type Value = Option<HashMap<String, String>>;
+
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("null or a map with string keys and string or primitive values")
+        }
+
+        fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_some<D2: Deserializer<'de>>(self, d: D2) -> Result<Self::Value, D2::Error> {
+            deserialize_args(d).map(Some)
+        }
+
+        fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+            let mut result = HashMap::new();
+            while let Some(key) = map.next_key::<String>()? {
+                let value = map.next_value::<toml::Value>()?;
+                let s = match value {
+                    toml::Value::String(s) => s,
+                    toml::Value::Integer(i) => i.to_string(),
+                    toml::Value::Float(f) => f.to_string(),
+                    toml::Value::Boolean(b) => b.to_string(),
+                    other => return Err(serde::de::Error::custom(
+                        format!("unsupported value type in wasm_data: {:?}", other)
+                    )),
+                };
+                result.insert(key, s);
+            }
+            Ok(Some(result))
+        }
+    }
+
+    deserializer.deserialize_option(WasmDataVisitor)
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, TS)]

@@ -132,17 +132,10 @@ impl GeneratorNode {
             let bindings = GeneratorPlugin::instantiate(&mut store, &component, manager.linker())
                 .expect("Failed to instantiate Generator Wasm");
 
-            // Initialize the plugin state with the worker ID!
+            let data: Vec<(String, String)> = wasm_data.into_iter().collect();
             bindings.xbricks_plugins_generator()
-                .call_init(&mut store, worker_id as u32)
-                .expect("Failed to initialize WASM plugin state");
-
-            if !wasm_data.is_empty() {
-                let data: Vec<(String, String)> = wasm_data.into_iter().collect();
-                bindings.xbricks_plugins_generator()
-                    .call_init_data(&mut store, &data)
-                    .expect("Failed to call init-data on WASM generator");
-            }
+                .call_init_data(&mut store, &data, worker_id as u32)
+                .expect("Failed to call init-data on WASM generator");
 
             (Some(store), Some(bindings))
         } else {
@@ -444,6 +437,8 @@ impl Node for GeneratorNode {
         for i in 0..allocated {
             let mut pdu = unsafe { self.scratch_pdus[i].assume_init_read() };
 
+
+            // we must update the data length of the pdu here, because the pdu cannot be changed by the plugin
             #[cfg(feature = "wasm")]
             if self.bindings.is_some() {
                 let pkt_len = wasm_lengths[i];

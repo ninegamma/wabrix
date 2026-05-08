@@ -223,7 +223,15 @@ export default function App() {
                 : "Configuration saved to disk.");
         } catch (err) {
             console.error(err);
-            alert("Failed to save configuration.");
+            let detail = "Unknown error";
+            if (axios.isAxiosError(err)) {
+                const status = err.response?.status;
+                const msg = err.response?.data?.error ?? err.response?.data ?? err.message;
+                detail = status ? `HTTP ${status}: ${msg}` : err.message;
+            } else if (err instanceof Error) {
+                detail = err.message;
+            }
+            alert(`Failed to save configuration.\n\nSave path: ${savePath}\n${detail}`);
         }
     };
 
@@ -426,13 +434,20 @@ export default function App() {
             parsedRoutes = selectedNode.data.routes;
         }
 
+        // The topology endpoint scopes route IDs with the pipeline prefix so React Flow edges
+        // resolve correctly (e.g. "generator/tx_sink_1"). The backend name_to_index uses bare
+        // IDs, so strip the prefix before sending.
+        const scopePrefix = pipelineName + '/';
+        const unscope = (id: string) => id.startsWith(scopePrefix) ? id.slice(scopePrefix.length) : id;
+        parsedRoutes = parsedRoutes?.map(unscope);
+        const rawDefault = (selectedNode.data.default_route || selectedNode.data.default) as string | undefined;
+
         // 3. Construct the payload matching our Rust `NodeUpdatePayload`
         const payload = {
             pipeline_name: pipelineName,
             node_id: selectedNode.data.id as string,
             routes: parsedRoutes,
-            // UI might store it as 'default' or 'default_route' depending on your topology JSON
-            default_route: (selectedNode.data.default_route || selectedNode.data.default) as string | undefined,
+            default_route: rawDefault ? unscope(rawDefault) : undefined,
         };
 
         try {

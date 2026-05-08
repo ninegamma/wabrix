@@ -59,10 +59,10 @@ routes = []
 args= {}
 
 # ===================================================================
-# PIPELINE: VETH_OUT
+# PIPELINE: NIC0_OUT
 # ===================================================================
 [[pipelines]]
-name = "veth_out"
+name = "nic0_out"
 workers = [0, 1]
 
 [[pipelines.nodes]]
@@ -83,7 +83,7 @@ id = "nd_icmp_filter"
 type = "WasmInspectorNode"
 routes = ["nd_transmitter", "nd_drop"]
 labels = ["icmp ping", "icmp reply", "icmp other", "any other"]
-args= { umem = "1", wasm_file_path = "/home/rainer1956/rust/xbrix/target/wasm32-wasip2/release/icmp_filter.wasm" }
+args= { wasm_file_path = "/home/rainer1956/rust/xbrix/target/wasm32-wasip2/release/icmp_filter.wasm", umem = "1" }
 
 [[pipelines.nodes]]
 id = "nd_drop"
@@ -109,12 +109,12 @@ workers = [1]
 id = "pctgen"
 type = "PacketGenerator"
 routes = ["tx_sink_1"]
-args= { batch_size = "256", dst_mac = "44:49:88:06:63:38", umem = "0", dst_ip = "192.168.177.222", no-zerocopy = "false", no-packets = "20M", pps = "1M", wasm_file_path = "/home/rainer1956/rust/xbrix/target/wasm32-wasip2/release/generator_plugin.wasm" }
+args= { no-packets = "25600", dst_mac = "44:49:88:06:63:38", umem = "0", dst_ip = "192.168.177.222", cmd = "stop", batch_size = "256", pps = "1M", wasm_file_path = "/home/rainer1956/rust/xbrix/target/wasm32-wasip2/release/generator_plugin.wasm", no-zerocopy = "false" }
 
 [pipelines.nodes.wasm_data]
-dst_mac = "44:49:88:06:63:38"
-dst_ip = "192.168.177.222"
 rng_seed = "235467"
+dst_ip = "192.168.177.222"
+dst_mac = "44:49:88:06:63:38"
 src_ip = "192.168.177.224"
 src_mac = "44:49:88:06:63:39"
 
@@ -125,13 +125,61 @@ routes = []
 queues = [0]
 args= { interface = "enp2s0f1np1", sink_type = "xsk" }
 
-[layout.iface_enp2s0f0np0]
-x = 3.7679086
-y = 324.04095
+[layout."nic0_out/nd_transmitter"]
+x = 750.0
+y = 1120.0
+
+[layout."generator/pctgen"]
+x = 0.0
+y = 1345.0
+
+[layout.worker_1]
+x = 491.19455
+y = 619.1127
+
+[layout."nic0_in/nd_wasm_inspector"]
+x = 500.0
+y = 895.0
+
+[layout."pipeline_header/nic0_in"]
+x = -253.70648
+y = 921.1331
+
+[layout."pipeline_header/nic0_out"]
+x = -256.10922
+y = 1216.2867
+
+[layout."pipeline_header/generator"]
+x = -257.25598
+y = 1340.6279
 
 [layout.worker_0]
 x = 262.4983
 y = 616.6007
+
+[layout."nic0_in/nd_receiver"]
+x = 0.0
+y = 895.0
+
+[layout.iface_enp2s0f0np0]
+x = 3.7679086
+y = 324.04095
+
+[layout.xsk_1]
+x = -225.96588
+y = 567.0307
+
+[layout."generator/tx_sink_1"]
+x = 342.41672
+y = 1370.6713
+
+[layout.iface_enp2s0f1np1]
+x = -231.9795
+y = 321.52902
+
+[layout.umem_0]
+x = 254.03413
+y = 322.78497
 
 [layout.umem_1]
 x = 491.5222
@@ -141,65 +189,29 @@ y = 324.04095
 x = 6.279859
 y = 567.0307
 
-[layout.iface_enp2s0f1np1]
-x = -231.9795
-y = 321.52902
+[layout.iface_veth_xbricks]
+x = 728.10236
+y = 325.29694
 
-[layout."nic0_in/nd_drop"]
-x = 750.0
-y = 970.0
-
-[layout."nic0_in/nd_wasm_inspector"]
-x = 500.0
-y = 895.0
-
-[layout."nic0_in/nd_receiver"]
+[layout."nic0_out/nd_veth_source"]
 x = 0.0
-y = 895.0
+y = 1195.0
 
-[layout."generator/tx_sink_1"]
-x = 342.41672
-y = 1370.6713
-
-[layout."pipeline_header/nic0_in"]
-x = -253.70648
-y = 921.1331
-
-[layout."veth_out/nd_drop"]
-x = 750.0
-y = 1270.0
-
-[layout.worker_1]
-x = 491.19455
-y = 619.1127
-
-[layout.xsk_3]
-x = -459.35837
-y = 569.54266
+[layout."nic0_out/nd_parser_veth"]
+x = 250.0
+y = 1195.0
 
 [layout."nic0_in/nd_veth_sink"]
 x = 750.0
 y = 820.0
 
-[layout."veth_out/nd_veth_source"]
-x = 0.0
-y = 1195.0
+[layout."nic0_out/nd_drop"]
+x = 750.0
+y = 1270.0
 
-[layout.xsk_1]
-x = -225.96588
-y = 567.0307
-
-[layout."pipeline_header/veth_out"]
-x = -256.10922
-y = 1216.2867
-
-[layout."generator/pctgen"]
-x = 0.0
-y = 1345.0
-
-[layout.umem_0]
-x = 254.03413
-y = 322.78497
+[layout."nic0_in/nd_drop"]
+x = 750.0
+y = 970.0
 
 [layout."nic0_in/nd_parser"]
 x = 250.0
@@ -209,22 +221,6 @@ y = 895.0
 x = 755.05804
 y = 577.0785
 
-[layout."veth_out/nd_icmp_filter"]
+[layout."nic0_out/nd_icmp_filter"]
 x = 500.0
 y = 1195.0
-
-[layout.iface_veth_xbricks]
-x = 728.10236
-y = 325.29694
-
-[layout."pipeline_header/generator"]
-x = -257.25598
-y = 1340.6279
-
-[layout."veth_out/nd_parser_veth"]
-x = 250.0
-y = 1195.0
-
-[layout."veth_out/nd_transmitter"]
-x = 750.0
-y = 1120.0
