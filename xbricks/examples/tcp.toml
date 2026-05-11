@@ -1,0 +1,113 @@
+[xbricks]
+ifaces= [
+    { name = "enp2s0f0np0", rxd = 8096, txd = 2048, irq_core = 8 },
+    { name = "veth_xbricks", rxd = 1024, txd = 1024, type = "veth", peer = "tap-veth", namespace="ns-xbricks", ipnet = "192.168.177.222/24", mac_if= "enp2s0f0np0", checksum_offload = false },
+]
+umem= [
+    { id = 0, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 16384, head_room = 128, partitions = 1, reserved = 30720 },
+    { id = 1, frame_size = 2048, frame_count = 131072, fq_size = 16384, cq_size = 16384, head_room = 128, partitions = 1, reserved = 10240 },
+]
+xsk= [
+    { iface = "enp2s0f0np0", queues = [0], umem = 0, rxq_size = 16384, txq_size = 4096, zerocopy = true, xdp_mode = "auto" },
+    { iface = "veth_xbricks", queues = [0], umem = 1, rxq_size = 4096, txq_size = 4096, zerocopy = false, xdp_mode = "auto" },
+]
+workers= [
+    { id = 0, core = 9, partitions = [{ umem = 0, count = 1 }, { umem = 1, count = 1 }] },
+]
+
+# ===================================================================
+# PIPELINE: NIC0_IN
+# ===================================================================
+
+[[pipelines]]
+name = "nic0_in"
+workers = [0]
+
+[[pipelines.nodes]]
+id = "tickgen"
+type = "PacketGenerator"
+routes = ["tcp_sm"]
+args= { no-packets = "25600", dst_mac = "44:49:88:06:63:38", umem = "0", dst_ip = "192.168.177.222", cmd = "stop", batch_size = "256", pps = "1M", wasm_file_path = "/home/rainer1956/rust/xbrix/target/wasm32-wasip2/release/tick_gen.wasm", no-zerocopy = "false" }
+
+[pipelines.nodes.wasm_data]
+
+
+[[pipelines.nodes]]
+id = "rx_source"
+type = "BatchRxNode"
+routes = ["nd_parser"]
+queues = [0]
+args= { interface = "enp2s0f0np0", batch_size = "256" }
+
+[[pipelines.nodes]]
+id = "nd_parser"
+type = "FastParserNode"
+routes = ["tcp_sm"]
+args= {}
+
+[[pipelines.nodes]]
+id = "tcp_sm"
+type = "WasmInspectorNode"
+routes = ["tx_sink", "veth_sink", "drop" ]
+args= { wasm_file_path = "/home/rainer1956/rust/xbrix/target/wasm32-wasip2/release/tcp_sm.wasm", umem = "0" }
+
+[[pipelines.nodes]]
+id = "tx_sink"
+type = "BatchTxNode"
+routes = []
+queues = [0]
+args= { interface = "enp2s0f0np0", sink_type = "xsk" }
+
+[[pipelines.nodes]]
+id = "veth_sink"
+type = "BatchTxNode"
+routes = []
+queues = [0]
+args= { interface = "veth_xbricks" }
+
+[[pipelines.nodes]]
+id = "drop"
+type = "DropNode"
+routes = []
+args= {}
+
+# ===================================================================
+# PIPELINE: NIC0_OUT
+# ===================================================================
+[[pipelines]]
+name = "nic0_out"
+workers = [0]
+
+[[pipelines.nodes]]
+id = "nd_veth_source"
+type = "BatchRxNode"
+routes = ["nd_parser_veth"]
+queues = [0]
+args= { interface = "veth_xbricks" }
+
+[[pipelines.nodes]]
+id = "nd_parser_veth"
+type = "FastParserNode"
+routes = ["nd_icmp_filter"]
+args= {}
+
+[[pipelines.nodes]]
+id = "nd_icmp_filter"
+type = "WasmInspectorNode"
+routes = ["nd_transmitter", "nd_drop"]
+labels = ["icmp ping", "icmp reply", "icmp other", "any other"]
+args= { wasm_file_path = "/home/rainer1956/rust/xbrix/target/wasm32-wasip2/release/icmp_filter.wasm", umem = "1" }
+
+[[pipelines.nodes]]
+id = "nd_drop"
+type = "DropNode"
+routes = []
+args= {}
+
+[[pipelines.nodes]]
+id = "nd_transmitter"
+type = "BatchTxNode"
+routes = []
+queues = [0]
+args= { interface = "enp2s0f0np0" }
+

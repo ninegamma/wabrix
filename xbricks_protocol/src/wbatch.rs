@@ -1,4 +1,3 @@
-use alloc::vec::Vec;
 use core::mem::MaybeUninit;
 use core::ops::{Bound, RangeBounds};
 use core::ptr;

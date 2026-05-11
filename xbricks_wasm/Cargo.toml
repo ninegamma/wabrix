@@ -6,16 +6,16 @@ version.workspace = true
 [dependencies]
 
 # WASM Logic
-wasmtime = "43"
-wasmtime-wasi = "43"
+wasmtime = { workspace = true }
+wasmtime-wasi = { workspace = true }
 wasmtime-component-macro = "29"
-anyhow = "1.0"
-log = "0.4"
+anyhow = { workspace = true }
+log = { workspace = true }
 xsk-rs = { workspace = true }
 dashmap = "6.1" # Using stable 6.1 instead of 7.0-rc2 for reliability
 xbricks_base = { path = "../xbricks_base" }
 xbricks_protocol = { path = "../xbricks_protocol"}
-crossbeam-channel = "0.5.15"
+crossbeam-channel = { workspace = true }
 
 [lib]
 name = "xbricks_wasm"

@@ -7,11 +7,11 @@ version.workspace = true
 xbricks_base = { path = "../xbricks_base" }
 
 # Standard Tools
-anyhow = "1.0"
-log = "0.4"
-libc = "0.2"
+anyhow = { workspace = true }
+log = { workspace = true }
+libc = { workspace = true }
 rustix = { version = "1.1", features = ["event", "time"] } # Added features for networking
-spin = "0.10"
+spin = { workspace = true }
 
 # Networking & BPF
 xsk-rs = { workspace = true }
@@ -22,15 +22,15 @@ ipnet = "2.12"
 macaddr = { workspace = true }
 
 # Serialization & Config
-serde = { version = "1.0", features = ["derive"] }
-ts-rs = "12.0"
-toml = "1.1"
-separator = "0.4"
+serde = { workspace = true }
+ts-rs = { workspace = true }
+toml = { workspace = true }
+separator = { workspace = true }
 
 # Async & Concurrency
-tokio = { version = "1.40", features = ["full"] } # Note: 1.49 is very new, 1.40 is stable
-arc-swap = "1.7"
-crossbeam-channel = "0.5"
+tokio = { workspace = true }
+arc-swap = { workspace = true }
+crossbeam-channel = { workspace = true }
 
 core_affinity = "0.8"
 rand = "0.10"
@@ -40,13 +40,13 @@ xbricks_protocol = { path = "../xbricks_protocol" }
 
 # Wasm
 xbricks_wasm = { path = "../xbricks_wasm", optional = true }
-wasmtime = "43.0.1"
-wasmtime-wasi = "43.0.1"
+wasmtime = { workspace = true }
+wasmtime-wasi = { workspace = true }
 
 [build-dependencies]
-anyhow = "1.0"
+anyhow = { workspace = true }
 cargo_metadata = "0.18"
-libbpf-cargo = "0.24"
+libbpf-cargo = { workspace = true }
 
 [features]
 performance = []

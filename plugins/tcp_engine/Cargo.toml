@@ -1,0 +1,17 @@
+[package]
+name = "tcp_engine"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+# This is crucial for Wasm components
+crate-type = ["cdylib"]
+
+[dependencies]
+# Pull this from your workspace.dependencies
+wit-bindgen = { workspace = true }
+xbricks_protocol = { path = "../../xbricks_protocol" }
+spin = { workspace = true }
+macaddr = "1.0.1"
+network-types = "0.2.0"

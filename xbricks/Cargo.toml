@@ -6,28 +6,28 @@ version.workspace = true
 
 [dependencies]
 
-anyhow = { version = "1", default-features = true }
-env_logger = { version = "0.11", default-features = false }
+anyhow = { workspace = true }
+env_logger = { workspace = true }
 env_filter = "0.1"
-log = { version = "0.4.22", default-features = false }
+log = { workspace = true, default-features = false }
 axum = { version = "0.8", features = ["ws"] }
-tokio = { version = "1.49", features = ["full"] }
-clap = { workspace = true, features = ["derive", "std"] }
-toml = "1.1"
+tokio = { workspace = true }
+clap = { workspace = true }
+toml = { workspace = true }
 toml_edit = { version = "0.22", features = ["serde"] }
-serde = { version = "1.0", features = ["derive"] }
-separator = "0.4"
+serde = { workspace = true }
+separator = { workspace = true }
 pcap-file = "3.0.0-rc1"
 serde_json = "1.0"
 futures-util = { version = "0.3", features = ["sink"] }
 tower-http = { version = "0.6", features = ["fs"] }
-ts-rs = "12.0"
-arc-swap = "1.9.1"
+ts-rs = { workspace = true }
+arc-swap = { workspace = true }
 xbricks_lib = { path = "../xbricks_lib" }
 xbricks_base = { path = "../xbricks_base" }
 
 [build-dependencies]
-anyhow = { version = "1", default-features = true }
+anyhow = { workspace = true }
 
 [features]
 performance = []

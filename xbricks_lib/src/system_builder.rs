@@ -423,7 +423,7 @@ impl SystemBuilder {
             let mut runners = Vec::new();
             for pipeline_instance_cfg in &worker.pipelines {
                 // Build the node DAG for this pipeline instance
-                let nodes = crate::pipeline::PipelineFactory::build(
+                let (nodes, source_indices) = crate::pipeline::PipelineFactory::build(
                     pipeline_instance_cfg,
                     worker_id,
                     &mut xbricks_system.xsocket_registry,
@@ -439,7 +439,7 @@ impl SystemBuilder {
                 )
                 .map_err(|e| anyhow::anyhow!(e))?;
                 // Create the pipeline runner
-                let runner = crate::pipeline::PipelineRunner::new(pipeline_instance_cfg.name.clone(), worker_id, nodes)
+                let runner = crate::pipeline::PipelineRunner::new(pipeline_instance_cfg.name.clone(), worker_id, nodes, source_indices)
                     .map_err(|e| anyhow::anyhow!(e))?;
 
                 runners.push(runner);

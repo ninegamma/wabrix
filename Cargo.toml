@@ -26,6 +26,22 @@ xsk-rs = { path = "../xsk-rs" }
 # Add these for the Wasm side of the house:
 wit-bindgen = "0.54"
 wasmtime = { version = "43.0", features = ["component-model"] }
+wasmtime-wasi = "43.0"
 clap = { version = "4.5", features = ["derive", "std"] }
 network-types = { version = "0.2", default-features = false }
 macaddr = { version = "1.0.1", default-features = false }
+
+# Common dependencies
+anyhow = "1"
+log = "0.4"
+tokio = { version = "1.49", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+separator = "0.4"
+ts-rs = "12.0"
+crossbeam-channel = "0.5"
+toml = "1.1"
+arc-swap = "1.9.1"
+spin = "0.10"
+env_logger = { version = "0.11", default-features = false }
+libc = "0.2"
+libbpf-cargo = "0.26"

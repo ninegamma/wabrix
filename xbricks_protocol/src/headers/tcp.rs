@@ -147,6 +147,14 @@ impl TcpHeader {
     }
 
     // BEGIN FLAGS
+    pub fn flags(&self) -> u8 {
+        self.flags
+    }
+
+    pub fn set_flags(&mut self, flags:u8 ) {
+        self.flags= flags
+    }
+
     // This is weird in being located outside the flags byte.
     /// ECN nonce concealment flag: RFC 3540.
     #[inline]

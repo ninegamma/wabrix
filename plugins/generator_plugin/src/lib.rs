@@ -3,8 +3,6 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use core::slice;
-use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 use macaddr::MacAddr6;
 use core::net::Ipv4Addr;

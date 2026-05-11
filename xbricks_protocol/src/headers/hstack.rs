@@ -56,7 +56,22 @@ impl HeaderStack {
         Header::from_kind_and_ptr(self.kinds[which], ptr_addr as *mut u8)
     }
 
-    // --- API Compatibility Layer ---
+    /// a fingerprint of the protocol stack. Returns a u32 where every 4 bits represent a HeaderKind
+    #[inline]
+    pub fn fingerprint(&self) -> u32 {
+        let mut f = 0u32;
+        for i in 0..self.hc as usize {
+            f |= (self.kinds[i] as u32) << (i * 4);
+        }
+        f
+    }
+
+    /// Then comparison becomes a single integer check:
+    /// if pdu.header_stack.fingerprint() == TCP_OVER_IPV4 { ... }
+    pub const TCP_OVER_IPV4: u32 = (HeaderKind::Mac as u32) |
+        ((HeaderKind::Ip as u32) << 4) |
+        ((HeaderKind::Tcp as u32) << 8);
+
 
     #[inline]
     pub fn count(&self) -> usize {

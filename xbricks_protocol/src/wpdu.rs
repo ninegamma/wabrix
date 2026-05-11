@@ -160,6 +160,14 @@ impl WPdu {
         &mut self.header_stack
     }
 
+    pub fn get_header_kind(&self, which: usize) -> HeaderKind {
+        if which < self.header_stack.count() {
+            self.header_stack.kinds[which]
+        } else {
+            HeaderKind::Null
+        }
+    }
+
     #[inline]
     pub fn replace_header(&mut self, umem_addr: usize, which: usize, hdr: &Header) {
         unsafe {

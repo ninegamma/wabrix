@@ -35,6 +35,7 @@ pub trait XSocketRxTxProvider {
 pub struct PipelineFactory;
 
 impl PipelineFactory {
+    /// returns a vector of nodes, and a vector of the indices of the source nodes in the pipeline
     pub fn build(
         pipeline_instance: &PipelineInstance,
         worker_id: usize,
@@ -49,7 +50,7 @@ impl PipelineFactory {
         wasm_instance_totals: &[usize],
         #[cfg(feature = "wasm")]
         wasm_instance_counters: &mut Vec<u32>,
-    ) -> Result<Vec<Box<dyn Node>>, String> {
+    ) -> Result<(Vec<Box<dyn Node>>, Vec<usize>), String> {
         // --- PASS 1: ID Resolution ---
         // Map "string_id" -> NodeId
         // The vector index will be the NodeId index.
@@ -473,9 +474,9 @@ impl PipelineFactory {
                             node_conf.id, umem_id
                         ))?;
 
-                    if node_conf.routes.len() != 2 {
+                    if node_conf.routes.len() > 255 {
                         return Err(format!(
-                            "WasmInspectorNode {} requires exactly 2 routes (fast_path and exception_path)",
+                            "WasmInspectorNode {} cannot have more than 255 routes",
                             node_conf.id
                         ));
                     }
@@ -542,7 +543,42 @@ impl PipelineFactory {
 
         // Unwrap Options (we guaranteed one for every index)
         let final_nodes = built_nodes.into_iter().map(|n| n.unwrap()).collect();
-        Ok(final_nodes)
+
+        // =========================================================
+        // --- PASS 3: Topological Source Detection (In-Degree = 0)
+        // =========================================================
+        // Create an array to count how many times each node is targeted
+        let mut in_degrees = vec![0; pipeline_instance.nodes.len()];
+
+        for node_conf in &pipeline_instance.nodes {
+            // Count standard routes
+            for route_str in &node_conf.routes {
+                if let Some(target_id) = id_map.get(route_str) {
+                    in_degrees[target_id.index as usize] += 1;
+                }
+            }
+            // Count default exception routes (if any)
+            if let Some(default_str) = &node_conf.default {
+                if let Some(target_id) = id_map.get(default_str) {
+                    in_degrees[target_id.index as usize] += 1;
+                }
+            }
+        }
+
+        // Any node with an in-degree of 0 is mathematically a Source Node
+        let source_indices: Vec<usize> = in_degrees
+            .into_iter()
+            .enumerate()
+            .filter(|(_, degree)| *degree == 0)
+            .map(|(index, _)| index)
+            .collect();
+
+        if source_indices.is_empty() {
+            log::warn!("Pipeline '{}' forms a closed loop with no entry points! It will never execute.", pipeline_instance.name);
+        }
+
+        // Return both the nodes and the source indices
+        Ok((final_nodes, source_indices))
     }
 }
 
@@ -568,6 +604,8 @@ pub struct PipelineRunner {
     /// Vector of nodes indexed by NodeId
     /// nodes[0] is always the root (entry point)
     nodes: Vec<Box<dyn Node>>,
+    /// Tracks the source node IDs for each entry point
+    source_indices: Vec<usize>,
     /// Reusable batch container to avoid allocations
     /// Cleared and reused on each execution
     working_batch: crate::Batch,
@@ -585,20 +623,28 @@ impl PipelineRunner {
     /// * `name` - Pipeline name for identification
     /// * `worker_id` - Worker ID this pipeline belongs to
     /// * `nodes` - Vector of nodes where nodes[0] is the root entry point
-    ///
+    /// * `source_indices` - Vector of source node indices (0-based)
     /// # Returns
     /// Result containing the PipelineRunner or an error if nodes is empty
-    pub fn new(name: String, worker_id: usize, nodes: Vec<Box<dyn Node>>) -> Result<Self, String> {
+    pub fn new(
+        name: String,
+        worker_id: usize,
+        nodes: Vec<Box<dyn Node>>,
+        source_indices: Vec<usize>
+    ) -> Result<Self, String> {
         if nodes.is_empty() {
             return Err("Pipeline must have at least one node".to_string());
         }
 
-        let full_batch_count = nodes[0].full_batch_count().unwrap_or(MAX_BATCH_SIZE);
+        // We can just use the batch count of the first source node (or fallback to max)
+        let first_source = source_indices.first().copied().unwrap_or(0);
+        let full_batch_count = nodes[first_source].full_batch_count().unwrap_or(MAX_BATCH_SIZE);
 
         Ok(PipelineRunner {
             name,
             worker_id,
             nodes,
+            source_indices, // Store it in the struct
             working_batch: crate::Batch::new(),
             packets_processed: 0,
             runs_with_work: 0,
@@ -610,7 +656,7 @@ impl PipelineRunner {
     /// Execute one iteration of the pipeline
     ///
     /// This follows the Run-To-Completion (RTC) model:
-    /// 1. Start at root node (index 0)
+    /// 1. Iterate over all entry points in the DAG (source nodes)
     /// 2. Process batch and get directive
     /// 3. Follow directive to next node(s)
     /// 4. Continue until Stop directive or error
@@ -619,112 +665,71 @@ impl PipelineRunner {
     /// - packets_processed: number of packets handled in this run
     /// - status_code: 0 for success, negative for errors, positive for specific statuses
     fn run_iteration(&mut self) -> (u32, i32) {
+        let mut total_packets_this_iteration = 0;
 
-        // Clear the working batch from previous iteration
-        self.working_batch.clear();
+        // Iterate over ALL entry points in the DAG
+        for &source_idx in &self.source_indices {
+            // Clear the working batch for this specific source
+            self.working_batch.clear();
 
-        // Start execution at the root node (index 0)
-        let root_node = &mut self.nodes[0];
-        let mut directive = root_node.process(&mut self.working_batch);
+            let mut directive = self.nodes[source_idx].process(&mut self.working_batch);
+            let initial_packet_count = self.working_batch.len() as u32;
+            total_packets_this_iteration += initial_packet_count;
 
-        // Track packets in the initial batch
-        let initial_packet_count = self.working_batch.len() as u32;
-
-        // Follow the directive chain through the DAG
-        loop {
-            match directive {
-                // Continue to next node with current batch
-                Directive::Next(next_id) => {
-                    let next_idx = usize::from(next_id);
-
-                    if next_idx >= self.nodes.len() {
-                        log::error!(
-                            "Pipeline '{}': Invalid NodeId {} (max {})",
-                            self.name,
-                            next_idx,
-                            self.nodes.len() - 1
-                        );
-                        return (initial_packet_count, -1);
-                    }
-
-                    let next_node = &mut self.nodes[next_idx];
-                    directive = next_node.process(&mut self.working_batch);
-                }
-
-                // Batch was split - process each sub-batch recursively
-                Directive::Split(branches) => {
-                    for (next_id, mut sub_batch) in branches {
+            // Follow the directive chain through the DAG for this source
+            loop {
+                match directive {
+                    Directive::Next(next_id) => {
                         let next_idx = usize::from(next_id);
-
                         if next_idx >= self.nodes.len() {
-                            log::error!(
-                                "Pipeline '{}': Invalid split target NodeId {} (max {})",
-                                self.name,
-                                next_idx,
-                                self.nodes.len() - 1
-                            );
-                            // Drop sub_batch automatically returns frames to UMEM
-                            continue;
+                            log::error!("Pipeline '{}': Invalid NodeId {}", self.name, next_idx);
+                            break; // Abort this branch
                         }
+                        directive = self.nodes[next_idx].process(&mut self.working_batch);
+                    }
+                    Directive::Split(branches) => {
+                        for (next_id, mut sub_batch) in branches {
+                            let next_idx = usize::from(next_id);
+                            if next_idx >= self.nodes.len() { continue; }
 
-                        // Execute the sub-branch
-                        let mut current_directive = self.nodes[next_idx].process(&mut sub_batch);
+                            let mut current_directive = self.nodes[next_idx].process(&mut sub_batch);
 
-                        // Follow this sub-branch to completion
-                        loop {
-                            match current_directive {
-                                Directive::Next(branch_next_id) => {
-                                    let branch_idx = usize::from(branch_next_id);
-                                    if branch_idx >= self.nodes.len() {
-                                        log::error!("Pipeline '{}': Invalid branch NodeId {}", self.name, branch_idx);
+                            loop {
+                                match current_directive {
+                                    Directive::Next(branch_next_id) => {
+                                        let branch_idx = usize::from(branch_next_id);
+                                        if branch_idx >= self.nodes.len() { break; }
+                                        current_directive = self.nodes[branch_idx].process(&mut sub_batch);
+                                    }
+                                    Directive::Split(nested_branches) => {
+                                        for (nested_id, mut nested_batch) in nested_branches {
+                                            let nested_idx = usize::from(nested_id);
+                                            if nested_idx < self.nodes.len() {
+                                                let _ = self.nodes[nested_idx].process(&mut nested_batch);
+                                            }
+                                        }
                                         break;
                                     }
-                                    current_directive = self.nodes[branch_idx].process(&mut sub_batch);
-                                }
-                                Directive::Split(nested_branches) => {
-                                    // Nested splits - could happen with multiple classifiers
-                                    log::warn!("Pipeline '{}': Nested split detected - processing sequentially", self.name);
-                                    // For simplicity, process nested branches sequentially
-                                    for (nested_id, mut nested_batch) in nested_branches {
-                                        let nested_idx = usize::from(nested_id);
-                                        if nested_idx < self.nodes.len() {
-                                            let _ = self.nodes[nested_idx].process(&mut nested_batch);
-                                            // nested_batch drops here, returning frames
-                                        }
-                                    }
-                                    break;
-                                }
-                                Directive::Stop => {
-                                    // This branch is complete
-                                    break;
+                                    Directive::Stop => break,
                                 }
                             }
                         }
-                        // sub_batch drops here, automatically returning any remaining frames
+                        break;
                     }
-
-                    // All branches processed, this iteration is complete
-                    break;
-                }
-
-                // Pipeline execution complete (reached sink or drop node)
-                Directive::Stop => {
-                    break;
+                    Directive::Stop => break,
                 }
             }
         }
 
-        // Update statistics
-        if initial_packet_count > 0 {
-            self.packets_processed += initial_packet_count as u64;
+        // Update statistics based on the total work done by ALL sources
+        if total_packets_this_iteration > 0 {
+            self.packets_processed += total_packets_this_iteration as u64;
             self.runs_with_work += 1;
         } else {
             self.runs_idle += 1;
         }
 
-        // Return (packets_processed, status_code)
-        // Status 0 = success, 1 = idle (no packets)
-        (initial_packet_count, if initial_packet_count > 0 { 0 } else { 1 })
+        (total_packets_this_iteration, if total_packets_this_iteration > 0 { 0 } else { 1 })
     }
 
     // Inside PipelineRunner implementation

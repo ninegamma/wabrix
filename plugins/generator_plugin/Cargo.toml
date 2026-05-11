@@ -14,4 +14,4 @@ wit-bindgen = { workspace = true }
 xbricks_protocol = { path = "../../xbricks_protocol" }
 network-types = { workspace = true }
 macaddr = { workspace = true }
-spin = "0.10"
+spin = { workspace = true }
