@@ -7,7 +7,6 @@ use xbricks_base::NodeId;
 #[derive(Debug, Clone, Default)]
 pub struct HotNodeData {
     pub routes: Vec<NodeId>,
-    pub default_route: Option<NodeId>,
     // For things like changing telemetry buckets, or specific node args on the fly
     pub args: HashMap<String, String>,
 }

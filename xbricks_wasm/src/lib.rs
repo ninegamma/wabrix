@@ -1,3 +1,6 @@
 pub mod wasm_manager;
-pub mod wasm_nodes;
-pub use wasm_nodes::WasmInspectorNode;
+pub mod wasm_inspector;
+pub mod wasm_engine;
+
+pub use wasm_inspector::WasmInspectorNode;
+pub use wasm_engine::WasmEngine;

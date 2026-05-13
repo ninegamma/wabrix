@@ -23,7 +23,7 @@ pub type SharedConfig = Arc<RwLock<XBricksConfig>>;
 pub enum SystemCommand {
     Start,    // Boot the dataplane
     Stop,     // Teardown the dataplane, but keep the API alive
-    Check,    // <-- NEW: Validate config without touching hardware
+    Check,    // Validate config without touching hardware
     Shutdown, // Kill the entire application
 }
 
@@ -272,9 +272,6 @@ async fn get_topology(State(state): State<AppState>) -> Json<TopologyResponse> {
                     .map(|r| Value::String(format!("{}/{}", pipeline.name, r)))
                     .collect();
                 obj.insert("routes".to_string(), Value::Array(scoped_routes));
-                if let Some(ref default) = node.default {
-                    obj.insert("default".to_string(), Value::String(format!("{}/{}", pipeline.name, default)));
-                }
             }
             ui_nodes.push(UiNode {
                 position: saved_pos(&scoped_id),
@@ -520,6 +517,17 @@ async fn dataplane_command(
 /// Serialize `config` to a human-readable TOML file at `path`, applying the same
 /// inline-array formatting used by `save_hardware_config`.
 fn write_config_to_disk(config: &XBricksConfig, path: &str) {
+    let mut config = config.clone();
+    // do not save the cmd property of PacketGenerator nodes, as it is not a valid TOML property
+    for pipeline in &mut config.pipelines {
+        for node in &mut pipeline.nodes {
+            if node.node_type == "PacketGenerator" {
+                node.args.remove("cmd");
+            }
+        }
+    }
+
+    let config = &config;
     if let Ok(toml_string) = toml::to_string_pretty(config) {
         if let Ok(mut doc) = toml_string.parse::<DocumentMut>() {
             if let Some(Item::Table(xbricks)) = doc.get_mut("xbricks") {
@@ -726,20 +734,6 @@ async fn hot_update_node(
         new_config.fast_nodes[target_node_index].routes = resolved_routes;
     }
 
-    // 5. MODIFY DEFAULT ROUTE: Translate String into fast NodeId
-    if let Some(new_default_string) = &payload.default_route {
-        if new_default_string.trim().is_empty() {
-            // Treat empty string as removing the default route
-            new_config.fast_nodes[target_node_index].default_route = None;
-        } else if let Some(&target_idx) = new_config.name_to_index.get(new_default_string) {
-            new_config.fast_nodes[target_node_index].default_route =
-                Some(NodeId::new(target_idx as u32, new_default_string.clone()));
-        } else {
-            log::error!("Default target route '{}' not found", new_default_string);
-            return axum::http::StatusCode::BAD_REQUEST;
-        }
-    }
-
     // 6. MERGE ARGS (e.g. cmd = "start" / "stop") — live RCU only, not persisted
     if let Some(new_args) = &payload.args {
         new_config.fast_nodes[target_node_index].args.extend(
@@ -767,14 +761,6 @@ async fn hot_update_node(
                 // Keep the string representations updated in the base config
                 if let Some(new_routes) = payload.routes {
                     node.routes = new_routes;
-                }
-
-                if let Some(new_default) = payload.default_route {
-                    node.default = if new_default.trim().is_empty() {
-                        None
-                    } else {
-                        Some(new_default)
-                    };
                 }
             }
         }

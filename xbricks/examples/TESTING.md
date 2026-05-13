@@ -45,11 +45,7 @@ Test with an example configuration:
 # Build the project
 cargo build --bin xbricks
 
-# Run with simple config
-sudo ./target/debug/xbricks --config examples/simple.toml
 
-# Run with mixed UMEM config
-sudo ./target/debug/xbricks --config examples/mixed_umem.toml
 ```
 
 ## Expected Test Output

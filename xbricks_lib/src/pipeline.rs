@@ -17,6 +17,7 @@ use crate::config::hot_config::{HotNodeData, HotPipelineConfig};
 #[cfg(feature = "wasm")]
 use xbricks_wasm::wasm_manager::WasmManager;
 use xbricks_base::telemetry::TelemetryRegistry;
+use xbricks_wasm::WasmEngine;
 use crate::generator_node::GeneratorNode;
 
 /// Trait for managing XDP socket access
@@ -87,16 +88,9 @@ impl PipelineFactory {
                 resolved_routes.push(rid);
             }
 
-            let resolved_default = if let Some(def_str) = &node_conf.default {
-                Some(id_map.get(def_str).unwrap().clone())
-            } else {
-                None
-            };
-
             // Place it directly at the index!
             fast_nodes[index] = HotNodeData {
                 routes: resolved_routes,
-                default_route: resolved_default,
                 args: node_conf.args.clone(),
             };
         }
@@ -197,10 +191,8 @@ impl PipelineFactory {
                         .ok_or(format!("PacketGenerator {} missing 'umem' in args", node_conf.id))?
                         .parse::<usize>()
                         .map_err(|_| format!("PacketGenerator {} 'umem' must be a number", node_conf.id))?;
-                    // pps can come from the dedicated node field or from args (e.g. args = { pps = "1M" })
-                    let pps: u64 = if let Some(pps_val) = node_conf.pps {
-                        pps_val as u64
-                    } else if let Some(pps_str) = node_conf.args.get("pps") {
+                    // e.g. args = { pps = "1M" }
+                    let pps: u64 = if let Some(pps_str) = node_conf.args.get("pps") {
                         crate::toml_parser::parse_pps(pps_str)
                             .map_err(|e| format!("PacketGenerator {}: invalid pps: {}", node_conf.id, e))?
                     } else {
@@ -354,6 +346,24 @@ impl PipelineFactory {
                         .map(|s| s.to_lowercase() == "true")
                         .unwrap_or(false);
 
+                    let tm_total = Arc::new(AtomicU64::new(0));
+                    let tm_this_run = Arc::new(AtomicU64::new(0));
+                    let tm_avg_cycles = Arc::new(AtomicU64::new(0));
+                    let tm_pps = Arc::new(AtomicU64::new(0));
+                    if let Some(ref mut reg) = telemetry_registry {
+                        reg.register(
+                            node_conf.id.clone(),
+                            vec![
+                                "total_generated".to_string(),
+                                "pkts_this_run".to_string(),
+                                "total_cycles".to_string(),
+                                "pps_last_run".to_string(),
+                            ],
+                            vec![tm_total.clone(), tm_this_run.clone(), tm_avg_cycles.clone(), tm_pps.clone()],
+                            vec![Arc::new(AtomicU64::new(0))],
+                        );
+                    }
+
                     // =========================================================
                     // NEW: Resolve WASM properties if the feature is enabled
                     // =========================================================
@@ -388,10 +398,13 @@ impl PipelineFactory {
                         src_mac,
                         dst_ip,
                         dst_mac,
-                        // NEW: Pass the hot config state down so the GUI can control it
                         shared_state.clone(),
                         pipeline_instance.name.clone(),
                         autostart,
+                        tm_total,
+                        tm_this_run,
+                        tm_avg_cycles,
+                        tm_pps,
                         // Inject the conditionally compiled WASM arguments
                         #[cfg(feature = "wasm")]
                         wasm_mgr_opt,
@@ -451,52 +464,52 @@ impl PipelineFactory {
                     Box::new(FastParserNode::new(my_id.clone(), next_id))
                 }
 
-                // === 9. Wasm Inspector Node ===
+
+                // === 6. Wasm Nodes (Inspector & Engine) ===
                 #[cfg(feature = "wasm")]
-                "WasmInspectorNode" => {
-                    use xbricks_wasm::WasmInspectorNode;
+                "WasmInspectorNode" | "WasmEngine" => {
+                    let node_type = node_conf.node_type.as_str();
+
                     let wasm_path = node_conf
                         .args
                         .get("wasm_file_path")
-                        .ok_or(format!("WasmInspectorNode {} missing 'wasm_file_path' in args", node_conf.id))?;
+                        .ok_or_else(|| format!("{} {} missing 'wasm_file_path' in args", node_type, node_conf.id))?;
 
                     let umem_id = node_conf
                         .args
                         .get("umem")
-                        .ok_or(format!("WasmInspectorNode {} missing 'umem' in args", node_conf.id))?
+                        .ok_or_else(|| format!("{} {} missing 'umem' in args", node_type, node_conf.id))?
                         .parse::<usize>()
-                        .map_err(|_| format!("WasmInspectorNode {} 'umem' must be a number", node_conf.id))?;
+                        .map_err(|_| format!("{} {} 'umem' must be a number", node_type, node_conf.id))?;
 
                     let manager = wasm_managers[umem_id]
                         .as_ref()
-                        .ok_or(format!(
-                            "WasmInspectorNode {}: no WasmManager for umem {}",
-                            node_conf.id, umem_id
+                        .ok_or_else(|| format!(
+                            "{} {}: no WasmManager for umem {}",
+                            node_type, node_conf.id, umem_id
                         ))?;
 
                     if node_conf.routes.len() > 255 {
                         return Err(format!(
-                            "WasmInspectorNode {} cannot have more than 255 routes",
-                            node_conf.id
+                            "{} {} cannot have more than 255 routes",
+                            node_type, node_conf.id
                         ));
                     }
-
-                    let fast_path_id = id_map
-                        .get(&node_conf.routes[0])
-                        .ok_or(format!(
-                            "WasmInspectorNode {}: fast_path route '{}' not found",
-                            node_conf.id, &node_conf.routes[0]
-                        ))?
-                        .clone();
-
-                    let exception_path_id = id_map
-                        .get(&node_conf.routes[1])
-                        .ok_or(format!(
-                            "WasmInspectorNode {}: exception_path route '{}' not found",
-                            node_conf.id, &node_conf.routes[1]
-                        ))?
-                        .clone();
-                    let routing_table = vec![fast_path_id, exception_path_id];
+                    // ==========================================================
+                    // DYNAMIC ROUTING TABLE BUILDER
+                    // Loop through however many routes the user provided in TOML
+                    // ==========================================================
+                    let mut routing_table = Vec::with_capacity(node_conf.routes.len());
+                    for route_name in &node_conf.routes {
+                        let target_id = id_map
+                            .get(route_name)
+                            .ok_or_else(|| format!(
+                                "{} {}: route target '{}' not found",
+                                node_type, node_conf.id, route_name
+                            ))?
+                            .clone();
+                        routing_table.push(target_id);
+                    }
 
                     let labels = node_conf.labels.clone();
                     let num_buckets = labels.as_ref().map_or(0, |l| l.len());
@@ -531,9 +544,34 @@ impl PipelineFactory {
                         instance_idx * frames_per_instance * manager.umem().frame_size;
                     wasm_instance_counters[umem_id] += 1;
 
-                    Box::new(WasmInspectorNode::new(my_id.clone(), manager, wasm_path, routing_table, None, telemetry_metrics, partition_start_bytes, umem_id as u8, node_conf.wasm_data.clone().unwrap_or_default()))
+                    if node_type == "WasmInspectorNode" {
+                        use xbricks_wasm::WasmInspectorNode;
+                        Box::new(WasmInspectorNode::new(
+                            my_id.clone(),
+                            manager,
+                            wasm_path,
+                            routing_table,
+                            None,
+                            telemetry_metrics,
+                            partition_start_bytes,
+                            umem_id as u8,
+                            node_conf.wasm_data.clone().unwrap_or_default()
+                        ))
+                    } else {
+                        use xbricks_wasm::WasmEngine;
+                        Box::new(WasmEngine::new(
+                            my_id.clone(),
+                            manager,
+                            wasm_path,
+                            routing_table,
+                            None,
+                            telemetry_metrics,
+                            partition_start_bytes,
+                            umem_id as u8,
+                            node_conf.wasm_data.clone().unwrap_or_default()
+                        ))
+                    }
                 }
-
                 _ => return Err(format!("Unknown Node Type: {}", node_conf.node_type)),
             };
 
@@ -551,15 +589,9 @@ impl PipelineFactory {
         let mut in_degrees = vec![0; pipeline_instance.nodes.len()];
 
         for node_conf in &pipeline_instance.nodes {
-            // Count standard routes
+            // Count routes
             for route_str in &node_conf.routes {
                 if let Some(target_id) = id_map.get(route_str) {
-                    in_degrees[target_id.index as usize] += 1;
-                }
-            }
-            // Count default exception routes (if any)
-            if let Some(default_str) = &node_conf.default {
-                if let Some(target_id) = id_map.get(default_str) {
                     in_degrees[target_id.index as usize] += 1;
                 }
             }

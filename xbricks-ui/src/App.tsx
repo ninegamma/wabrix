@@ -399,7 +399,7 @@ export default function App() {
     const sendDataplaneCommand = async (command: 'start' | 'stop' | 'check' | 'shutdown') => {
         setActiveMenu(null);
         try {
-            if (command === 'check') {
+            if (command === 'check' || command === 'start') {
                 await syncConfigToBackend();
             }
             await axios.post('/api/dataplane/command', { command });

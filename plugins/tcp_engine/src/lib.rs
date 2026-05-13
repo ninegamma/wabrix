@@ -12,12 +12,12 @@ use macaddr::MacAddr6;
 use xbricks_protocol::headers::{HeaderKind, IpHeader, MacHeader, TcpHeader};
 use xbricks_protocol::headers::hstack::HeaderStack;
 use xbricks_protocol::wbatch::Pdu0;
-use crate::exports::xbricks::plugins::tcp_stack::Guest;
+use crate::exports::xbricks::plugins::packet_engine::Guest;
 
 // 1. Tell the macro to read the .wit file and generate the bindings
 wit_bindgen::generate!({
     path: "../../wit/xbricks.wit",
-    world: "tcp-plugin",
+    world: "engine-plugin",
 });
 
 // The 4-Tuple that uniquely identifies a TCP connection

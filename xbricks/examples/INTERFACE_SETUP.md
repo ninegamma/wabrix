@@ -21,25 +21,6 @@ The configuration happens before XDP program attachment and follows this sequenc
 Load Config → Configure Interfaces → Load BPF → Attach XDP → Start Workers
 ```
 
-## Example Output
-
-```bash
-$ sudo RUST_LOG=info ./target/debug/xbricks --config examples/simple.toml
-
-[INFO  xbricks] Loading configuration from: examples/simple.toml
-[INFO  xbricks] Configuration loaded and validated successfully
-[INFO  xbricks] Configuring network interfaces...
-[INFO  xbricks::interface_setup] Configuring interface enp114s0f0...
-[INFO  xbricks::interface_setup] ✓ Interface enp114s0f0 is UP
-[INFO  xbricks::interface_setup] ✓ Set 2 combined queues on enp114s0f0
-[INFO  xbricks::interface_setup] ✓ Set ring sizes on enp114s0f0: RX=4096, TX=4096
-[INFO  xbricks::interface_setup] ✓ Interface enp114s0f0 has link (carrier detected)
-[INFO  xbricks::interface_setup] ✓ Interface enp114s0f0 configured successfully
-[INFO  xbricks] All interfaces configured successfully
-[INFO  xbricks] eBPF program loaded successfully
-...
-```
-
 ## Configuration Fields
 
 From the TOML file:
@@ -143,15 +124,6 @@ WARN: Interface enp114s0f0 has no link (no carrier)
 
 **Solution:** Check physical connection. The program will continue but won't receive packets.
 
-### Permission Denied
-
-```
-Error: Failed to bring interface eth0 up: Operation not permitted
-```
-
-**Solution:** Run with sudo:
-```bash
-sudo ./target/debug/xbricks --config examples/simple.toml
 ```
 
 ## Manual Configuration
@@ -176,12 +148,6 @@ ip link show enp114s0f0 # Check interface state
 
 XBricks will detect the existing configuration and skip redundant steps.
 
-## Debug Mode
-
-For detailed interface configuration logs:
-
-```bash
-sudo RUST_LOG=debug ./target/debug/xbricks --config examples/simple.toml
 ```
 
 This shows:

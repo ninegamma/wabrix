@@ -67,20 +67,7 @@ Multi-interface setup with:
 - `zerocopy`: Enable zero-copy mode (true/false)
 - `core_affinity`: Array of CPU core IDs (must match length of `queues`)
 
-## Usage
 
-Run xbricks with a configuration file:
-
-```bash
-# Run with specific config
-sudo RUST_LOG=info ./target/release/xbricks --config examples/multi_interface.toml
-
-# Run with default config (xbricks.toml)
-ssudo RUST_LOG=info ./target/release/xbricks
-
-# Run with debug logging to see interface configuration details
-sudo RUST_LOG=debug ./target/release/xbricks --config examples/simple.toml
-```
 
 **Note:** Requires `sudo` because:
 - Configuring network interfaces requires root privileges

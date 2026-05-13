@@ -2,6 +2,7 @@ use std::arch::x86_64::_rdtsc;
 use std::mem::MaybeUninit;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use log::{info, warn};
 use macaddr::MacAddr6;
 use network_types::eth::EtherType;
@@ -74,6 +75,11 @@ pub struct GeneratorNode {
     packets_generated_this_run: usize,
     shared_state: Arc<SharedSystemState>,
     pipeline_name: String,
+    // telemetry atomics shared with TelemetryRegistry
+    tm_total: Arc<AtomicU64>,
+    tm_this_run: Arc<AtomicU64>,
+    tm_avg_cycles: Arc<AtomicU64>,
+    tm_pps: Arc<AtomicU64>,
 
     // === WASM FIELDS ===
     #[cfg(feature = "wasm")]
@@ -107,6 +113,10 @@ impl GeneratorNode {
         shared_state: Arc<SharedSystemState>,
         pipeline_name: String,
         autostart: bool,
+        tm_total: Arc<AtomicU64>,
+        tm_this_run: Arc<AtomicU64>,
+        tm_avg_cycles: Arc<AtomicU64>,
+        tm_pps: Arc<AtomicU64>,
         #[cfg(feature = "wasm")] wasm_manager: Option<&WasmManager>,
         #[cfg(feature = "wasm")] wasm_file_path: Option<&str>,
         #[cfg(feature = "wasm")] partition_start_bytes: u32,
@@ -171,6 +181,10 @@ impl GeneratorNode {
             packets_generated_this_run: 0,
             shared_state,
             pipeline_name,
+            tm_total,
+            tm_this_run,
+            tm_avg_cycles,
+            tm_pps,
             #[cfg(feature = "wasm")]
             store,
             #[cfg(feature = "wasm")]
@@ -276,6 +290,7 @@ impl Node for GeneratorNode {
     }
 
     fn process(&mut self, batch: &mut Batch) -> Directive {
+
         #[cfg(feature = "profiling")]
         let start_cycles = unsafe { _rdtsc() };
 
@@ -293,6 +308,8 @@ impl Node for GeneratorNode {
                     if cmd == "start" && self.state == GenState::Idle {
                         self.state = GenState::Generating;
                         self.packets_generated_this_run = 0;
+                        self.tm_this_run.store(0, Ordering::Relaxed);
+                        self.tm_pps.store(0, Ordering::Relaxed);
                         self.finished = false;
 
                         // Reset burst timers for accurate PPS on subsequent runs
@@ -478,6 +495,19 @@ impl Node for GeneratorNode {
             // Increment both counters!
             self.total_generated += generated as usize;
             self.packets_generated_this_run += generated as usize;
+            self.tm_total.store(self.total_generated as u64, Ordering::Relaxed);
+            self.tm_this_run.store(self.packets_generated_this_run as u64, Ordering::Relaxed);
+            if let Some(first) = self.first_burst_instant {
+                let elapsed = first.elapsed().as_secs_f64();
+                if elapsed > 0.001 {
+                    self.tm_pps.store(
+                        (self.packets_generated_this_run as f64 / elapsed) as u64,
+                        Ordering::Relaxed,
+                    );
+                }
+            }
+            #[cfg(feature = "profiling")]
+            self.tm_avg_cycles.store(self.total_cycles, Ordering::Relaxed);
 
             const LOG_INTERVAL: usize = 1_000_000;
             if self.total_generated >= self.next_log_threshold {

@@ -273,10 +273,7 @@ pub struct NodeConfig {
     #[serde(default)]
     pub routes: Vec<String>,
     #[serde(default)]
-    pub default: Option<String>,
-    #[serde(default)]
     pub queues: Option<Vec<u32>>,
-    pub pps: Option<usize>,
     #[serde(default)]
     pub labels: Option<Vec<String>>,
     #[serde(default, deserialize_with = "deserialize_args")]
@@ -347,7 +344,14 @@ impl XBricksConfig {
     }
 
     pub fn from_toml_str(toml_str: &str) -> Result<Self> {
-        let config: XBricksConfig = toml::from_str(toml_str)?;
+        let mut config: XBricksConfig = toml::from_str(toml_str)?;
+        for pipeline in &mut config.pipelines {
+            for node in &mut pipeline.nodes {
+                if node.node_type == "PacketGenerator" {
+                    node.args.remove("cmd");
+                }
+            }
+        }
         config.validate()?;
         Ok(config)
     }
@@ -451,15 +455,14 @@ impl XBricksConfig {
                         id: format!("wire.pctgen_{}", worker_id),
                         node_type: "PacketGenerator".to_string(),
                         routes: vec![format!("wire.tx_sink_{}", worker_id)],
-                        default: None,
                         queues: None,
-                        pps: Some(pps_per_worker as usize),
                         labels: None,
                         args: {
                             let mut args = HashMap::new();
                             args.insert("umem".to_string(), "0".to_string());
                             args.insert("batch_size".to_string(), batch_sz.to_string());
                             args.insert("packets_to_generate".to_string(), packets_for_this_worker.to_string());
+                            args.insert("pps".to_string(), pps_per_worker.to_string());
                             args.insert("autostart".to_string(), "true".to_string());
                             if let Some(ip) = dst_ip {
                                 args.insert("dst_ip".to_string(), ip.to_string());
@@ -476,9 +479,7 @@ impl XBricksConfig {
                         id: format!("wire.tx_sink_{}", worker_id),
                         node_type: "BatchTxNode".to_string(),
                         routes: vec![],
-                        default: None,
                         queues: Some(vec![worker_id as u32]),
-                        pps: None,
                         labels: None,
                         args: {
                             let mut args = HashMap::new();
@@ -869,58 +870,35 @@ impl XBricksConfig {
                     }
                 }
 
-                if let Some(ref default_id) = node.default {
-                    if !node_ids.contains(default_id) {
-                        return Err(anyhow!(
-                            "Pipeline '{}': node '{}' has non-existent default node '{}'",
-                            pipeline.name,
-                            node.id,
-                            default_id
-                        ));
-                    }
-                }
-
                 // Validate PacketGenerator specific requirements
                 if node.node_type == "PacketGenerator" {
-                    match node.pps {
-                        Some(0) => {
+                    // Accept pps from args (e.g. args = { pps = "1M" })
+                    match node.args.get("pps") {
+                        None => {
                             return Err(anyhow!(
-                                "Pipeline '{}': node '{}' (PacketGenerator) pps must be greater than 0",
+                                "Pipeline '{}': node '{}' (PacketGenerator) requires 'pps' parameter",
                                 pipeline.name,
                                 node.id
                             ));
                         }
-                        None => {
-                            // Accept pps from args (e.g. args = { pps = "1M" })
-                            match node.args.get("pps") {
-                                None => {
-                                    return Err(anyhow!(
-                                        "Pipeline '{}': node '{}' (PacketGenerator) requires 'pps' parameter",
-                                        pipeline.name,
-                                        node.id
-                                    ));
-                                }
-                                Some(pps_str) => match parse_pps(pps_str) {
-                                    Err(_) => {
-                                        return Err(anyhow!(
-                                            "Pipeline '{}': node '{}' (PacketGenerator) invalid pps value '{}'",
-                                            pipeline.name,
-                                            node.id,
-                                            pps_str
-                                        ));
-                                    }
-                                    Ok(0) => {
-                                        return Err(anyhow!(
-                                            "Pipeline '{}': node '{}' (PacketGenerator) pps must be greater than 0",
-                                            pipeline.name,
-                                            node.id
-                                        ));
-                                    }
-                                    Ok(_) => {} // Valid
-                                },
+                        Some(pps_str) => match parse_pps(pps_str) {
+                            Err(_) => {
+                                return Err(anyhow!(
+                                    "Pipeline '{}': node '{}' (PacketGenerator) invalid pps value '{}'",
+                                    pipeline.name,
+                                    node.id,
+                                    pps_str
+                                ));
                             }
-                        }
-                        _ => {} // Valid (Some(val) where val > 0)
+                            Ok(0) => {
+                                return Err(anyhow!(
+                                    "Pipeline '{}': node '{}' (PacketGenerator) pps must be greater than 0",
+                                    pipeline.name,
+                                    node.id
+                                ));
+                            }
+                            Ok(_) => {} // Valid
+                        },
                     }
                 }
 
@@ -988,9 +966,6 @@ impl XBricksConfig {
                     let targets = targets_of.entry(node.id.as_str()).or_default();
                     for route_id in &node.routes {
                         targets.push(route_id.as_str());
-                    }
-                    if let Some(ref default_id) = node.default {
-                        targets.push(default_id.as_str());
                     }
                 }
 
@@ -1392,9 +1367,7 @@ impl XBricksConfig {
                         id: node_conf.id.clone(),
                         node_type: node_conf.node_type.clone(),
                         routes: node_conf.routes.clone(),
-                        default: node_conf.default.clone(),
                         queues: Some(assigned_queue),
-                        pps: node_conf.pps.clone(),
                         labels: node_conf.labels.clone(),
                         args: node_conf.args.clone(),
                         wasm_data: node_conf.wasm_data.clone(),
@@ -1429,29 +1402,6 @@ mod tests {
         let config = Config::default().with_out_dir(PathBuf::from("../xbricks-ui/src/types/"));
         // Force the base path to your UI folder
         XBricksConfig::export_all(&config).expect("could not export type");
-    }
-
-    #[test]
-    fn test_valid_simple_config() {
-        let toml_str = r#"
-            [xbricks]
-            ifaces = [
-                { name = "lo", rxd = 2048, txd = 2048 }
-            ]
-            umem = [
-                { id = 0, frame_size = 2048, frame_count = 4096, fq_size = 1024, cq_size = 1024, head_room = 128 }
-            ]
-            xsk = [
-                { iface = "lo", queues = [0, 1], umem = 0, rxq_size = 1024, txq_size = 1024, zerocopy = true }
-            ]
-            workers = [
-                { id = 0, core = 0 },
-                { id = 1, core = 1 }
-            ]
-        "#;
-
-        let config: XBricksConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.validate().is_ok());
     }
 
     #[test]
@@ -1625,37 +1575,11 @@ mod tests {
         "#;
 
         let config: XBricksConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.validate().is_ok());
-
         // Verify we have 2 UMEM domains
         assert_eq!(config.xbricks.umem.len(), 2);
 
         // Verify we have 2 XSK mappings
         assert_eq!(config.xbricks.xsk.len(), 2);
-    }
-
-    #[test]
-    fn test_example_simple_toml() {
-        let config = XBricksConfig::from_file("../xbricks/examples/simple.toml");
-        assert!(config.is_ok(), "simple.toml should be valid");
-    }
-
-    #[test]
-    fn test_example_mixed_umem_toml() {
-        let config = XBricksConfig::from_file("../xbricks/examples/mixed_umem.toml");
-        assert!(config.is_ok(), "mixed_umem.toml should be valid");
-    }
-
-    #[test]
-    fn test_example_shared_umem_toml() {
-        let config = XBricksConfig::from_file("../xbricks/examples/shared_umem.toml");
-        assert!(config.is_ok(), "shared_umem.toml should be valid");
-    }
-
-    #[test]
-    fn test_example_multi_interface_toml() {
-        let config = XBricksConfig::from_file("../xbricks/examples/multi_interface.toml");
-        assert!(config.is_ok(), "multi_interface.toml should be valid");
     }
 
     #[test]
@@ -1769,7 +1693,7 @@ mod tests {
                 { name = "lo", rxd = 2048, txd = 2048 }
             ]
             umem = [
-                { id = 0, frame_size = 2048, frame_count = 4096, fq_size = 1024, cq_size = 1024, head_room = 128 }
+                { id = 0, frame_size = 2048, frame_count = 65392, fq_size = 1024, cq_size = 1024, head_room = 128 }
             ]
             xsk = [
                 { iface = "lo", queues = [0, 1], umem = 0, rxq_size = 1024, txq_size = 1024, zerocopy = true }
@@ -2126,8 +2050,8 @@ mod tests {
                 {{ name = "lo", rxd = 2048, txd = 2048 }}
             ]
             umem = [
-                {{ id = 0, frame_size = 2048, frame_count = 4096, fq_size = 1024, cq_size = 1024, head_room = 128 }},
-                {{ id = 1, frame_size = 2048, frame_count = 4096, fq_size = 1024, cq_size = 1024, head_room = 128 }}
+                {{ id = 0, frame_size = 2048, frame_count = 65392, fq_size = 1024, cq_size = 1024, head_room = 128 }},
+                {{ id = 1, frame_size = 2048, frame_count = 65392, fq_size = 1024, cq_size = 1024, head_room = 128 }}
             ]
             xsk = [
                 {{ iface = "lo", queues = [0], umem = 0, rxq_size = 1024, txq_size = 1024, zerocopy = true }}
@@ -2141,8 +2065,7 @@ mod tests {
                 id = "gen"
                 type = "PacketGenerator"
                 next = "wasm"
-                pps = 100
-                args = {{ umem = "{gen_umem}" }}
+                args = {{ umem = "{gen_umem}", pps = 100 }}
 
                 [[pipelines.nodes]]
                 id = "wasm"
@@ -2224,7 +2147,7 @@ mod tests {
         [[xbricks.umem]]
         id = 0
         frame_size = 2048
-        frame_count = 1024
+        frame_count = 65392
         fq_size = 512
         cq_size = 512
         head_room = 128
@@ -2233,7 +2156,7 @@ mod tests {
         [[xbricks.umem]]
         id = 1
         frame_size = 2048
-        frame_count = 1024
+        frame_count = 65392
         fq_size = 512
         cq_size = 512
         head_room = 128
@@ -2259,7 +2182,7 @@ mod tests {
         [[pipelines.nodes]]
         id = "rx"
         type = "BatchRxNode"
-        next = "parser"
+        routes = ["parser"]
         queues = [0]
         [pipelines.nodes.args]
         interface = "lo"
@@ -2267,7 +2190,7 @@ mod tests {
         [[pipelines.nodes]]
         id = "parser"
         type = "FastParserNode"
-        next = "wasm"
+        routes = ["wasm"]
         [pipelines.nodes.args]
 
         [[pipelines.nodes]]

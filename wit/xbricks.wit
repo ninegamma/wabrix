@@ -9,8 +9,8 @@ interface inspector {
     inspect-batch: func(batch-bytes: list<u8>, partition-offset: u32) -> list<u32>;
 }
 
-/// The interface for nodes that runs a TCP stack.
-interface tcp-stack {
+/// The interface for nodes that inspect and modify packets, e.g. running a TCP stack.
+interface packet-engine {
     /// Called once at startup with admin key/value data from the node config (wasm_data field)
     init-data: func(data: list<tuple<string, string>>);
 
@@ -39,6 +39,6 @@ world generator-plugin {
 }
 
 /// The World definition for a Generator plugin
-world tcp-plugin {
-    export tcp-stack;
+world engine-plugin {
+    export packet-engine;
 }

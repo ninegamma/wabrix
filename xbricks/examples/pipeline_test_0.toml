@@ -24,7 +24,7 @@ ifaces = [
 
 umem = [
     # UMEM 0: Shared memory region for both interfaces
-    { id = 0, frame_size = 2048, frame_count = 16384, fq_size = 4096, cq_size = 4096, head_room = 128, partitions= 4 },
+    { id = 0, frame_size = 2048, frame_count = 130784, fq_size = 4096, cq_size = 4096, head_room = 128, partitions= 4 },
 ]
 
 # XSK socket configuration (core affinity is derived from worker assignments)
@@ -58,7 +58,6 @@ workers = [0, 1]
     id = "l2_reflector.classifier"
     type = "ClassifierNode"
     routes = ["l2_reflector.mac_swapper", "l2_reflector.drop_sink"]
-    default = "l2_reflector.drop_sink"
     args = { algo = "ipv4_filter" }
 
     # --- Node 3: Transformer ---

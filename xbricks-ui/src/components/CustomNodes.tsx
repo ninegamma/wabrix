@@ -333,6 +333,124 @@ export function PipelineHeaderNode({ data }: NodeProps<PipelineHeaderNodeType>) 
 }
 
 // ==========================================
+// 4b. GENERATOR STATS POPOVER
+// ==========================================
+const GeneratorStatsPopover = ({ nodeId, onClose }: { nodeId: string; onClose: () => void }) => {
+    const [stats, setStats] = useState<TMLiveStats | null>(null);
+    const [offset, setOffset] = useState({ x: 0, y: 0 });
+    const dragOrigin = useRef<{ mx: number; my: number; ox: number; oy: number } | null>(null);
+
+    useEffect(() => {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const socket = new WebSocket(`${protocol}//${window.location.host}/api/ws/telemetry`);
+        socket.onmessage = (event) => {
+            try {
+                const s: TMLiveStats = JSON.parse(event.data);
+                if (s.tmstats_name === nodeId) setStats(s);
+            } catch (err) {
+                console.error('Generator stats parse error', err);
+            }
+        };
+        return () => { if (socket.readyState === WebSocket.OPEN) socket.close(); };
+    }, [nodeId]);
+
+    const onHeaderMouseDown = (e: React.MouseEvent) => {
+        e.stopPropagation();
+        dragOrigin.current = { mx: e.clientX, my: e.clientY, ox: offset.x, oy: offset.y };
+        const onMove = (ev: MouseEvent) => {
+            if (!dragOrigin.current) return;
+            setOffset({
+                x: dragOrigin.current.ox + (ev.clientX - dragOrigin.current.mx),
+                y: dragOrigin.current.oy + (ev.clientY - dragOrigin.current.my),
+            });
+        };
+        const onUp = () => {
+            dragOrigin.current = null;
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup', onUp);
+        };
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+    };
+
+    // labels: total_generated[0], pkts_this_run[1], total_cycles[2], pps_last_run[3]
+    // total_cycles is summed across workers by the telemetry system, so dividing by
+    // the summed total_generated gives the correct per-packet average for any worker count.
+    const totalGen   = stats ? Number(stats.counters_pkts[0] ?? 0) : null;
+    const thisRun    = stats ? Number(stats.counters_pkts[1] ?? 0) : null;
+    const totalCycles = stats ? Number(stats.counters_pkts[2] ?? 0) : null;
+    const avgCycles  = (totalGen && totalGen > 0 && totalCycles !== null)
+        ? Math.round(totalCycles / totalGen) : null;
+    const ppsRaw     = stats ? Number(stats.counters_pkts[3] ?? 0) : null;
+
+    const formatPps = (pps: number): string => {
+        if (pps >= 1_000_000) return Number((pps / 1_000_000).toPrecision(5)) + 'M';
+        if (pps >= 1_000)     return Number((pps / 1_000).toPrecision(5)) + 'k';
+        return pps.toFixed(0);
+    };
+
+    return (
+        <div className="nodrag" style={{
+            position: 'absolute',
+            top: `calc(-172px + ${offset.y}px)`,
+            left: `calc(50% + ${offset.x}px)`,
+            transform: 'translateX(-50%)',
+            background: '#0f172a',
+            border: '1px solid #f59e0b',
+            borderRadius: '8px',
+            padding: '10px',
+            width: '200px',
+            color: '#f8fafc',
+            boxShadow: '0 10px 25px rgba(0,0,0,0.5)',
+            zIndex: 1000,
+            userSelect: 'none',
+        }}>
+            <div onMouseDown={onHeaderMouseDown} style={{
+                display: 'flex', justifyContent: 'space-between',
+                marginBottom: '8px', borderBottom: '1px solid #333', paddingBottom: '4px',
+                cursor: 'grab',
+            }}>
+                <span style={{ fontSize: '10px', color: '#f59e0b' }}>&#x1f4ca; GENERATOR STATS</span>
+                <button
+                    onMouseDown={e => e.stopPropagation()}
+                    onClick={onClose}
+                    style={{ background: 'transparent', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: '12px' }}
+                >✖</button>
+            </div>
+
+            {stats ? (
+                <div style={{ fontSize: '12px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                        <span style={{ color: '#94a3b8' }}>total gen'd:</span>
+                        <strong style={{ color: '#10b981' }}>{totalGen !== null ? totalGen.toLocaleString() : '—'}</strong>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                        <span style={{ color: '#94a3b8' }}>this run:</span>
+                        <strong style={{ color: '#60a5fa' }}>{thisRun !== null ? thisRun.toLocaleString() : '—'}</strong>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                        <span style={{ color: '#94a3b8' }}>avg cycles/pkt:</span>
+                        <strong style={{ color: '#f59e0b' }}>
+                            {avgCycles !== null && avgCycles > 0 ? avgCycles.toLocaleString() : 'n/a'}
+                        </strong>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <span style={{ color: '#94a3b8' }}>pps:</span>
+                        <strong style={{ color: '#a78bfa' }}>
+                            {ppsRaw !== null && ppsRaw > 0 ? formatPps(ppsRaw) : 'n/a'}
+                        </strong>
+                    </div>
+                </div>
+            ) : (
+                <div style={{ fontSize: '11px', color: '#64748b', textAlign: 'center' }}>
+                    Waiting for data...
+                </div>
+            )}
+        </div>
+    );
+};
+
+// ==========================================
 // 4. PIPELINE NODE (generic for all node types)
 // ==========================================
 
@@ -424,7 +542,9 @@ export function PipelineNode({ data, id }: NodeProps<PipelineNodeType>) {
             />
 
             {showTelemetry && (
-                <TelemetryPopover ifaceName={data.id} onClose={closeTelemetry} />
+                data.type === 'PacketGenerator'
+                    ? <GeneratorStatsPopover nodeId={data.id} onClose={closeTelemetry} />
+                    : <TelemetryPopover ifaceName={data.id} onClose={closeTelemetry} />
             )}
 
             <Handle type="target" position={Position.Left} style={{ background: colors.handle }} />
