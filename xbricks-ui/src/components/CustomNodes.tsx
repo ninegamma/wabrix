@@ -499,6 +499,7 @@ export function PipelineNode({ data, id }: NodeProps<PipelineNodeType>) {
     const defaultRoute = data.default ?? null;
     const next = data.next ?? null;
     const args = data.args && Object.keys(data.args).length > 0 ? data.args : null;
+    const hotArgs = (data as any).hot_args && Object.keys((data as any).hot_args).length > 0 ? (data as any).hot_args as Record<string, string> : null;
 
     // Collect all outgoing connection points (deduplicated, preserving order)
     const outgoing: { id: string; label: string }[] = [];
@@ -571,6 +572,15 @@ export function PipelineNode({ data, id }: NodeProps<PipelineNodeType>) {
                     </div>
                 ))}
             </div>
+            {hotArgs && (
+                <div style={{ fontSize: '11px', lineHeight: '1.6', color: colors.border, marginTop: '4px' }}>
+                    {Object.entries(hotArgs).map(([k, v]) => (
+                        <div key={k}>
+                            <strong style={{ color: colors.border }}>{k}:</strong>{' '}{v}
+                        </div>
+                    ))}
+                </div>
+            )}
 
             {data.type === 'DropNode' && (
                 <div style={{

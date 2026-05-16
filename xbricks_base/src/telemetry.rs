@@ -114,6 +114,30 @@ pub fn spawn_pipeline_telemetry(
     Ok(())
 }
 
+pub fn spawn_telemetry_ice_for_ifaces(
+    telemetry_tx: Sender<TMLiveStats>,
+    ifaces: &[String],
+    shutdown_signal: Arc<AtomicBool>,
+) -> anyhow::Result<()> {
+    for iface in ifaces {
+        let is_ice = std::process::Command::new("ethtool")
+            .args(["-i", iface])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| {
+                String::from_utf8(o.stdout).ok()?.lines()
+                    .find_map(|l| l.strip_prefix("driver: ").map(|d| d.trim() == "ice"))
+            })
+            .unwrap_or(false);
+
+        if is_ice {
+            spawn_telemetry_ice(telemetry_tx.clone(), iface.clone(), shutdown_signal.clone())?;
+        }
+    }
+    Ok(())
+}
+
 pub fn spawn_telemetry_ice(telemetry_tx: Sender<TMLiveStats>, iface_name: String, shutdown_signal: Arc<AtomicBool>) -> anyhow::Result<()> {
     tokio::spawn(async move {
         // Persistent tracking variables (Absolute counters from ethtool)

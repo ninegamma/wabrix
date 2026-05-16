@@ -1,14 +1,35 @@
 use arc_swap::ArcSwap;
 use std::collections::HashMap;
+use std::net::Ipv4Addr;
 use std::sync::Arc;
+use macaddr::{MacAddr6};
+use serde::{Deserialize, Serialize};
 use xbricks_base::NodeId;
+use crate::generator_node::GenState;
 
-/// Represents the mutable parameters of a single pipeline node
+/// Strongly typed states for specific node types
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub enum NodeDynamicState {
+    Generator {
+        state: GenState,
+        pps_limit: u64,
+        packet_limit: usize,
+        dst_ip: Ipv4Addr,
+        dst_mac: MacAddr6,
+        batch_size: usize,
+    },
+    Inspector {
+        drop_probability: f32,
+    },
+    #[default]
+    Static,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct HotNodeData {
     pub routes: Vec<NodeId>,
-    // For things like changing telemetry buckets, or specific node args on the fly
-    pub args: HashMap<String, String>,
+    // REPLACED HashMap with a strongly typed Enum!
+    pub dynamic_state: NodeDynamicState,
 }
 
 /// The overarching lock-free configuration that workers read

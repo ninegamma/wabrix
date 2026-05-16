@@ -150,6 +150,19 @@ impl WPdu {
     pub fn base_addr(&self, umem_addr: usize) -> usize {
         umem_addr + self.local_frame_offset() 
     }
+    #[inline(always)]
+    pub fn is_a_tick(&self, umem_addr: usize) -> bool {
+        // 1. Safety Guard: Ensure the frame is long enough to have an EtherType
+        if self.desc_len < 14 {
+            return false;
+        }
+        let ethertype = u16::from_be_bytes([
+            unsafe { *self.data_ptr(umem_addr).add(12) },
+            unsafe { *self.data_ptr(umem_addr).add(13) }
+        ]);
+        // check for "Local Experimental EtherType (0x88B5)"
+        ethertype == 0x88B5
+    }
     #[inline]
     pub fn headers(&self) -> &HeaderStack {
         &self.header_stack

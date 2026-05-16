@@ -4,6 +4,7 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use log::{info, warn};
+use serde::{Deserialize, Serialize};
 use macaddr::MacAddr6;
 use network_types::eth::EtherType;
 use rand::prelude::SmallRng;
@@ -13,7 +14,7 @@ use xbricks_base::{Directive, Node, NodeId};
 use xbricks_base::frame_registry::get_worker_frame_registry;
 use xbricks_base::interface::batch::Batch;
 use xbricks_protocol::headers::{EndOffset, Header, IpHeader, MacHeader, TcpHeader};
-use crate::config::hot_config::SharedSystemState;
+use crate::config::hot_config::{NodeDynamicState, SharedSystemState};
 // WASM Imports
 #[cfg(feature = "wasm")]
 use wasmtime::Store;
@@ -21,6 +22,7 @@ use wasmtime::Store;
 use wasmtime::component::{bindgen, ResourceTable};
 #[cfg(feature = "wasm")]
 use wasmtime_wasi::WasiCtxBuilder;
+use xbricks_base::system::PlatformData;
 #[cfg(feature = "wasm")]
 use xbricks_wasm::wasm_manager::{MyHostState, WasmManager};
 
@@ -88,10 +90,11 @@ pub struct GeneratorNode {
     bindings: Option<GeneratorPlugin>,
     #[cfg(feature = "wasm")]
     partition_start_bytes: u32,
+    platform_data: PlatformData
 }
 
-#[derive(PartialEq, Debug)]
-enum GenState {
+#[derive(PartialEq, Debug, Clone, Serialize, Deserialize)]
+pub enum GenState {
     Idle,
     Generating,
     Finished,
@@ -121,6 +124,7 @@ impl GeneratorNode {
         #[cfg(feature = "wasm")] wasm_file_path: Option<&str>,
         #[cfg(feature = "wasm")] partition_start_bytes: u32,
         #[cfg(feature = "wasm")] wasm_data: std::collections::HashMap<String, String>,
+        platform_data: PlatformData,
     ) -> Self {
 
         #[cfg(feature = "wasm")]
@@ -191,6 +195,7 @@ impl GeneratorNode {
             bindings,
             #[cfg(feature = "wasm")]
             partition_start_bytes,
+            platform_data
         }
     }
 
@@ -297,43 +302,53 @@ impl Node for GeneratorNode {
         // =========================================================
         // 1. DYNAMIC HOT-CONFIG (GUI CONTROL)
         // =========================================================
+        let b_dst_changed=false;
         if let Some(rcu) = self.shared_state.pipelines.get(&self.pipeline_name) {
             let hot_config = rcu.load();
             if let Some(idx) = hot_config.name_to_index.get(&self.id.id) {
-                let node_data = &hot_config.fast_nodes[*idx];
-
-                // Process start/stop commands from the frontend
-                if let Some(cmd) = node_data.args.get("cmd") {
-                    // EDGE-TRIGGER: Only start if we are explicitly Idle!
-                    if cmd == "start" && self.state == GenState::Idle {
-                        self.state = GenState::Generating;
-                        self.packets_generated_this_run = 0;
-                        self.tm_this_run.store(0, Ordering::Relaxed);
-                        self.tm_pps.store(0, Ordering::Relaxed);
-                        self.finished = false;
-
-                        // Reset burst timers for accurate PPS on subsequent runs
-                        self.first_burst_timestamp = 0;
-                        self.first_burst_instant = None;
-                        self.last_burst_timestamp = 0;
-                        self.last_burst_instant = None;
-                        self.lastbatch_timestamp = 0;
-
-                        log::info!("PacketGenNode {}: GUI triggered START!", self.id);
+                let dynamic_state = &hot_config.fast_nodes[*idx].dynamic_state;
+                // Match cleanly on our specific node state
+                if let NodeDynamicState::Generator { state, pps_limit, packet_limit, batch_size, dst_ip, dst_mac } = dynamic_state {
+                    self.batch_size = *batch_size;
+                    let b_dst_changed = self.dst_ip != *dst_ip || self.dst_mac != *dst_mac;
+                    if b_dst_changed {
+                        self.dst_ip = *dst_ip;
+                        self.dst_mac = *dst_mac;
                     }
-                    // RESET LATCH: Any time we receive 'stop', reset back to Idle
-                    else if cmd == "stop" && self.state != GenState::Idle {
-                        self.state = GenState::Idle;
-                        log::info!("PacketGenNode {}: GUI triggered STOP! Reset to Idle.", self.id);
+                    // Instantly apply hot updates!
+                    if self.state != *state {
+                        log::info!("Generator {} state changed to {:?}, pps_limit: {}, packet_limit: {}", self.id, state, pps_limit, packet_limit);
+                        if *state == GenState::Generating && self.state == GenState::Idle {
+                            self.packets_generated_this_run = 0;
+                            self.tm_this_run.store(0, Ordering::Relaxed);
+                            self.tm_pps.store(0, Ordering::Relaxed);
+                            self.finished = false;
+
+                            // Reset burst timers for accurate PPS on subsequent runs
+                            self.first_burst_timestamp = 0;
+                            self.first_burst_instant = None;
+                            self.last_burst_timestamp = 0;
+                            self.last_burst_instant = None;
+                            self.lastbatch_timestamp = 0;
+
+                            log::info!("PacketGenNode {}: GUI triggered START!", self.id);
+                        }
+                        // RESET LATCH: Any time we receive 'stop', reset back to Idle
+                        else if *state == GenState::Idle && self.state != GenState::Idle {
+                            log::info!("PacketGenNode {}: GUI triggered STOP! Reset to Idle.", self.id);
+                        }
+                        self.state = state.clone();
                     }
+
+                    // If the user changed the PPS in the GUI, recalculate the gap
+                    let new_gap = (self.platform_data.tsc_frequency / *pps_limit * self.batch_size as u64).saturating_sub(2000);
+                    if new_gap != self.min_interbatch_gap {
+                        self.min_interbatch_gap = new_gap;
+                    }
+                    self.packets_to_generate = *packet_limit;
                 }
+                
 
-                // Allow dynamic adjustment of the packet limit mid-run
-                if let Some(new_limit) = node_data.args.get("packets_to_generate") {
-                    if let Ok(limit) = new_limit.parse::<usize>() {
-                        self.packets_to_generate = limit;
-                    }
-                }
             }
         }
 
@@ -427,6 +442,21 @@ impl Node for GeneratorNode {
 
         #[cfg(feature = "wasm")]
         let wasm_lengths = if let (Some(store), Some(bindings)) = (&mut self.store, &self.bindings) {
+            if b_dst_changed {
+                let [i0, i1, i2, i3] = self.dst_ip.octets();
+                let [m0, m1, m2, m3, m4, m5] = self.dst_mac.into_array();
+                let _ = bindings
+                    .xbricks_plugins_generator()
+                    .call_set_dst(
+                        &mut *store, //REBORROW as we still need store later on
+                        (m0, m1, m2, m3, m4, m5),
+                        (i0, i1, i2, i3),
+                    )
+                    .unwrap_or_else(|e| {
+                        log::error!("WASM Generator failed to set destination: {}", e);
+                    });
+            }
+
             let active_bytes = allocated * size_of::<Pdu>();
             let batch_bytes: &[u8] = unsafe {
                 std::slice::from_raw_parts(self.scratch_pdus.as_ptr() as *const u8, active_bytes)

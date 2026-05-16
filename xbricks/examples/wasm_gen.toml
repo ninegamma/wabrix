@@ -1,0 +1,82 @@
+[xbricks]
+ifaces= [
+    { name = "enp2s0f0np0", rxd = 8096, txd = 2048, irq_core = 8 },
+]
+umem= [
+    { id = 0, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 16384, head_room = 128, partitions = 2, reserved = 30720 },
+]
+xsk= [
+    { iface = "enp2s0f0np0", queues = [0, 1], umem = 0, rxq_size = 16384, txq_size = 4096, zerocopy = true, xdp_mode = "auto" },
+]
+workers= [
+    { id = 0, core = 9, partitions = [{ umem = 0, count = 1 }] },
+    { id = 1, core = 7, partitions = [{ umem = 0, count = 1 }] },
+]
+
+# ===================================================================
+# PIPELINE: GENERATOR
+# ===================================================================
+[[pipelines]]
+name = "generator"
+workers = [0, 1]
+
+[[pipelines.nodes]]
+id = "nd_transmitter"
+type = "BatchTxNode"
+routes = []
+queues = [0, 1]
+args= { interface = "enp2s0f0np0" }
+
+[pipelines.nodes.hot_args]
+
+[[pipelines.nodes]]
+id = "pctgen"
+type = "PacketGenerator"
+routes = ["nd_transmitter"]
+args= { wasm_file_path = "/home/rainer1956/rust/xbrix/target/wasm32-wasip2/release/generator_plugin.wasm", no-zerocopy = "false", umem = "0" }
+
+[pipelines.nodes.hot_args]
+dst_mac = "44:49:88:06:63:39"
+pps = "1024"
+packet_count = "2560"
+batch_size = "256"
+dst_ip = "192.168.177.222"
+
+[pipelines.nodes.wasm_data]
+rng_seed = "235467"
+dst_ip = "192.168.177.222"
+dst_mac = "44:49:88:06:63:39"
+src_ip = "192.168.177.224"
+src_mac = "44:49:88:06:63:38"
+
+[layout.worker_0]
+x = 262.4983
+y = 616.6007
+
+[layout.xsk_0]
+x = 6.279859
+y = 567.0307
+
+[layout."generator/pctgen"]
+x = 134.70758
+y = 811.1028
+
+[layout.worker_1]
+x = 491.19455
+y = 619.1127
+
+[layout."pipeline_header/generator"]
+x = -116.14764
+y = 883.3853
+
+[layout.umem_0]
+x = 254.03413
+y = 322.78497
+
+[layout.iface_enp2s0f0np0]
+x = 3.7679086
+y = 324.04095
+
+[layout."generator/nd_transmitter"]
+x = 515.769
+y = 881.15466

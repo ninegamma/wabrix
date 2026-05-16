@@ -121,6 +121,24 @@ impl Guest for MyGenerator {
         SEQ_COUNTER.store(0, Ordering::Relaxed);
     }
 
+    fn set_dst(
+        mac: (u8, u8, u8, u8, u8, u8),
+        ip: (u8, u8, u8, u8),
+    ) {
+        // Reconstruct into native arrays
+        let ip_bytes: [u8; 4] = [ip.0, ip.1, ip.2, ip.3];
+        let mac_bytes: [u8; 6] = [mac.0, mac.1, mac.2, mac.3, mac.4, mac.5];
+
+        // 1. Lock the global mutex
+        let mut config_guard = CONFIG.lock();
+
+        // 2. If the config has been initialized, modify the fields in place
+        if let Some(config) = config_guard.as_mut() {
+            config.dst_ip = Some(ip_bytes);
+            config.dst_mac = Some(mac_bytes);
+        }
+    }
+
     fn generate_batch(mut batch_bytes: Vec<u8>, partition_offset: u32) -> Vec<u32> {
         let pdus = Pdu0::slice_from_bytes(&mut batch_bytes);
 

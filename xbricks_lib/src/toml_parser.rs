@@ -278,8 +278,20 @@ pub struct NodeConfig {
     pub labels: Option<Vec<String>>,
     #[serde(default, deserialize_with = "deserialize_args")]
     pub args: HashMap<String, String>,
+    /// Hot-updatable args: parsed once at startup, then mirrored into the typed
+    /// NodeDynamicState for the fast path. Values here take precedence over `args`.
+    #[serde(default, deserialize_with = "deserialize_args")]
+    pub hot_args: HashMap<String, String>,
     #[serde(default, deserialize_with = "deserialize_wasm_data")]
     pub wasm_data: Option<HashMap<String, String>>,
+}
+
+
+impl NodeConfig {
+    /// Returns the value for `key` from `hot_args` if present, otherwise from `args`.
+    pub fn effective_arg(&self, key: &str) -> Option<&String> {
+        self.hot_args.get(key).or_else(|| self.args.get(key))
+    }
 }
 
 /// Represents a specific instance of a pipeline assigned to a worker.
@@ -298,7 +310,7 @@ pub struct WorkerBuilderConfig {
     pub pipelines: Vec<PipelineInstance>, // List of pipelines this worker runs
 }
 
-pub(crate) fn parse_pps(pps_str: &str) -> Result<u64> {
+pub fn parse_pps(pps_str: &str) -> Result<u64> {
     let s = pps_str.to_lowercase();
 
     // 1. Handle the "max" case
@@ -461,7 +473,7 @@ impl XBricksConfig {
                             let mut args = HashMap::new();
                             args.insert("umem".to_string(), "0".to_string());
                             args.insert("batch_size".to_string(), batch_sz.to_string());
-                            args.insert("packets_to_generate".to_string(), packets_for_this_worker.to_string());
+                            args.insert("no-packets".to_string(), packets_for_this_worker.to_string());
                             args.insert("pps".to_string(), pps_per_worker.to_string());
                             args.insert("autostart".to_string(), "true".to_string());
                             if let Some(ip) = dst_ip {
@@ -472,6 +484,7 @@ impl XBricksConfig {
                             }
                             args
                         },
+                        hot_args: HashMap::new(),
                         wasm_data: None,
                     },
                     // Node 2: BatchTxNode sink
@@ -487,6 +500,7 @@ impl XBricksConfig {
                             args.insert("interface".to_string(), self.xbricks.ifaces[0].name.clone());
                             args
                         },
+                        hot_args: HashMap::new(),
                         wasm_data: None,
                     },
                 ],
@@ -873,7 +887,7 @@ impl XBricksConfig {
                 // Validate PacketGenerator specific requirements
                 if node.node_type == "PacketGenerator" {
                     // Accept pps from args (e.g. args = { pps = "1M" })
-                    match node.args.get("pps") {
+                    match node.effective_arg("pps") {
                         None => {
                             return Err(anyhow!(
                                 "Pipeline '{}': node '{}' (PacketGenerator) requires 'pps' parameter",
@@ -1370,6 +1384,7 @@ impl XBricksConfig {
                         queues: Some(assigned_queue),
                         labels: node_conf.labels.clone(),
                         args: node_conf.args.clone(),
+                        hot_args: node_conf.hot_args.clone(),
                         wasm_data: node_conf.wasm_data.clone(),
                     });
                 }

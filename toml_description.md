@@ -1,0 +1,360 @@
+# XBricks TOML Configuration Reference
+
+The xbricks configuration file (default: `xbricks.toml`) is passed via the `-c/--config` flag.
+It has three top-level sections: `[xbricks]`, `[[pipelines]]`, and `[layout]`.
+
+---
+
+## Top-Level Structure
+
+```toml
+[xbricks]          # required — hardware and memory infrastructure
+[[pipelines]]      # optional (array) — packet processing graphs
+[layout]           # optional — UI node positions, managed by the frontend
+```
+
+---
+
+## [xbricks] — Infrastructure
+
+All four sub-keys have defaults, but in practice `umem`, `xsk`, and `workers` must be set explicitly for any real workload.
+
+### xbricks.ifaces — Interface Declarations
+
+Array of network interfaces used by xbricks. Non-veth interfaces must exist on the system.
+
+Default: `[{ name = "lo" }]`
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | **yes** | Interface name (e.g. `"enp2s0f0np0"`). Must be unique. |
+| `rxd` | integer | no | NIC RX descriptor ring size. |
+| `txd` | integer | no | NIC TX descriptor ring size. |
+| `irq_core` | integer | no | CPU core for NIC interrupt affinity. |
+| `type` | string | no | Set to `"veth"` to create a virtual ethernet pair. |
+| `peer` | string | no | Peer interface name. Required when `type = "veth"`. |
+| `namespace` | string | no | Network namespace for the peer. Required for veth unless `master` is set. |
+| `master` | string | no | Bridge master interface. Alternative to `namespace` for veth. |
+| `mac_if` | string | no | MAC address source interface (veth inherits its MAC from this). |
+| `ipnet` | string | no | IP address and prefix length assigned to the interface, e.g. `"192.168.1.1/24"`. |
+| `checksum_offload` | boolean | no | Enable TX checksum offload. Default `false`. For veth, targets the peer. |
+
+**Validation:** Non-veth interfaces are checked via `ip link show`. Veth interfaces require `peer` and either `namespace` or `master`.
+
+**Example:**
+```toml
+ifaces = [
+    { name = "enp2s0f0np0", rxd = 8160, txd = 4096, irq_core = 8 },
+    { name = "veth_xbricks", type = "veth", namespace = "ns-xbricks",
+      peer = "tap-veth", mac_if = "enp2s0f0np0", ipnet = "192.168.177.222/24" },
+]
+```
+
+---
+
+### xbricks.umem — User Memory Regions
+
+Array of AF_XDP UMEM (shared packet buffer) configurations. At least one is required.
+
+Default: one entry with `id=0`, `frame_size=2048`, `frame_count=65536`, `fq_size=8192`, `cq_size=8192`, `head_room=128`, `partitions=1`.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `id` | integer | **yes** | Unique UMEM identifier. Must be 0–255. |
+| `frame_size` | integer | **yes** | Size in bytes of each frame. Must be a power of 2 and > 0. |
+| `frame_count` | integer | **yes** | Total number of frames in the UMEM. Must be > 0. Usable frames (`frame_count - reserved`) must be evenly divisible by `partitions`. |
+| `fq_size` | integer | **yes** | Fill queue ring size. Must be > 0. |
+| `cq_size` | integer | **yes** | Completion queue ring size. Must be > 0. |
+| `head_room` | integer | **yes** | Reserved bytes at the start of each frame for metadata headers. Must be < `frame_size`. |
+| `partitions` | integer | no | Number of memory partitions (one per worker). Default `1`. Must be a power of 2 and ≥ 1. |
+| `reserved` | integer | no | Number of frames exclusively reserved for WASM plugins. Default `0`. Must be < `frame_count`. |
+
+**Sizing guidance:** `frame_count` must cover hardware-locked frames (`fq_size + rxq_size + txq_size` per socket) plus `reserved`, plus at least ~4096 frames per partition for the application.
+
+**Example:**
+```toml
+umem = [
+    { id = 0, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 16384,
+      head_room = 128, partitions = 4, reserved = 30720 },
+]
+```
+
+---
+
+### xbricks.xsk — XDP Socket Mappings
+
+Array of AF_XDP socket bindings. At least one is required.
+
+Default: `[{ iface = "lo", queues = [0], umem = 0, rxq_size = 8192, txq_size = 8192, zerocopy = true, xdp_mode = "auto" }]`
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `iface` | string | **yes** | Interface name. Must match an entry in `ifaces`. |
+| `queues` | array of integers | **yes** | Hardware queue IDs to bind (non-empty). |
+| `umem` | integer | **yes** | UMEM `id` to attach this socket to. Must exist in `umem`. |
+| `rxq_size` | integer | **yes** | RX ring size. Must be a power of 2 and > 0. |
+| `txq_size` | integer | **yes** | TX ring size. Must be a power of 2 and > 0. |
+| `zerocopy` | boolean | **yes** | Enable AF_XDP zero-copy mode. Requires driver support; use `false` for veth. |
+| `xdp_mode` | string | no | XDP attachment mode: `"native"`, `"skb"`, or `"auto"`. Default `"auto"`. |
+
+**Example:**
+```toml
+xsk = [
+    { iface = "enp2s0f0np0", queues = [0, 1], umem = 0, rxq_size = 4096, txq_size = 4096,
+      zerocopy = true, xdp_mode = "auto" },
+    { iface = "veth_xbricks", queues = [0], umem = 1, rxq_size = 2048, txq_size = 2048,
+      zerocopy = false },
+]
+```
+
+---
+
+### xbricks.workers — Worker Thread Configuration
+
+Array of worker threads. At least one is required.
+
+Default: one worker with `id=0`, `core=0`, `partitions=[{ umem=0, count=1 }]`.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `id` | integer | **yes** | Unique worker identifier. |
+| `core` | integer | **yes** | Logical CPU core to pin this worker to. Must be < total available cores. |
+| `partitions` | array of objects | no | UMEM partition requests (see below). Default `[]`. |
+
+Each element of `partitions`:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `umem` | integer | **yes** | UMEM `id` to request partitions from. |
+| `count` | integer | **yes** | Number of partitions to claim. Must be > 0 and ≤ the UMEM's `partitions` value. Total across all workers cannot exceed the UMEM's `partitions`. |
+
+**Example:**
+```toml
+workers = [
+    { id = 0, core = 9,  partitions = [{ umem = 0, count = 1 }] },
+    { id = 1, core = 10, partitions = [{ umem = 0, count = 1 }, { umem = 1, count = 1 }] },
+]
+```
+
+---
+
+## [[pipelines]] — Packet Processing Pipelines
+
+Each pipeline is a directed processing graph. Pipelines are optional; there is no default.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | **yes** | Pipeline name. Should be unique. |
+| `workers` | array of integers | **yes** | Worker IDs this pipeline runs on. Non-empty. Each worker gets its own instance. |
+| `nodes` | array of node tables | **yes** | Processing nodes (non-empty). |
+
+---
+
+### [[pipelines.nodes]] — Processing Nodes
+
+Each pipeline contains an array of node tables declared with `[[pipelines.nodes]]`.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `id` | string | **yes** | Node identifier, unique within the pipeline. |
+| `type` | string | **yes** | Node type (see node types below). |
+| `routes` | array of strings | no | Node IDs that receive packets from this node. Default `[]`. All referenced IDs must exist in the same pipeline. |
+| `queues` | array of integers | no | Hardware queue IDs. Length must equal the pipeline's `workers` array length; `queues[i]` maps to `workers[i]`. Required for `BatchRxNode` and `BatchTxNode` when binding to a hardware queue. |
+| `labels` | array of strings | no | Metric label names (used by `WasmInspectorNode`). |
+| `args` | inline table | no | Node-specific key/value arguments. Values may be strings, integers, floats, or booleans (non-string values are coerced to strings). Default `{}`. |
+| `wasm_data` | inline table | no | Initial state/configuration passed into WASM modules. Same value types as `args`. |
+
+---
+
+### Node Types
+
+#### `BatchRxNode` — Hardware RX source
+
+Receives packets from an AF_XDP socket.
+
+| `args` key | Required | Description |
+|------------|----------|-------------|
+| `interface` | **yes** | Interface name (must be in `ifaces`). |
+| `batch_size` | no | Maximum packets per receive call. |
+| `source_type` | no | Source type; `"xsk"` for AF_XDP (default). |
+
+---
+
+#### `BatchTxNode` — Hardware TX sink
+
+Transmits packets through an AF_XDP socket.
+
+| `args` key | Required | Description |
+|------------|----------|-------------|
+| `interface` | **yes** | Interface name (must be in `ifaces`). |
+| `sink_type` | no | Sink type; `"xsk"` for AF_XDP (default). |
+
+---
+
+#### `PacketGenerator` — Synthetic traffic source
+
+Generates packets at a configurable rate. Does not use `queues`.
+
+| `args` key | Required | Description |
+|------------|----------|-------------|
+| `pps` | **yes** | Packets per second. Accepts: plain integer (`1000`), decimal with suffix (`2.5M`, `10k`, `1G`), or `"max"` for line rate. |
+| `umem` | **yes** | UMEM `id` to allocate frames from. |
+| `batch_size` | no | Packets per generation batch. |
+| `dst_ip` | no | Destination IP address for generated packets. |
+| `dst_mac` | no | Destination MAC address for generated packets. |
+| `no-packets` | no | Total packets to generate before stopping (same format as `pps`). `0` means unlimited. |
+| `autostart` | no | `"true"` to start generating immediately. |
+| `wasm_file_path` | no | Path to a WASM module that fills packet payloads. |
+| `no-zerocopy` | no | `"true"` to disable zero-copy for this generator. |
+
+---
+
+#### `WasmEngine` — Full WASM packet processor
+
+Runs a WASM module that processes each incoming packet and routes output.
+
+| `args` key | Required | Description |
+|------------|----------|-------------|
+| `wasm_file_path` | **yes** | Absolute path to the `.wasm` module. |
+| `umem` | **yes** | UMEM `id` frames belong to. |
+
+`wasm_data` key/value pairs are passed as initial state to the WASM module.
+
+---
+
+#### `WasmInspectorNode` — WASM-based packet classifier
+
+Classifies packets with a WASM module and routes them to one of several output nodes. All upstream nodes must deliver frames from the same UMEM.
+
+| `args` key | Required | Description |
+|------------|----------|-------------|
+| `umem` | **yes** | UMEM `id` frames belong to. Must match every upstream source. |
+| `wasm_file_path` | **yes** | Absolute path to the `.wasm` classifier module. |
+
+`labels` array provides metric names for each output route (index-aligned with `routes`).
+
+---
+
+#### `FastParserNode` — Protocol header parser
+
+Parses Ethernet/IP/TCP/UDP headers and annotates frames for downstream nodes.
+
+No required `args`. Takes no `queues`.
+
+---
+
+#### `TelemetryNode` — Packet statistics collector
+
+Classifies and counts packets by a chosen algorithm.
+
+| `args` key | Required | Description |
+|------------|----------|-------------|
+| `algo` | no | Classification algorithm. `"ethertype"` counts by EtherType (IPv4/IPv6/ARP/Other). |
+| `buckets` | no | Number of statistic buckets. |
+| `labels` | no | Comma-separated label names for the buckets. |
+
+---
+
+#### `DropNode` — Packet discard sink
+
+Silently drops all received packets. No `args` or `queues`.
+
+---
+
+## [layout] — UI Layout State
+
+Stores frontend node positions. Written and read by the UI; ignored by the dataplane.
+
+Keys are strings of the form `"pipeline_name/node_id"` or infrastructure identifiers like `"worker_0"`, `"umem_0"`, `"xsk_0"`, `"iface_enp2s0f0np0"`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `x` | float | X coordinate in the canvas. |
+| `y` | float | Y coordinate in the canvas. |
+
+**Example:**
+```toml
+[layout."my_pipeline/rx_source"]
+x = 207.23
+y = 335.46
+```
+
+---
+
+## Full Configuration Example
+
+```toml
+[xbricks]
+ifaces = [
+    { name = "enp2s0f0np0", rxd = 8160, txd = 4096, irq_core = 8 },
+    { name = "enp2s0f1np1", rxd = 8160, txd = 4096, irq_core = 8 },
+]
+
+umem = [
+    { id = 0, frame_size = 2048, frame_count = 262144, fq_size = 65536,
+      cq_size = 65536, head_room = 128, partitions = 2 },
+]
+
+xsk = [
+    { iface = "enp2s0f0np0", queues = [0], umem = 0, rxq_size = 32768, txq_size = 8192, zerocopy = true },
+    { iface = "enp2s0f1np1", queues = [0], umem = 0, rxq_size = 32768, txq_size = 8192, zerocopy = true },
+]
+
+workers = [
+    { id = 0, core = 9,  partitions = [{ umem = 0, count = 1 }] },
+    { id = 1, core = 10, partitions = [{ umem = 0, count = 1 }] },
+]
+
+[[pipelines]]
+name = "wire_f0_to_f1"
+workers = [0]
+
+    [[pipelines.nodes]]
+    id = "rx"
+    type = "BatchRxNode"
+    routes = ["tx"]
+    queues = [0]
+    args = { interface = "enp2s0f0np0", batch_size = "256" }
+
+    [[pipelines.nodes]]
+    id = "tx"
+    type = "BatchTxNode"
+    queues = [0]
+    args = { interface = "enp2s0f1np1" }
+
+[[pipelines]]
+name = "wire_f1_to_f0"
+workers = [1]
+
+    [[pipelines.nodes]]
+    id = "rx"
+    type = "BatchRxNode"
+    routes = ["tx"]
+    queues = [0]
+    args = { interface = "enp2s0f1np1", batch_size = "256" }
+
+    [[pipelines.nodes]]
+    id = "tx"
+    type = "BatchTxNode"
+    queues = [0]
+    args = { interface = "enp2s0f0np0" }
+```
+
+---
+
+## Key Constraints Summary
+
+| Rule | Detail |
+|------|--------|
+| UMEM `id` | 0–255 |
+| `frame_size` | Power of 2, > 0 |
+| `partitions` | Power of 2, ≥ 1 |
+| `rxq_size` / `txq_size` | Power of 2, > 0 |
+| `head_room` | < `frame_size` |
+| `reserved` | < `frame_count` |
+| Usable frames | (`frame_count` − `reserved`) % `partitions` == 0 |
+| Worker `core` | < total logical CPUs on the system |
+| Node `queues` length | Must equal pipeline `workers` length |
+| `pps` format | Integer, decimal, `k`/`m`/`g` suffix, or `"max"` |
+| WasmInspectorNode UMEM | All upstream sources must use the same UMEM |
+| Partition allocation | Total requested across workers ≤ UMEM `partitions` |

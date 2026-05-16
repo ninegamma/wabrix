@@ -4,7 +4,7 @@ import type { Node, Edge } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import axios from 'axios';
 import dagre from 'dagre';
-import { IfaceNode, UmemNode, XskNode, WorkerNode, PipelineNode, PipelineHeaderNode } from './components/CustomNodes.tsx';
+import { IfaceNode, UmemNode, XskNode, WorkerNode, PipelineNode, PipelineHeaderNode, pipelineColor } from './components/CustomNodes.tsx';
 import { TerminalWindow } from './TerminalWindow';
 import {FileBrowserDialog} from "./components/FileBrowserDialog.tsx";
 
@@ -206,6 +206,7 @@ export default function App() {
                     }
                     pipelineNode.args = args;
                 }
+                if (nd.hot_args !== undefined) pipelineNode.hot_args = nd.hot_args;
                 if (nd.pps !== null && nd.pps !== undefined) pipelineNode.pps = nd.pps;
             });
 
@@ -218,9 +219,9 @@ export default function App() {
 
             await axios.post('/api/hardware/update', fullConfig, { params });
             setConfigPath(savePath);
-            alert(pendingRestart
-                ? "Configuration saved! Data plane is restarting..."
-                : "Configuration saved to disk.");
+            if (pendingRestart) {
+                alert("Configuration saved! Data plane is restarting...");
+            }
         } catch (err) {
             console.error(err);
             let detail = "Unknown error";
@@ -281,6 +282,7 @@ export default function App() {
                 }
                 pipelineNode.args = args;
             }
+            if (nd.hot_args !== undefined) pipelineNode.hot_args = nd.hot_args;
             if (nd.pps !== null && nd.pps !== undefined) pipelineNode.pps = nd.pps;
         });
         await axios.post('/api/hardware/update', fullConfig, {
@@ -443,16 +445,19 @@ export default function App() {
         const rawDefault = (selectedNode.data.default_route || selectedNode.data.default) as string | undefined;
 
         // 3. Construct the payload matching our Rust `NodeUpdatePayload`
-        const payload = {
+        const hotArgsPayload = (selectedNode.data as any).hot_args as Record<string, string> | undefined;
+        const payload: Record<string, unknown> = {
             pipeline_name: pipelineName,
             node_id: selectedNode.data.id as string,
             routes: parsedRoutes,
             default_route: rawDefault ? unscope(rawDefault) : undefined,
         };
+        if (hotArgsPayload && Object.keys(hotArgsPayload).length > 0) {
+            payload.hot_args = hotArgsPayload;
+        }
 
         try {
-            await axios.post('/api/pipeline/update', payload); // Adjust endpoint if needed
-            alert("⚡ Live update applied instantly with zero dropped packets!");
+            await axios.post('/api/pipeline/update', payload);
         } catch (err: any) {
             console.error(err);
             alert(`Failed to apply live update: ${err.response?.data || err.message}`);
@@ -596,7 +601,7 @@ export default function App() {
                 await axios.post('/api/pipeline/update', {
                     pipeline_name: pipelineName,
                     node_id: nodeDataId,
-                    args: { cmd },
+                    cmd,
                 });
             } catch (err) {
                 console.error('Failed to send cmd to node:', err);
@@ -630,6 +635,24 @@ export default function App() {
                     return { ...node, data: { ...node.data, [key]: value } };
                 }
                 return node;
+            })
+        );
+    };
+
+    const updateArgData = (nodeId: string, key: string, value: string) => {
+        setNodes((nds) =>
+            nds.map((node) => {
+                if (node.id !== nodeId) return node;
+                return { ...node, data: { ...node.data, args: { ...((node.data as any).args || {}), [key]: value } } };
+            })
+        );
+    };
+
+    const updateHotArgData = (nodeId: string, key: string, value: string) => {
+        setNodes((nds) =>
+            nds.map((node) => {
+                if (node.id !== nodeId) return node;
+                return { ...node, data: { ...node.data, hot_args: { ...((node.data as any).hot_args || {}), [key]: value } } };
             })
         );
     };
@@ -845,35 +868,38 @@ export default function App() {
                         </h2>
                         <div style={{ marginTop: '20px', display: 'flex', flexDirection: 'column', gap: '15px' }}>
                             {(() => {
+                                const isPipelineNode = !['iface', 'umem', 'xsk', 'worker', 'pipeline_header'].includes(selectedNode.type ?? '');
                                 const isPacketGen = (selectedNode.data as any).type === 'PacketGenerator';
                                 const data = selectedNode.data as any;
+                                const nodeArgs: Record<string, string> = data.args || {};
+                                const hotArgsData: Record<string, string> = data.hot_args || {};
+                                const hasHotArgs = Object.keys(hotArgsData).length > 0;
+                                const frameColor = isPipelineNode ? pipelineColor(data.pipeline_name).border : '#64748b';
 
-                                // 1. Start with top-level fields (except args)
-                                let entries = Object.entries(data)
+                                // Top-level scalar entries (no args, hot_args, type, wasm_data objects)
+                                let entries: [string, any][] = Object.entries(data)
                                     .filter(([key, value]) => {
                                         if (value === null || value === undefined) return false;
                                         if (key === 'args') return false;
+                                        if (key === 'hot_args') return false;
                                         if (key === 'type') return false;
-                                        // For PacketGenerator, pps lives in args (supports "1M" / "100K" format)
+                                        if (key === 'wasm_data') return false;
                                         if (isPacketGen && key === 'pps') return false;
                                         if (Array.isArray(value) && value.length > 0 && typeof value[0] === 'object') return false;
                                         if (!Array.isArray(value) && typeof value === 'object') return false;
                                         return true;
                                     });
 
-                                // 2. If PacketGenerator, add/override with specific parameters from args or defaults
+                                // PacketGenerator: add arg params that are NOT in hot_args
                                 if (isPacketGen) {
                                     const args = data.args || {};
-                                    
-                                    // Special: Extract dst_ip/dst_mac from combined 'dst' if present
-                                    let derivedDstIp = undefined;
-                                    let derivedDstMac = undefined;
-                                    if (args.dst && args.dst.includes(':')) {
-                                        const pos = args.dst.indexOf(':');
-                                        derivedDstIp = args.dst.substring(0, pos);
-                                        derivedDstMac = args.dst.substring(pos + 1);
+                                    let derivedDstIp: string | undefined;
+                                    let derivedDstMac: string | undefined;
+                                    if (args.dst && (args.dst as string).includes(':')) {
+                                        const pos = (args.dst as string).indexOf(':');
+                                        derivedDstIp = (args.dst as string).substring(0, pos);
+                                        derivedDstMac = (args.dst as string).substring(pos + 1);
                                     }
-
                                     const pgParams = [
                                         { key: 'pps', default: '1000', type: 'string' },
                                         { key: 'umem', default: '0', type: 'number' },
@@ -883,44 +909,46 @@ export default function App() {
                                         { key: 'dst_mac', default: derivedDstMac || '08:bf:b8:0a:0b:0c', type: 'string' },
                                         { key: 'autostart', default: false, type: 'boolean' },
                                     ];
-
                                     pgParams.forEach(p => {
-                                        // If not already in entries, add it from args or default
+                                        if (hotArgsData[p.key] !== undefined) return;
                                         if (!entries.find(([k]) => k === p.key)) {
-                                            let val = args[p.key];
-                                            if (val === undefined) {
-                                                val = p.default;
-                                            } else if (p.type === 'number') {
-                                                val = Number(val);
-                                            } else if (p.type === 'boolean') {
-                                                val = val === 'true';
-                                            }
+                                            let val: any = args[p.key];
+                                            if (val === undefined) val = p.default;
+                                            else if (p.type === 'number') val = Number(val);
+                                            else if (p.type === 'boolean') val = val === 'true';
                                             entries.push([p.key, val]);
                                         }
                                     });
                                 }
-                                return entries;
-                            })()
-                                .map(([key, value]) => {
+
+                                // Render a single field, handling all types
+                                const renderField = (key: string, value: any, source: 'toplevel' | 'arg' | 'hot') => {
                                     const isNumArr = Array.isArray(value) && (value.length === 0 || typeof value[0] === 'number');
                                     const isNumber = typeof value === 'number';
-                                    const displayValue = isNumArr
-                                        ? (value as number[]).join(', ')
-                                        : (value as string | number);
+                                    const isHot = source === 'hot';
+                                    const labelColor = isHot ? frameColor : '#aaa';
+                                    const borderCol = isHot ? `${frameColor}88` : '#555';
+                                    const textColor = isHot ? frameColor : 'white';
+                                    const displayValue = isNumArr ? (value as number[]).join(', ') : (value as string | number);
 
-                                    // Boolean fields: Yes / No radio buttons
+                                    const handleChange = (newVal: string | number | boolean | number[]) => {
+                                        if (isHot) updateHotArgData(selectedNode.id, key, String(newVal));
+                                        else if (source === 'arg') updateArgData(selectedNode.id, key, String(newVal));
+                                        else updateNodeData(selectedNode.id, key, newVal as any);
+                                    };
+
                                     if (typeof value === 'boolean') {
                                         return (
-                                            <div key={key} style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-                                                <label style={{ fontSize: '12px', color: '#aaa', textTransform: 'uppercase' }}>{key}</label>
+                                            <div key={`${source}-${key}`} style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                                                <label style={{ fontSize: '12px', color: labelColor, textTransform: 'uppercase' }}>{key}</label>
                                                 <div style={{ display: 'flex', gap: '20px' }}>
                                                     {[true, false].map(opt => (
                                                         <label key={String(opt)} style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '13px', color: '#e2e8f0' }}>
                                                             <input
                                                                 type="radio"
-                                                                name={`${selectedNode.id}-${key}`}
+                                                                name={`${selectedNode.id}-${source}-${key}`}
                                                                 checked={value === opt}
-                                                                onChange={() => updateNodeData(selectedNode.id, key, opt)}
+                                                                onChange={() => handleChange(opt)}
                                                             />
                                                             {opt ? 'Yes' : 'No'}
                                                         </label>
@@ -930,20 +958,19 @@ export default function App() {
                                         );
                                     }
 
-                                    // Enum fields: inline radio buttons
                                     const enumOpts = ENUM_OPTIONS[key];
                                     if (enumOpts) {
                                         return (
-                                            <div key={key} style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-                                                <label style={{ fontSize: '12px', color: '#aaa', textTransform: 'uppercase' }}>{key}</label>
+                                            <div key={`${source}-${key}`} style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                                                <label style={{ fontSize: '12px', color: labelColor, textTransform: 'uppercase' }}>{key}</label>
                                                 <div style={{ display: 'flex', gap: '14px', flexWrap: 'wrap' }}>
                                                     {enumOpts.map(opt => (
                                                         <label key={opt} style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '13px', color: '#e2e8f0' }}>
                                                             <input
                                                                 type="radio"
-                                                                name={`${selectedNode.id}-${key}`}
+                                                                name={`${selectedNode.id}-${source}-${key}`}
                                                                 checked={value === opt}
-                                                                onChange={() => updateNodeData(selectedNode.id, key, opt)}
+                                                                onChange={() => handleChange(opt)}
                                                             />
                                                             {opt}
                                                         </label>
@@ -953,15 +980,12 @@ export default function App() {
                                         );
                                     }
 
-                                    // Array-of-number fields: uncontrolled input, commit on blur.
-                                    // Using defaultValue + key lets the user type freely (commas,
-                                    // spaces) without the input snapping back on every keystroke.
                                     if (isNumArr) {
                                         return (
-                                            <div key={key} style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-                                                <label style={{ fontSize: '12px', color: '#aaa', textTransform: 'uppercase' }}>{key}</label>
+                                            <div key={`${source}-${key}`} style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                                                <label style={{ fontSize: '12px', color: labelColor, textTransform: 'uppercase' }}>{key}</label>
                                                 <input
-                                                    key={`${selectedNode.id}-${key}-${JSON.stringify(value)}`}
+                                                    key={`${selectedNode.id}-${source}-${key}-${JSON.stringify(value)}`}
                                                     type="text"
                                                     defaultValue={displayValue}
                                                     onBlur={(e) => {
@@ -969,41 +993,80 @@ export default function App() {
                                                             .split(/[\s,]+/)
                                                             .map(s => parseInt(s.trim(), 10))
                                                             .filter(n => !isNaN(n));
-                                                        updateNodeData(selectedNode.id, key, parsed);
+                                                        handleChange(parsed);
                                                     }}
-                                                    style={{ padding: '8px', background: '#2a2a2a', border: '1px solid #555', borderRadius: '4px', color: 'white', fontFamily: 'monospace' }}
+                                                    style={{ padding: '8px', background: '#2a2a2a', border: `1px solid ${borderCol}`, borderRadius: '4px', color: textColor, fontFamily: 'monospace' }}
                                                 />
                                             </div>
                                         );
                                     }
 
                                     return (
-                                        <div key={key} style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-                                            <label style={{ fontSize: '12px', color: '#aaa', textTransform: 'uppercase' }}>{key}</label>
+                                        <div key={`${source}-${key}`} style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                                            <label style={{ fontSize: '12px', color: labelColor, textTransform: 'uppercase' }}>{key}</label>
                                             <input
                                                 type={isNumber ? 'number' : 'text'}
                                                 value={displayValue}
-                                                onChange={(e) => updateNodeData(selectedNode.id, key,
-                                                    isNumber ? Number(e.target.value) : e.target.value)}
-                                                style={{ padding: '8px', background: '#2a2a2a', border: '1px solid #555', borderRadius: '4px', color: 'white', fontFamily: 'monospace' }}
+                                                onChange={(e) => handleChange(isNumber ? Number(e.target.value) : e.target.value)}
+                                                style={{ padding: '8px', background: '#2a2a2a', border: `1px solid ${borderCol}`, borderRadius: '4px', color: textColor, fontFamily: 'monospace' }}
                                             />
                                         </div>
                                     );
-                                })}
+                                };
+
+                                return (
+                                    <>
+                                        {/* UPPER SECTION HEADER */}
+                                        {isPipelineNode && (
+                                            <div style={{ fontSize: '10px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #334155', paddingBottom: '6px', marginBottom: '2px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                <span>Static Config</span>
+                                                <span style={{ color: '#475569', fontWeight: 'normal', fontSize: '9px' }}>File menu · restart required</span>
+                                            </div>
+                                        )}
+
+                                        {/* UPPER: top-level scalar fields */}
+                                        {entries.map(([key, value]) => renderField(key, value, 'toplevel'))}
+
+                                        {/* UPPER: regular args for non-PacketGen pipeline nodes */}
+                                        {isPipelineNode && !isPacketGen && Object.entries(nodeArgs).map(([k, v]) =>
+                                            renderField(k, v, 'arg')
+                                        )}
+
+                                        {/* LOWER SECTION */}
+                                        {isPipelineNode && (
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', borderTop: `1px solid ${frameColor}44`, paddingTop: '14px', marginTop: '4px' }}>
+                                                <div style={{ fontSize: '10px', color: frameColor, textTransform: 'uppercase', letterSpacing: '0.05em', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                    <span>Hot Args</span>
+                                                    <span style={{ color: `${frameColor}99`, fontWeight: 'normal', fontSize: '9px' }}>⚡ Live Update · no restart</span>
+                                                </div>
+                                                {hasHotArgs ? (
+                                                    Object.entries(hotArgsData).map(([k, v]) =>
+                                                        renderField(k, v, 'hot')
+                                                    )
+                                                ) : (
+                                                    <div style={{ color: '#475569', fontSize: '12px', fontStyle: 'italic' }}>No hot args defined in config</div>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        {/* LIVE UPDATE BUTTON */}
+                                        {isPipelineNode && (
+                                            <button
+                                                onClick={handleLiveUpdate}
+                                                style={{
+                                                    marginTop: '6px', width: '100%', padding: '12px',
+                                                    background: '#10b981',
+                                                    color: 'white', border: 'none', borderRadius: '4px',
+                                                    cursor: 'pointer', fontWeight: 'bold'
+                                                }}
+                                            >
+                                                ⚡ APPLY LIVE UPDATE
+                                            </button>
+                                        )}
+                                    </>
+                                );
+                            })()}
                         </div>
-                        {!['iface', 'umem', 'xsk', 'worker', 'pipeline_header'].includes(selectedNode.type ?? '') && (
-                            <button
-                                onClick={handleLiveUpdate}
-                                style={{
-                                    marginTop: '30px', width: '100%', padding: '12px',
-                                    background: '#10b981',
-                                    color: 'white', border: 'none', borderRadius: '4px',
-                                    cursor: 'pointer', fontWeight: 'bold'
-                                }}
-                            >
-                                ⚡ APPLY LIVE UPDATE
-                            </button>
-                        )}
                     </div>
                 )}
             </div>

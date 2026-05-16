@@ -24,6 +24,11 @@ interface generator {
     /// and to set the worker ID and internal sequence state
     init-data: func(data: list<tuple<string, string>>, worker-id: u32);
 
+    // Define aliases for readability
+    type ipv4-addr = tuple<u8, u8, u8, u8>;
+    type mac-addr = tuple<u8, u8, u8, u8, u8, u8>;
+    set-dst: func(mac: mac-addr, ip: ipv4-addr);
+
     /// Takes an empty batch of PDUs, writes headers, returns packet lengths
     generate-batch: func(batch-bytes: list<u8>, partition-offset: u32) -> list<u32>;
 }

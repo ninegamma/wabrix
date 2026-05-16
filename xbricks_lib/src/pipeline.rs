@@ -13,12 +13,12 @@ use xbricks_base::system::PlatformData;
 use separator::Separatable;
 use xbricks_base::frame_registry::{set_tsc_frequency, set_worker_frame_registry};
 use xbricks_base::{Directive, Node, NodeId};
-use crate::config::hot_config::{HotNodeData, HotPipelineConfig};
+use crate::config::hot_config::{HotNodeData, HotPipelineConfig, NodeDynamicState};
 #[cfg(feature = "wasm")]
 use xbricks_wasm::wasm_manager::WasmManager;
 use xbricks_base::telemetry::TelemetryRegistry;
 use xbricks_wasm::WasmEngine;
-use crate::generator_node::GeneratorNode;
+use crate::generator_node::{GenState, GeneratorNode};
 
 /// Trait for managing XDP socket access
 /// This abstracts away the details of how XDP sockets are stored and retrieved
@@ -75,32 +75,20 @@ impl PipelineFactory {
         // Create a vector pre-filled with defaults, sized exactly to our node count
         let mut fast_nodes = vec![HotNodeData::default(); pipeline_instance.nodes.len()];
         let mut name_to_index = HashMap::new();
+        // Resolve string routes to fast NodeIds
+        let mut resolved_routes = Vec::new();
 
         for (index, node_conf) in pipeline_instance.nodes.iter().enumerate() {
             name_to_index.insert(node_conf.id.clone(), index);
 
-            // Resolve string routes to fast NodeIds
-            let mut resolved_routes = Vec::new();
+
             for r_str in &node_conf.routes {
                 let rid = id_map.get(r_str)
                     .ok_or(format!("Route target '{}' not found", r_str))?
                     .clone();
                 resolved_routes.push(rid);
             }
-
-            // Place it directly at the index!
-            fast_nodes[index] = HotNodeData {
-                routes: resolved_routes,
-                args: node_conf.args.clone(),
-            };
         }
-
-        let initial_hot_config = HotPipelineConfig {
-            fast_nodes,
-            name_to_index
-        };
-        pipeline_rcu.store(Arc::new(initial_hot_config));
-
 
         // =========================================================
         // --- PASS 1.5: Collect interface information from nodes ---
@@ -148,8 +136,7 @@ impl PipelineFactory {
 
                     // Parse batch_size from args (default: 64, max: MAX_BATCH_SIZE)
                     let batch_size = node_conf
-                        .args
-                        .get("batch_size")
+                        .effective_arg("batch_size")
                         .and_then(|s| s.parse::<usize>().ok())
                         .unwrap_or(64);
                     debug!("BatchRxNode {}: batch_size={}", node_conf.id, batch_size);
@@ -192,18 +179,18 @@ impl PipelineFactory {
                         .parse::<usize>()
                         .map_err(|_| format!("PacketGenerator {} 'umem' must be a number", node_conf.id))?;
                     // e.g. args = { pps = "1M" }
-                    let pps: u64 = if let Some(pps_str) = node_conf.args.get("pps") {
+                    let pps: u64 = if let Some(pps_str) = node_conf.hot_args.get("pps") {
                         crate::toml_parser::parse_pps(pps_str)
                             .map_err(|e| format!("PacketGenerator {}: invalid pps: {}", node_conf.id, e))?
                     } else {
                         1_000
                     };
-                    // Get packets per iteration (default to 32, max 128)
+
+                    // Get packets per iteration (default to 256)
                     let batch_size = node_conf
-                        .args
-                        .get("batch_size")
+                        .effective_arg("batch_size")
                         .and_then(|s| s.parse::<usize>().ok())
-                        .unwrap_or(32);
+                        .unwrap_or(256);
 
                     // Validate batch size
                     if batch_size > MAX_BATCH_SIZE {
@@ -216,9 +203,8 @@ impl PipelineFactory {
                     // Get packets_to_generate: accepts "packets_to_generate" (raw number) or
                     // "no-packets" (human-readable like ipblower's --no-packets, e.g. "100K")
                     let packets_to_generate = node_conf
-                        .args
-                        .get("packets_to_generate")
-                        .and_then(|s| s.parse::<usize>().ok())
+                        .effective_arg("packet_count")
+                        .and_then(|s| crate::toml_parser::parse_pps(s).ok().map(|v| v as usize))
                         .or_else(|| {
                             node_conf
                                 .args
@@ -226,6 +212,7 @@ impl PipelineFactory {
                                 .and_then(|s| crate::toml_parser::parse_pps(s).ok().map(|v| v as usize))
                         })
                         .unwrap_or(0);
+
 
                     // Find the eventual sink node by traversing the chain
                     use macaddr::MacAddr6;
@@ -286,8 +273,7 @@ impl PipelineFactory {
                     // matching ipblower's --dst option but using ':' as the ip/mac separator.
                     // Individual "dst_ip" and "dst_mac" args take precedence if also present.
                     let (dst_from_combined_ip, dst_from_combined_mac) = node_conf
-                        .args
-                        .get("dst")
+                        .effective_arg("dst")
                         .and_then(|s| {
                             // The IP is dotted-decimal; split on the first ':' to separate it from the MAC.
                             s.find(':').map(|pos| (&s[..pos], &s[pos + 1..]))
@@ -310,16 +296,14 @@ impl PipelineFactory {
 
                     // Parse destination IP from args (default to 192.168.177.1)
                     let dst_ip = node_conf
-                        .args
-                        .get("dst_ip")
+                        .effective_arg("dst_ip")
                         .and_then(|s| s.parse::<std::net::Ipv4Addr>().ok())
                         .or(dst_from_combined_ip)
                         .unwrap_or(std::net::Ipv4Addr::new(192, 168, 177, 1));
 
                     // Parse destination MAC from args (default to 08:bf:b8:0a:0b:0c)
                     let dst_mac = node_conf
-                        .args
-                        .get("dst_mac")
+                        .effective_arg("dst_mac")
                         .and_then(|s| {
                             let parts: Vec<&str> = s.split(':').collect();
                             if parts.len() == 6 {
@@ -331,6 +315,20 @@ impl PipelineFactory {
                         })
                         .or(dst_from_combined_mac)
                         .unwrap_or(MacAddr6::new(0x08, 0xbf, 0xb8, 0x0a, 0x0b, 0x0c));
+
+                    // 3. Inject it into the fast_nodes array
+                    let index = *name_to_index.get(&node_conf.id).ok_or(format!("Node {} not found", node_conf.id))?;
+                    fast_nodes[index] = HotNodeData {
+                        routes: vec![next_id.clone()],
+                        dynamic_state: NodeDynamicState::Generator {
+                            state: GenState::Idle,
+                            pps_limit: pps,
+                            packet_limit: packets_to_generate,
+                            batch_size,
+                            dst_ip,
+                            dst_mac
+                        },
+                    };
 
                     const PATCH_CYCLES: u64 = 2000;
                     let min_interbatch_gap =
@@ -414,6 +412,7 @@ impl PipelineFactory {
                         partition_start_bytes,
                         #[cfg(feature = "wasm")]
                         node_conf.wasm_data.clone().unwrap_or_default(),
+                        platform_data.clone(),
                     ))
                 }
 
@@ -581,6 +580,9 @@ impl PipelineFactory {
 
         // Unwrap Options (we guaranteed one for every index)
         let final_nodes = built_nodes.into_iter().map(|n| n.unwrap()).collect();
+
+        // Store the fully-populated hot config now that all nodes have been initialised.
+        pipeline_rcu.store(Arc::new(HotPipelineConfig { fast_nodes, name_to_index }));
 
         // =========================================================
         // --- PASS 3: Topological Source Detection (In-Degree = 0)

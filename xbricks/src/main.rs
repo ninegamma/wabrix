@@ -14,7 +14,7 @@ use tokio::sync::{mpsc, RwLock};
 use xbricks_lib::config::hot_config::SharedSystemState;
 use logger::WsLogger;
 use xbricks_lib::probe_kernel_fds;
-use xbricks_base::telemetry::{spawn_telemetry_ice, spawn_pipeline_telemetry, TMLiveStats};
+use xbricks_base::telemetry::{spawn_telemetry_ice_for_ifaces, spawn_pipeline_telemetry, TMLiveStats};
 use xbricks_base::system::PlatformData;
 use crate::api::{spawn_management_api, AppState, SystemCommand};
 
@@ -146,9 +146,7 @@ async fn main() -> anyhow::Result<()> {
 
                 info!("All {} worker threads spawned. Data Plane is LIVE.", handles.len());
 
-                // TODO: We must set the interface to use
-                let iface_name = "enp2s0f0np0".to_string();
-                spawn_telemetry_ice(telemetry_tx.clone(), iface_name, shutdown.clone())?;
+                spawn_telemetry_ice_for_ifaces(telemetry_tx.clone(), &interfaces, shutdown.clone())?;
                 spawn_pipeline_telemetry(telemetry_tx.clone(), pipeline_registry, shutdown.clone())?;
 
                 // ==========================================================

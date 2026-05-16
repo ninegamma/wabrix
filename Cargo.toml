@@ -29,7 +29,7 @@ wasmtime = { version = "43.0", features = ["component-model"] }
 wasmtime-wasi = "43.0"
 clap = { version = "4.5", features = ["derive", "std"] }
 network-types = { version = "0.2", default-features = false }
-macaddr = { version = "1.0.1", default-features = false }
+macaddr = { version = "1.0.1", default-features = false, features = ["serde"] }
 
 # Common dependencies
 anyhow = "1"

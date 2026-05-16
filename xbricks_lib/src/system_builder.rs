@@ -373,7 +373,7 @@ impl SystemBuilder {
         xbricks_system.shared_state = shared_state.clone();
         // ==========================================================
 
-        // Pre-scan: count WasmInspectorNode instances per umem_id so we can
+        // Pre-scan: count WASM instances per umem_id so we can
         // divide the reserved region into equal partitions.
         #[cfg(feature = "wasm")]
         let wasm_instance_totals: Vec<usize> = {
@@ -381,16 +381,25 @@ impl SystemBuilder {
             for worker in &self.workers {
                 for pipeline in &worker.pipelines {
                     for node in &pipeline.nodes {
-                        if node.node_type == "WasmInspectorNode"
-                            || (node.node_type == "PacketGenerator" && node.args.contains_key("wasm_file_path")) {
+
+                        // GENERIC WASM DETECTOR: Does this node load a WASM plugin?
+                        if node.args.contains_key("wasm_file_path") {
+
+                            // If it uses WASM, it MUST be bound to a UMEM
                             if let Some(id_str) = node.args.get("umem") {
                                 if let Ok(uid) = id_str.parse::<usize>() {
                                     if uid < MAX_UMEM {
                                         totals[uid] += 1;
                                     }
                                 }
+                            } else {
+                                log::warn!(
+                                    "Node '{}' has a 'wasm_file_path' but no 'umem' argument!",
+                                    node.id
+                                );
                             }
                         }
+
                     }
                 }
             }
@@ -399,10 +408,12 @@ impl SystemBuilder {
                 if count == 0 { continue; }
                 if let Some(umem_conf) = self.runtime_umems[uid].as_ref() {
                     if umem_conf.reserved_frames % count as u32 != 0 {
-                        return Err(format!(
-                            "UMEM {}: reserved_frames ({}) must be divisible by the number of WasmInspectorNode instances ({})",
+                        // We must panic or return an error here because uneven partitions
+                        // will cause WASM sandboxes to miscalculate memory offsets!
+                        panic!(
+                            "UMEM {}: reserved_frames ({}) must be divisible by the number of WASM instances ({})",
                             uid, umem_conf.reserved_frames, count
-                        ).into());
+                        );
                     }
                 }
             }

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::sync::Arc;
 use arc_swap::ArcSwap;
@@ -46,9 +47,15 @@ pub struct NodeUpdatePayload {
     pub node_id: String,
     pub routes: Option<Vec<String>>,
     pub default_route: Option<String>,
-    /// Arbitrary args to merge into the node's hot-config args (e.g. cmd = "start" / "stop").
-    /// These are applied to the live RCU only — not persisted to disk.
-    pub args: Option<std::collections::HashMap<String, String>>,
+    /// Simple state transition: "start" → Generating, "stop" → Idle.
+    /// Preserves pps_limit / packet_limit already in the hot config.
+    /// Ignored when dynamic_state is also set.
+    pub cmd: Option<String>,
+    /// Full typed hot state replacement. Takes precedence over cmd.
+    pub dynamic_state: Option<NodeDynamicState>,
+    /// Hot-updatable args. Updated in the in-memory base config so File→Save
+    /// persists them; takes effect on next pipeline restart.
+    pub hot_args: Option<HashMap<String, String>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -127,7 +134,8 @@ use tokio::task::JoinHandle;
 use toml_edit::{ser, DocumentMut, Item};
 use tower_http::services::ServeDir;
 use xbricks_base::NodeId;
-use xbricks_lib::config::hot_config::SharedSystemState;
+use xbricks_lib::config::hot_config::{NodeDynamicState, SharedSystemState};
+use xbricks_lib::generator_node::GenState;
 use xbricks_base::telemetry::{TMLiveStats};
 
 /// Information about a network interface that supports XDP native mode with zerocopy.
@@ -734,11 +742,52 @@ async fn hot_update_node(
         new_config.fast_nodes[target_node_index].routes = resolved_routes;
     }
 
-    // 6. MERGE ARGS (e.g. cmd = "start" / "stop") — live RCU only, not persisted
-    if let Some(new_args) = &payload.args {
-        new_config.fast_nodes[target_node_index].args.extend(
-            new_args.iter().map(|(k, v)| (k.clone(), v.clone()))
-        );
+    // 6. APPLY TYPED STATE — live RCU only, not persisted to disk
+    if let Some(new_state) = payload.dynamic_state {
+        new_config.fast_nodes[target_node_index].dynamic_state = new_state;
+    } else if let Some(cmd) = &payload.cmd {
+        // Simple start/stop: flip only the state field, keep pps_limit / packet_limit as-is.
+        if let NodeDynamicState::Generator { state, .. } =
+            &mut new_config.fast_nodes[target_node_index].dynamic_state
+        {
+            *state = match cmd.as_str() {
+                "start" => GenState::Generating,
+                "stop" => GenState::Idle,
+                other => {
+                    log::warn!("Unknown cmd '{}' for node {}", other, payload.node_id);
+                    return axum::http::StatusCode::BAD_REQUEST;
+                }
+            };
+        }
+    }
+
+    // 6b. Apply hot_args that map to Generator dynamic state (pps, packet_count, batch_size).
+    //     Must run before the RCU store so the running dataplane picks them up.
+    if let Some(ref hot_args) = payload.hot_args {
+        if let NodeDynamicState::Generator { pps_limit, packet_limit, batch_size, .. } =
+            &mut new_config.fast_nodes[target_node_index].dynamic_state
+        {
+            if let Some(pps_str) = hot_args.get("pps") {
+                match xbricks_lib::toml_parser::parse_pps(pps_str) {
+                    Ok(v) => { *pps_limit = v; }
+                    Err(e) => { log::warn!("hot_args pps parse error: {}", e); }
+                }
+            }
+            if let Some(count_str) = hot_args.get("packet_count") {
+                match xbricks_lib::toml_parser::parse_pps(count_str) {
+                    Ok(v) => { *packet_limit = v as usize; }
+                    Err(e) => { log::warn!("hot_args packet_count parse error: {}", e); }
+                }
+            }
+            if let Some(bs_str) = hot_args.get("batch_size") {
+                match bs_str.parse::<usize>() {
+                    Ok(v) if v > 0 && v <= xbricks_lib::MAX_BATCH_SIZE => { *batch_size = v; }
+                    Ok(v) if v == 0 => { log::warn!("hot_args batch_size must be > 0"); }
+                    Ok(v) => { log::warn!("hot_args batch_size {} exceeds MAX_BATCH_SIZE {}", v, xbricks_lib::MAX_BATCH_SIZE); }
+                    Err(e) => { log::warn!("hot_args batch_size parse error: {}", e); }
+                }
+            }
+        }
     }
 
     // 7. UPDATE: Atomically swap the pointer.
@@ -747,7 +796,19 @@ async fn hot_update_node(
     pipeline_rcu.store(Arc::new(new_config));
     log::info!("Live update applied to node: {} in pipeline: {}", payload.node_id, payload.pipeline_name);
 
+    // 8. PERSIST hot_args to the in-memory base config so File→Save captures them.
+    if let Some(hot_args) = payload.hot_args {
+        let mut base_config = state.config.write().await;
+        if let Some(pipeline) = base_config.pipelines.iter_mut().find(|p| p.name == payload.pipeline_name) {
+            if let Some(node) = pipeline.nodes.iter_mut().find(|n| n.id == payload.node_id) {
+                node.hot_args = hot_args;
+            }
+        }
+    }
 
+/*
+    hot updates we do not write to disk
+    TODO: remove this if really not needed
     // =================================================================
     // PART 2: BASE CONFIG SYNC (Persists for Hard Restarts)
     // =================================================================
@@ -768,7 +829,7 @@ async fn hot_update_node(
         write_config_to_disk(&*base_config, &config_path);
         log::info!("Config updated on disk.");
     }
-
+*/
     axum::http::StatusCode::OK
 }
 

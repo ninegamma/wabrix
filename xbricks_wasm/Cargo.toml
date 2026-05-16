@@ -8,8 +8,6 @@ version.workspace = true
 # WASM Logic
 wasmtime = { workspace = true }
 wasmtime-wasi = { workspace = true }
-wasmtime-component-macro = "29"
-anyhow = { workspace = true }
 log = { workspace = true }
 xsk-rs = { workspace = true }
 dashmap = "6.1" # Using stable 6.1 instead of 7.0-rc2 for reliability

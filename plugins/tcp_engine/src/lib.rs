@@ -132,7 +132,7 @@ impl Guest for TcpEngine {
         let local_config = CONFIG.lock().clone().unwrap_or_default();
 
         for pdu in pdus.iter_mut() {
-            if pdu.data_len() == 0 {
+            if pdu.is_a_tick(umem_addr) {
                 // TICK FRAME: empty frames sent by PacketGenerator
                 // (Useful for triggering Timeouts or active SYNs in the future)
                 actions.push(ROUTE_DROP);
