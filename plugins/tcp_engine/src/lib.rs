@@ -133,10 +133,10 @@ impl Guest for TcpEngine {
 
         for pdu in pdus.iter_mut() {
             if pdu.is_a_tick(umem_addr) {
-                // TICK FRAME: empty frames sent by PacketGenerator
+                // TICK FRAME: empty frames sent by PacketGenerator 
                 // (Useful for triggering Timeouts or active SYNs in the future)
                 actions.push(ROUTE_DROP);
-                lengths.push(0);
+                lengths.push(64);
             } else if pdu.headers().fingerprint() == HeaderStack::TCP_OVER_IPV4 {
                 // TCP FRAME
                 let (action, len) = handle_tcp_packet(pdu, table, &local_config, umem_addr);
@@ -150,6 +150,10 @@ impl Guest for TcpEngine {
         }
 
         (actions, lengths)
+    }
+
+    fn process_timers(current_tsc: u64) -> u32 {
+        1  // for testing purposes, we can just return 1
     }
 }
 

@@ -16,6 +16,10 @@ interface packet-engine {
 
     /// Takes a batch of PDUs, returns routing actions (Route IDs / Drop / Telemetry flags) and packet lengths
     process-batch: func(batch-bytes: list<u8>, partition-offset: u32) -> tuple<list<u32>, list<u32>>;
+
+    /// Process timers and return the number of frames that are needed for the timeouts
+    process-timers: func(current-tsc: u64) -> u32;
+
 }
 
 /// The interface for nodes that generate new synthetic traffic.

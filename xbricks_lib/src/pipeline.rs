@@ -1,3 +1,4 @@
+use std::arch::x86_64::_rdtsc;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -8,15 +9,16 @@ pub(crate) use crate::nodes::{
     BatchRxNode, BatchTxNode, DropNode, FastParserNode,
 };
 
-pub(crate) use crate::{BatchRx, BatchTx, MAX_BATCH_SIZE};
+pub(crate) use crate::{BatchRx, BatchTx};
 use xbricks_base::system::PlatformData;
 use separator::Separatable;
 use xbricks_base::frame_registry::{set_tsc_frequency, set_worker_frame_registry};
-use xbricks_base::{Directive, Node, NodeId};
+use xbricks_base::{frame_registry, Directive, Node, NodeId};
 use crate::config::hot_config::{HotNodeData, HotPipelineConfig, NodeDynamicState};
 #[cfg(feature = "wasm")]
 use xbricks_wasm::wasm_manager::WasmManager;
 use xbricks_base::telemetry::TelemetryRegistry;
+use xbricks_protocol::wbatch::MAX_BATCH_SIZE;
 use xbricks_wasm::WasmEngine;
 use crate::generator_node::{GenState, GeneratorNode};
 
@@ -348,6 +350,7 @@ impl PipelineFactory {
                     let tm_this_run = Arc::new(AtomicU64::new(0));
                     let tm_avg_cycles = Arc::new(AtomicU64::new(0));
                     let tm_pps = Arc::new(AtomicU64::new(0));
+                    let tm_is_running = Arc::new(AtomicBool::new(false));
                     if let Some(ref mut reg) = telemetry_registry {
                         reg.register(
                             node_conf.id.clone(),
@@ -359,6 +362,7 @@ impl PipelineFactory {
                             ],
                             vec![tm_total.clone(), tm_this_run.clone(), tm_avg_cycles.clone(), tm_pps.clone()],
                             vec![Arc::new(AtomicU64::new(0))],
+                            Some(tm_is_running.clone()),
                         );
                     }
 
@@ -403,6 +407,7 @@ impl PipelineFactory {
                         tm_this_run,
                         tm_avg_cycles,
                         tm_pps,
+                        tm_is_running,
                         // Inject the conditionally compiled WASM arguments
                         #[cfg(feature = "wasm")]
                         wasm_mgr_opt,
@@ -444,6 +449,7 @@ impl PipelineFactory {
                             vec!["dropped".to_string()],
                             vec![dropped_pkts.clone()],
                             vec![Arc::new(AtomicU64::new(0))],
+                            None,
                         );
                     }
                     Box::new(DropNode::new(my_id.clone(), Some(dropped_pkts)))
@@ -525,6 +531,7 @@ impl PipelineFactory {
                             labels.clone().unwrap_or_default(),
                             counters_pkts.clone(),
                             counters_bytes.clone(),
+                            None,
                         );
                     }
 
@@ -533,6 +540,7 @@ impl PipelineFactory {
                         labels: labels.unwrap_or_default(),
                         counters_pkts,
                         counters_bytes,
+                        active_flag: None,
                     };
 
                     // Compute this instance's reserved-memory partition.
@@ -648,6 +656,12 @@ pub struct PipelineRunner {
     runs_with_work: u64,
     runs_idle: u64,
     full_batch_count: usize,
+    /// Cache the indices of nodes that need timers
+    timer_indices: Vec<usize>,
+    last_timer_poll: u64,
+    tsc_freq: u64,
+    /// poll frequency in Hz, e.g., each milli -> 1000 Hz
+    poll_frequency: u64,
 }
 
 impl PipelineRunner {
@@ -664,7 +678,8 @@ impl PipelineRunner {
         name: String,
         worker_id: usize,
         nodes: Vec<Box<dyn Node>>,
-        source_indices: Vec<usize>
+        source_indices: Vec<usize>,
+        tsc_freq: u64,
     ) -> Result<Self, String> {
         if nodes.is_empty() {
             return Err("Pipeline must have at least one node".to_string());
@@ -674,17 +689,77 @@ impl PipelineRunner {
         let first_source = source_indices.first().copied().unwrap_or(0);
         let full_batch_count = nodes[first_source].full_batch_count().unwrap_or(MAX_BATCH_SIZE);
 
+        // Pre-calculate which nodes want timers during setup
+        let timer_indices: Vec<usize> = nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.requires_timers())
+            .map(|(index, _)| index)
+            .collect();
+
         Ok(PipelineRunner {
             name,
             worker_id,
             nodes,
-            source_indices, // Store it in the struct
+            source_indices,
             working_batch: crate::Batch::new(),
             packets_processed: 0,
             runs_with_work: 0,
             runs_idle: 0,
             full_batch_count,
+            last_timer_poll: 0,
+            timer_indices,
+            tsc_freq,
+            poll_frequency: 1,
         })
+    }
+
+    /// PRIVATE HELPER: Resolves the Directive chain through the DAG.
+    /// This allows us to use the exact same routing logic for normal traffic AND timer traffic.
+    #[inline(always)]
+    fn execute_directive_chain(&mut self, mut directive: Directive) {
+        loop {
+            match directive {
+                Directive::Next(next_id) => {
+                    let next_idx = usize::from(next_id);
+                    if next_idx >= self.nodes.len() {
+                        log::error!("Pipeline '{}': Invalid NodeId {}", self.name, next_idx);
+                        break; // Abort this branch
+                    }
+                    directive = self.nodes[next_idx].process(&mut self.working_batch);
+                }
+                Directive::Split(branches) => {
+                    for (next_id, mut sub_batch) in branches {
+                        let next_idx = usize::from(next_id);
+                        if next_idx >= self.nodes.len() { continue; }
+
+                        let mut current_directive = self.nodes[next_idx].process(&mut sub_batch);
+
+                        loop {
+                            match current_directive {
+                                Directive::Next(branch_next_id) => {
+                                    let branch_idx = usize::from(branch_next_id);
+                                    if branch_idx >= self.nodes.len() { break; }
+                                    current_directive = self.nodes[branch_idx].process(&mut sub_batch);
+                                }
+                                Directive::Split(nested_branches) => {
+                                    for (nested_id, mut nested_batch) in nested_branches {
+                                        let nested_idx = usize::from(nested_id);
+                                        if nested_idx < self.nodes.len() {
+                                            let _ = self.nodes[nested_idx].process(&mut nested_batch);
+                                        }
+                                    }
+                                    break;
+                                }
+                                Directive::Stop => break,
+                            }
+                        }
+                    }
+                    break;
+                }
+                Directive::Stop => break,
+            }
+        }
     }
 
     /// Execute one iteration of the pipeline
@@ -698,64 +773,54 @@ impl PipelineRunner {
     /// Returns (packets_processed, status_code)
     /// - packets_processed: number of packets handled in this run
     /// - status_code: 0 for success, negative for errors, positive for specific statuses
-    fn run_iteration(&mut self) -> (u32, i32) {
+    /// Execute one iteration of the pipeline
+    pub fn run_iteration(&mut self) -> (u32, i32) {
         let mut total_packets_this_iteration = 0;
 
-        // Iterate over ALL entry points in the DAG
-        for &source_idx in &self.source_indices {
-            // Clear the working batch for this specific source
-            self.working_batch.clear();
+        // =========================================================
+        // 1. INGRESS: Process all entry points in the DAG
+        // =========================================================
+        for i in 0..self.source_indices.len() {
+            let source_idx = self.source_indices[i];
 
-            let mut directive = self.nodes[source_idx].process(&mut self.working_batch);
+            self.working_batch.clear();
+            let directive = self.nodes[source_idx].process(&mut self.working_batch);
+
             let initial_packet_count = self.working_batch.len() as u32;
             total_packets_this_iteration += initial_packet_count;
 
-            // Follow the directive chain through the DAG for this source
-            loop {
-                match directive {
-                    Directive::Next(next_id) => {
-                        let next_idx = usize::from(next_id);
-                        if next_idx >= self.nodes.len() {
-                            log::error!("Pipeline '{}': Invalid NodeId {}", self.name, next_idx);
-                            break; // Abort this branch
-                        }
-                        directive = self.nodes[next_idx].process(&mut self.working_batch);
-                    }
-                    Directive::Split(branches) => {
-                        for (next_id, mut sub_batch) in branches {
-                            let next_idx = usize::from(next_id);
-                            if next_idx >= self.nodes.len() { continue; }
+            // Route the packets through the rest of the DAG
+            self.execute_directive_chain(directive);
+        }
 
-                            let mut current_directive = self.nodes[next_idx].process(&mut sub_batch);
+        // =========================================================
+        // 2. TIMERS: Process asynchronous events (e.g., TCP Retransmits)
+        // =========================================================
+        let now = unsafe { std::arch::x86_64::_rdtsc() };
 
-                            loop {
-                                match current_directive {
-                                    Directive::Next(branch_next_id) => {
-                                        let branch_idx = usize::from(branch_next_id);
-                                        if branch_idx >= self.nodes.len() { break; }
-                                        current_directive = self.nodes[branch_idx].process(&mut sub_batch);
-                                    }
-                                    Directive::Split(nested_branches) => {
-                                        for (nested_id, mut nested_batch) in nested_branches {
-                                            let nested_idx = usize::from(nested_id);
-                                            if nested_idx < self.nodes.len() {
-                                                let _ = self.nodes[nested_idx].process(&mut nested_batch);
-                                            }
-                                        }
-                                        break;
-                                    }
-                                    Directive::Stop => break,
-                                }
-                            }
-                        }
-                        break;
-                    }
-                    Directive::Stop => break,
+        // Ensure we only poll based on the configured frequency
+        if now - self.last_timer_poll > self.tsc_freq / self.poll_frequency {
+            self.last_timer_poll = now;
+
+            for i in 0..self.timer_indices.len() {
+                let idx = self.timer_indices[i];
+
+                self.working_batch.clear();
+
+                // Call the timer, which may allocate new packets into working_batch
+                let directive = self.nodes[idx].poll_timers(&mut self.working_batch, now);
+
+                // WasmEngine::poll_timers drains working_batch into Directive::Split
+                // sub-batches, so guard on the directive, not working_batch.len().
+                if !matches!(directive, Directive::Stop) {
+                    self.execute_directive_chain(directive);
                 }
             }
         }
 
-        // Update statistics based on the total work done by ALL sources
+        // =========================================================
+        // 3. STATISTICS & ADAPTIVE POLLING
+        // =========================================================
         if total_packets_this_iteration > 0 {
             self.packets_processed += total_packets_this_iteration as u64;
             self.runs_with_work += 1;

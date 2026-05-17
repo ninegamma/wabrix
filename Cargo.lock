@@ -4081,6 +4081,7 @@ dependencies = [
  "ts-rs",
  "xbricks_base",
  "xbricks_lib",
+ "xbricks_protocol",
 ]
 
 [[package]]

@@ -108,6 +108,13 @@ pub trait Node: Send + std::any::Any {
     /// It modifies the batch in-place (RTC efficiency).
     fn process(&mut self, batch: &mut Batch) -> Directive;
 
+    fn requires_timers(&self) -> bool { false }
+
+    // Control-path (defaults to doing nothing)
+    fn poll_timers(&mut self, batch: &mut Batch, current_tsc: u64) -> Directive {
+        Directive::Stop // Default implementation does nothing
+    }
+
     /// called before startup, e.g., rx nodes can replenish the fill queue
     fn prepare(&mut self) -> anyhow::Result<()> {
         Ok(())
@@ -117,10 +124,6 @@ pub trait Node: Send + std::any::Any {
 
     fn full_batch_count(&self) -> Option<usize> {
         None
-    }
-
-    fn shutdown_socket(&mut self) -> anyhow::Result<()> {
-        Ok(())
     }
 
     #[cfg(feature = "profiling")]

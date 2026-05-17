@@ -11,7 +11,7 @@ use xsk_rs::config::{FrameSize, QueueSize};
 use xbricks_base::{RuntimeUmemConfig, SystemBus, UmemPartition};
 use xbricks_base::frame_registry::{FrameRegistry, MAX_UMEM};
 use crate::xsocket::{XSocket, XSocketRx, XSocketTx, XdpSocketConfig};
-use crate::{BatchRx, BatchTx, MAX_BATCH_SIZE};
+use crate::{BatchRx, BatchTx};
 use xbricks_base::system::PlatformData;
 #[cfg(feature = "wasm")]
 use xbricks_wasm::wasm_manager::WasmManager;
@@ -450,7 +450,7 @@ impl SystemBuilder {
                 )
                 .map_err(|e| anyhow::anyhow!(e))?;
                 // Create the pipeline runner
-                let runner = crate::pipeline::PipelineRunner::new(pipeline_instance_cfg.name.clone(), worker_id, nodes, source_indices)
+                let runner = crate::pipeline::PipelineRunner::new(pipeline_instance_cfg.name.clone(), worker_id, nodes, source_indices, xbricks_system.platform_data.tsc_frequency)
                     .map_err(|e| anyhow::anyhow!(e))?;
 
                 runners.push(runner);

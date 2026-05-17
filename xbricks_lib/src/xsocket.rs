@@ -3,7 +3,7 @@
 use std::ffi::CString;
 use xbricks_base::common::formatting::PreciseSeparator;
 use xbricks_base::interface::Pdu;
-use crate::{probe_kernel_fds, Batch, BatchRx, BatchTx, MAX_BATCH_SIZE};
+use crate::{probe_kernel_fds, Batch, BatchRx, BatchTx};
 use log::{debug, trace, warn};
 use core::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
@@ -345,6 +345,7 @@ use rustix::io::Errno;
 use separator::Separatable;
 use xbricks_base::{BusCommand, RuntimeUmemConfig, SystemBus};
 use xbricks_base::frame_registry::{get_tsc_frequency, get_worker_frame_registry, encode_global_frame, decode_global_frame};
+use xbricks_protocol::wbatch::MAX_BATCH_SIZE;
 
 impl XSocketRx {
     /// Returns the UMEM group ID for this socket
@@ -935,7 +936,7 @@ impl BatchTx for XSocketTx {
 
         let count_to_send = std::cmp::min(original_batch_len, free_slots);
         let mut valid_to_send = 0;
-        let mut descs = [FrameDesc::default(); crate::pipeline::MAX_BATCH_SIZE];
+        let mut descs = [FrameDesc::default(); MAX_BATCH_SIZE];
 
         let my_umem_addr = self.umem.as_ptr() as usize;
         let my_umem_id = self.config.umem_config.group_id;

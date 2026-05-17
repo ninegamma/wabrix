@@ -21,6 +21,7 @@ workers= [
 [[pipelines]]
 name = "unified_nic0"
 workers = [0]
+poll_frequency = 1
 
 [[pipelines.nodes]]
 id = "rx_source"
@@ -40,7 +41,8 @@ args= { interface = "veth_xbricks" }
 id = "tickgen"
 type = "PacketGenerator"
 routes = ["tcp_engine"]
-args= { dst_ip = "192.168.177.31", wasm_file_path = "/home/rainer1956/rust/xbrix/target/wasm32-wasip2/release/tick_gen.wasm", batch_size = "256", umem = "0", no-zerocopy = "false", dst_mac = "5e:e0:a0:27:3f:56", pps = "1M", no-packets = "25600" }
+args= {  wasm_file_path = "/home/rainer1956/rust/xbrix/target/wasm32-wasip2/release/tick_gen.wasm",  umem = "0", no-zerocopy = "false", }
+hot_args = { pps="1M", dst_mac = "5e:e0:a0:27:3f:56", packet_count = "2560k", dst_ip = "192.168.177.31", batch_size = "256",}
 
 [pipelines.nodes.wasm_data]
 

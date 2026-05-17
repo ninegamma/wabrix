@@ -162,7 +162,55 @@ Each pipeline contains an array of node tables declared with `[[pipelines.nodes]
 | `queues` | array of integers | no | Hardware queue IDs. Length must equal the pipeline's `workers` array length; `queues[i]` maps to `workers[i]`. Required for `BatchRxNode` and `BatchTxNode` when binding to a hardware queue. |
 | `labels` | array of strings | no | Metric label names (used by `WasmInspectorNode`). |
 | `args` | inline table | no | Node-specific key/value arguments. Values may be strings, integers, floats, or booleans (non-string values are coerced to strings). Default `{}`. |
+| `hot_args` | inline table or table section | no | Live-updatable key/value arguments. Same value types as `args`. Take precedence over `args` for the same key. Always serialized as an inline table on save. See [Hot Args](#hot-args) below. |
 | `wasm_data` | inline table | no | Initial state/configuration passed into WASM modules. Same value types as `args`. |
+
+---
+
+### Hot Args
+
+`hot_args` is a TOML sub-table (written as `[pipelines.nodes.hot_args]`) that holds parameters which can be updated at runtime without restarting the dataplane.
+
+**Key properties:**
+
+- **Startup:** Values are parsed once and loaded into the node's typed `NodeDynamicState` alongside the values from `args`. Where the same key appears in both, `hot_args` takes precedence (via `effective_arg()`).
+- **Live update:** The GUI "⚡ APPLY LIVE UPDATE" button pushes changed `hot_args` to the running dataplane via `POST /api/pipeline/update`. Workers pick up the new values on the next batch boundary with no downtime.
+- **Persistence:** A live update writes the new values to the in-memory base config, so a subsequent "File → Save to Disk" captures them. They are not auto-written to disk on update.
+- **Syntax:** `hot_args` accepts both an inline table and a TOML table section. It is always written back as an inline table by File → Save to Disk:
+
+```toml
+# inline form (preferred, written by Save to Disk)
+[[pipelines.nodes]]
+id = "pctgen"
+type = "PacketGenerator"
+args = { umem = "0" }
+hot_args = { pps = "1024", batch_size = "256", packet_count = "10000", dst_ip = "192.168.177.1", dst_mac = "08:bf:b8:0a:0b:0c" }
+
+# table-section form (also accepted on load)
+[[pipelines.nodes]]
+id = "pctgen"
+type = "PacketGenerator"
+args = { umem = "0" }
+
+[pipelines.nodes.hot_args]
+pps = "1024"
+batch_size = "256"
+packet_count = "10000"
+dst_ip = "192.168.177.1"
+dst_mac = "08:bf:b8:0a:0b:0c"
+```
+
+**Supported keys per node type:**
+
+| Node type | Key | Description |
+|-----------|-----|-------------|
+| `PacketGenerator` | `pps` | Packets per second. Same format as `args.pps`. |
+| `PacketGenerator` | `batch_size` | Packets generated per batch. Must be 1–512. |
+| `PacketGenerator` | `packet_count` | Total packets per run before stopping. `0` = unlimited. |
+| `PacketGenerator` | `dst_ip` | Destination IP address for generated packets. |
+| `PacketGenerator` | `dst_mac` | Destination MAC address for generated packets. |
+
+> **Note:** For `PacketGenerator`, the inter-batch gap is derived from both `pps` and `batch_size` together (`gap = tsc_freq / pps * batch_size`). Both must be updated consistently: setting `pps=16` with `batch_size=256` (default) produces a 16-second gap, not a 1-second gap.
 
 ---
 
@@ -195,17 +243,24 @@ Transmits packets through an AF_XDP socket.
 
 Generates packets at a configurable rate. Does not use `queues`.
 
+`args` keys (static — require dataplane restart to change):
+
 | `args` key | Required | Description |
 |------------|----------|-------------|
-| `pps` | **yes** | Packets per second. Accepts: plain integer (`1000`), decimal with suffix (`2.5M`, `10k`, `1G`), or `"max"` for line rate. |
 | `umem` | **yes** | UMEM `id` to allocate frames from. |
-| `batch_size` | no | Packets per generation batch. |
-| `dst_ip` | no | Destination IP address for generated packets. |
-| `dst_mac` | no | Destination MAC address for generated packets. |
-| `no-packets` | no | Total packets to generate before stopping (same format as `pps`). `0` means unlimited. |
-| `autostart` | no | `"true"` to start generating immediately. |
+| `autostart` | no | `"true"` to start generating immediately on startup. |
 | `wasm_file_path` | no | Path to a WASM module that fills packet payloads. |
 | `no-zerocopy` | no | `"true"` to disable zero-copy for this generator. |
+
+`hot_args` keys (live-updatable without restart — see [Hot Args](#hot-args)):
+
+| `hot_args` key | Required | Description |
+|----------------|----------|-------------|
+| `pps` | **yes** | Packets per second. Accepts: plain integer (`1000`), decimal with suffix (`2.5M`, `10k`, `1G`), or `"max"`. |
+| `batch_size` | no | Packets per generation batch. Default `256`. Must be 1–512. |
+| `packet_count` | no | Total packets per run before the generator stops. Same format as `pps`. `0` means unlimited. |
+| `dst_ip` | no | Destination IP address for generated packets. |
+| `dst_mac` | no | Destination MAC address for generated packets. |
 
 ---
 

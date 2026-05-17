@@ -23,6 +23,8 @@ pub struct TelemetryMetrics {
     pub labels: Vec<String>,
     pub counters_pkts: Vec<Arc<AtomicU64>>,
     pub counters_bytes: Vec<Arc<AtomicU64>>,
+    /// When Some, overrides the `is_active_run` heuristic with an explicit flag.
+    pub active_flag: Option<Arc<AtomicBool>>,
 }
 
 /// Registry to hold references to all telemetry nodes
@@ -42,12 +44,14 @@ impl TelemetryRegistry {
         labels: Vec<String>,
         counters_pkts: Vec<Arc<AtomicU64>>,
         counters_bytes: Vec<Arc<AtomicU64>>,
+        active_flag: Option<Arc<AtomicBool>>,
     ) {
         self.metrics.push(TelemetryMetrics {
             node_id,
             labels,
             counters_pkts,
             counters_bytes,
+            active_flag,
         });
     }
 
@@ -73,7 +77,8 @@ pub fn spawn_pipeline_telemetry(
             // We rely on insertion order: the first entry for a given id provides
             // the labels and the initial counter values; subsequent entries for
             // the same id are summed in.
-            let mut seen: Vec<(String, Vec<u64>, Vec<u64>, Vec<String>)> = Vec::new();
+            // active_flag is OR-aggregated: true if ANY worker reports active.
+            let mut seen: Vec<(String, Vec<u64>, Vec<u64>, Vec<String>, Option<bool>)> = Vec::new();
 
             for metrics in registry.get_metrics() {
                 let pkts: Vec<u64> = metrics.counters_pkts.iter()
@@ -82,22 +87,27 @@ pub fn spawn_pipeline_telemetry(
                 let bytes: Vec<u64> = metrics.counters_bytes.iter()
                     .map(|c| c.load(Ordering::Relaxed))
                     .collect();
+                let active = metrics.active_flag.as_ref().map(|f| f.load(Ordering::Relaxed));
 
                 if let Some(entry) = seen.iter_mut().find(|(id, ..)| id == &metrics.node_id) {
-                    // Accumulate into existing entry
-                    for (acc, v) in entry.1.iter_mut().zip(pkts.iter()) {
-                        *acc += v;
-                    }
-                    for (acc, v) in entry.2.iter_mut().zip(bytes.iter()) {
-                        *acc += v;
-                    }
+                    for (acc, v) in entry.1.iter_mut().zip(pkts.iter()) { *acc += v; }
+                    for (acc, v) in entry.2.iter_mut().zip(bytes.iter()) { *acc += v; }
+                    // OR the active flags: Some(true) wins over Some(false) and None
+                    entry.4 = match (entry.4, active) {
+                        (Some(a), Some(b)) => Some(a || b),
+                        (Some(a), None) | (None, Some(a)) => Some(a),
+                        (None, None) => None,
+                    };
                 } else {
-                    seen.push((metrics.node_id.clone(), pkts, bytes, metrics.labels.clone()));
+                    seen.push((metrics.node_id.clone(), pkts, bytes, metrics.labels.clone(), active));
                 }
             }
 
-            for (node_id, counters_pkts, counters_bytes, labels) in seen {
-                let is_active_run = counters_pkts.iter().any(|&v| v > 0);
+            for (node_id, counters_pkts, counters_bytes, labels, active_flag) in seen {
+                // Use the explicit active flag when available; fall back to the
+                // "any pkt counter > 0" heuristic for nodes that don't register one.
+                let is_active_run = active_flag
+                    .unwrap_or_else(|| counters_pkts.iter().any(|&v| v > 0));
                 let stats = TMLiveStats {
                     tmstats_name: node_id,
                     labels,

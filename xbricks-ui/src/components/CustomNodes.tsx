@@ -472,6 +472,120 @@ export function pipelineColor(name: string | undefined) {
     return PIPELINE_PALETTE[hash % PIPELINE_PALETTE.length];
 }
 
+// ==========================================
+// 4c. GENERATOR CONTROL BUTTON
+// ==========================================
+type GenState = 'idle' | 'generating';
+
+const GeneratorControlButton = ({
+    nodeId,
+    pipelineNodeId,
+    pipelineName,
+}: {
+    nodeId: string;
+    pipelineNodeId: string;
+    pipelineName: string;
+}) => {
+    const [genState, setGenState] = useState<GenState>('idle');
+    const [pulse, setPulse] = useState(false);
+    const prevActiveRef = useRef<boolean | null>(null);
+
+    // Pulse animation tick while generating
+    useEffect(() => {
+        if (genState !== 'generating') { setPulse(false); return; }
+        const t = setInterval(() => setPulse(p => !p), 650);
+        return () => clearInterval(t);
+    }, [genState]);
+
+    // Telemetry subscription: sync state and auto-reset when run finishes
+    useEffect(() => {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const socket = new WebSocket(`${protocol}//${window.location.host}/api/ws/telemetry`);
+        socket.onmessage = (event) => {
+            try {
+                const s: TMLiveStats = JSON.parse(event.data);
+                if (s.tmstats_name !== pipelineNodeId) return;
+                const isActive = s.is_active_run;
+                const wasActive = prevActiveRef.current;
+                prevActiveRef.current = isActive;
+
+                if (isActive) {
+                    setGenState('generating');
+                } else if (wasActive === true && !isActive) {
+                    // Run just completed → auto-send stop to reset backend to Idle
+                    setGenState('idle');
+                    const handler = (window as any).__xbricksSendCmdToNode;
+                    if (handler) handler(nodeId, pipelineName, pipelineNodeId, 'stop');
+                }
+            } catch (_) {}
+        };
+        return () => { if (socket.readyState === WebSocket.OPEN) socket.close(); };
+    }, [nodeId, pipelineName, pipelineNodeId]);
+
+    const handleClick = (e: React.MouseEvent) => {
+        e.stopPropagation();
+        const cmd = genState === 'generating' ? 'stop' : 'start';
+        setGenState(cmd === 'start' ? 'generating' : 'idle');
+        const handler = (window as any).__xbricksSendCmdToNode;
+        if (handler) handler(nodeId, pipelineName, pipelineNodeId, cmd);
+    };
+
+    const isGenerating = genState === 'generating';
+
+    return (
+        <div onMouseDown={e => e.stopPropagation()} style={{ marginTop: '8px' }}>
+            {/* State badge */}
+            <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                padding: '3px 8px',
+                background: isGenerating ? '#052e16' : '#0f172a',
+                border: `1px solid ${isGenerating ? '#10b981' : '#334155'}`,
+                borderBottom: 'none',
+                borderRadius: '4px 4px 0 0',
+                fontSize: '10px',
+                fontWeight: 'bold',
+                letterSpacing: '0.08em',
+                color: isGenerating ? '#10b981' : '#475569',
+                userSelect: 'none',
+            }}>
+                <div style={{
+                    width: '7px',
+                    height: '7px',
+                    borderRadius: '50%',
+                    background: isGenerating ? '#10b981' : '#334155',
+                    boxShadow: isGenerating && pulse ? '0 0 5px #10b981' : 'none',
+                    opacity: isGenerating ? (pulse ? 1 : 0.4) : 1,
+                    transition: 'opacity 0.3s, box-shadow 0.3s',
+                    flexShrink: 0,
+                }} />
+                {isGenerating ? 'GENERATING' : 'IDLE'}
+            </div>
+            {/* Action button */}
+            <button
+                onClick={handleClick}
+                style={{
+                    display: 'block',
+                    width: '100%',
+                    padding: '5px 0',
+                    background: isGenerating ? '#7f1d1d' : '#14532d',
+                    border: `1px solid ${isGenerating ? '#ef4444' : '#22c55e'}`,
+                    borderRadius: '0 0 4px 4px',
+                    color: isGenerating ? '#ef4444' : '#22c55e',
+                    cursor: 'pointer',
+                    fontFamily: 'monospace',
+                    fontSize: '12px',
+                    fontWeight: 'bold',
+                    letterSpacing: '0.05em',
+                }}
+            >
+                {isGenerating ? '⏹ STOP' : '▶ START'}
+            </button>
+        </div>
+    );
+};
+
 export function PipelineNode({ data, id }: NodeProps<PipelineNodeType>) {
     const [showTelemetry, setShowTelemetry] = useState(false);
     const closeTelemetry = useCallback(() => setShowTelemetry(false), []);
@@ -496,8 +610,6 @@ export function PipelineNode({ data, id }: NodeProps<PipelineNodeType>) {
     const label = data.id;
     const colors = pipelineColor(data.pipeline_name);
     const routes: string[] = Array.isArray(data.routes) ? data.routes : [];
-    const defaultRoute = data.default ?? null;
-    const next = data.next ?? null;
     const args = data.args && Object.keys(data.args).length > 0 ? data.args : null;
     const hotArgs = (data as any).hot_args && Object.keys((data as any).hot_args).length > 0 ? (data as any).hot_args as Record<string, string> : null;
 
@@ -508,8 +620,6 @@ export function PipelineNode({ data, id }: NodeProps<PipelineNodeType>) {
         if (id && !seen.has(id)) { seen.add(id); outgoing.push({ id, label: lbl }); }
     };
     routes.forEach(r => addOut(r, r));
-    if (next) addOut(next, `next: ${next}`);
-    if (defaultRoute) addOut(defaultRoute, `default: ${defaultRoute}`);
 
     // Spread handles evenly along the right edge (as %)
     const handleSpacing = outgoing.length > 1
@@ -556,9 +666,6 @@ export function PipelineNode({ data, id }: NodeProps<PipelineNodeType>) {
             </div>
 
             <div style={{ fontSize: '11px', lineHeight: '1.6', color: '#cbd5e1' }}>
-                {defaultRoute && (
-                    <div><strong style={{ color: '#94a3b8' }}>default:</strong> {defaultRoute}</div>
-                )}
                 {data.queues && data.queues.length > 0 && (
                     <div><strong style={{ color: '#94a3b8' }}>queues:</strong> {data.queues.join(', ')}</div>
                 )}
@@ -598,35 +705,13 @@ export function PipelineNode({ data, id }: NodeProps<PipelineNodeType>) {
                 </div>
             )}
 
-            {data.type === 'PacketGenerator' && (() => {
-                const isRunning = (data as any).args?.cmd === 'start';
-                return (
-                    <button
-                        onMouseDown={e => e.stopPropagation()}
-                        onClick={e => {
-                            e.stopPropagation();
-                            const cmd = isRunning ? 'stop' : 'start';
-                            const handler = (window as any).__xbricksSendCmdToNode;
-                            if (handler) handler(id, (data as any).pipeline_name, (data as any).id, cmd);
-                        }}
-                        style={{
-                            marginTop: '6px',
-                            width: '100%',
-                            padding: '4px 0',
-                            background: isRunning ? '#7f1d1d' : '#14532d',
-                            border: `1px solid ${isRunning ? '#ef4444' : '#22c55e'}`,
-                            borderRadius: '4px',
-                            color: isRunning ? '#ef4444' : '#22c55e',
-                            cursor: 'pointer',
-                            fontFamily: 'monospace',
-                            fontSize: '12px',
-                            fontWeight: 'bold',
-                        }}
-                    >
-                        {isRunning ? '⏹ Stop' : '▶ Start'}
-                    </button>
-                );
-            })()}
+            {data.type === 'PacketGenerator' && (
+                <GeneratorControlButton
+                    nodeId={id}
+                    pipelineNodeId={(data as any).id}
+                    pipelineName={(data as any).pipeline_name}
+                />
+            )}
 
             {outgoing.length > 0
                 ? outgoing.map((o, i) => (

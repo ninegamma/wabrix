@@ -20,7 +20,6 @@ pub(crate) use xsocket::XSocket;
 pub use xbricks_base::interface::batch::Batch;
 pub(crate) use crate::system_builder::XSocketRegistry;
 pub use crate::pipeline::{spawn_worker_pipelines, PipelineFactory, PipelineRunner, PipelineStats};
-pub const MAX_BATCH_SIZE: usize = 512;
 
 /// Trait for any node that acts as a packet source (ingress) in the DAG.
 pub trait BatchRx {

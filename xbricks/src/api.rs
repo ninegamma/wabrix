@@ -137,6 +137,7 @@ use xbricks_base::NodeId;
 use xbricks_lib::config::hot_config::{NodeDynamicState, SharedSystemState};
 use xbricks_lib::generator_node::GenState;
 use xbricks_base::telemetry::{TMLiveStats};
+use xbricks_protocol::wbatch::MAX_BATCH_SIZE;
 
 /// Information about a network interface that supports XDP native mode with zerocopy.
 #[derive(Serialize)]
@@ -573,7 +574,7 @@ fn write_config_to_disk(config: &XBricksConfig, path: &str) {
                         for node in nodes.iter_mut() {
 
                             // Target ONLY the inner properties
-                            let props_to_inline = ["args", "queues", "routes", "labels"];
+                            let props_to_inline = ["args", "hot_args", "queues", "routes", "labels"];
 
                             for prop in props_to_inline {
                                 if let Some(item) = node.get_mut(prop) {
@@ -781,9 +782,9 @@ async fn hot_update_node(
             }
             if let Some(bs_str) = hot_args.get("batch_size") {
                 match bs_str.parse::<usize>() {
-                    Ok(v) if v > 0 && v <= xbricks_lib::MAX_BATCH_SIZE => { *batch_size = v; }
+                    Ok(v) if v > 0 && v <= MAX_BATCH_SIZE => { *batch_size = v; }
                     Ok(v) if v == 0 => { log::warn!("hot_args batch_size must be > 0"); }
-                    Ok(v) => { log::warn!("hot_args batch_size {} exceeds MAX_BATCH_SIZE {}", v, xbricks_lib::MAX_BATCH_SIZE); }
+                    Ok(v) => { log::warn!("hot_args batch_size {} exceeds MAX_BATCH_SIZE {}", v, MAX_BATCH_SIZE); }
                     Err(e) => { log::warn!("hot_args batch_size parse error: {}", e); }
                 }
             }

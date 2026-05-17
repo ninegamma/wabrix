@@ -2,7 +2,7 @@ use std::arch::x86_64::_rdtsc;
 use std::mem::MaybeUninit;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use macaddr::MacAddr6;
@@ -23,6 +23,7 @@ use wasmtime::component::{bindgen, ResourceTable};
 #[cfg(feature = "wasm")]
 use wasmtime_wasi::WasiCtxBuilder;
 use xbricks_base::system::PlatformData;
+use xbricks_protocol::wbatch::MAX_BATCH_SIZE;
 #[cfg(feature = "wasm")]
 use xbricks_wasm::wasm_manager::{MyHostState, WasmManager};
 
@@ -69,7 +70,7 @@ pub struct GeneratorNode {
     /// Destination MAC address
     dst_mac: MacAddr6,
     next_log_threshold: usize,
-    scratch_pdus: [core::mem::MaybeUninit<Pdu>; crate::MAX_BATCH_SIZE],
+    scratch_pdus: [core::mem::MaybeUninit<Pdu>; MAX_BATCH_SIZE],
     #[cfg(feature = "profiling")]
     total_cycles: u64,
     // new fields for GUI controlled generator
@@ -82,6 +83,7 @@ pub struct GeneratorNode {
     tm_this_run: Arc<AtomicU64>,
     tm_avg_cycles: Arc<AtomicU64>,
     tm_pps: Arc<AtomicU64>,
+    tm_is_running: Arc<AtomicBool>,
 
     // === WASM FIELDS ===
     #[cfg(feature = "wasm")]
@@ -120,6 +122,7 @@ impl GeneratorNode {
         tm_this_run: Arc<AtomicU64>,
         tm_avg_cycles: Arc<AtomicU64>,
         tm_pps: Arc<AtomicU64>,
+        tm_is_running: Arc<AtomicBool>,
         #[cfg(feature = "wasm")] wasm_manager: Option<&WasmManager>,
         #[cfg(feature = "wasm")] wasm_file_path: Option<&str>,
         #[cfg(feature = "wasm")] partition_start_bytes: u32,
@@ -189,6 +192,7 @@ impl GeneratorNode {
             tm_this_run,
             tm_avg_cycles,
             tm_pps,
+            tm_is_running,
             #[cfg(feature = "wasm")]
             store,
             #[cfg(feature = "wasm")]
@@ -261,6 +265,16 @@ impl GeneratorNode {
         Ok(())
     }
 
+    /// Latch into Finished state when the run completes.
+    /// Each worker does this independently — no shared RCU write, so other workers
+    /// are not affected. The frontend detects completion via tm_is_running going false
+    /// and sends a GUI stop, which then resets the hot-config to Idle for all workers.
+    fn reset_to_idle(&mut self) {
+        self.state = GenState::Finished;
+        self.finished = true;
+        self.tm_is_running.store(false, Ordering::Relaxed);
+    }
+
     pub fn get_stats(&self) -> usize {
         self.total_generated
     }
@@ -322,6 +336,7 @@ impl Node for GeneratorNode {
                             self.packets_generated_this_run = 0;
                             self.tm_this_run.store(0, Ordering::Relaxed);
                             self.tm_pps.store(0, Ordering::Relaxed);
+                            self.tm_is_running.store(true, Ordering::Relaxed);
                             self.finished = false;
 
                             // Reset burst timers for accurate PPS on subsequent runs
@@ -336,6 +351,8 @@ impl Node for GeneratorNode {
                         // RESET LATCH: Any time we receive 'stop', reset back to Idle
                         else if *state == GenState::Idle && self.state != GenState::Idle {
                             log::info!("PacketGenNode {}: GUI triggered STOP! Reset to Idle.", self.id);
+                            self.tm_is_running.store(false, Ordering::Relaxed);
+                            self.finished = false;
                         }
                         self.state = state.clone();
                     }
@@ -356,7 +373,7 @@ impl Node for GeneratorNode {
         // 2. STATE MACHINE CHECKS
         // =========================================================
 
-        // If we are Idle OR Finished waiting for a reset, pass the empty batch forward!
+        // If we are Idle or Finished (run complete, waiting for GUI stop), pass the empty batch forward.
         if self.state == GenState::Idle || self.state == GenState::Finished {
             batch.clear();
             return Directive::Next(self.next_node.clone());
@@ -375,15 +392,12 @@ impl Node for GeneratorNode {
 
         // Check if we've reached the packet limit FOR THIS SPECIFIC RUN
         if self.packets_to_generate > 0 && self.packets_generated_this_run >= self.packets_to_generate {
-            // LATCH TRIGGERED: Lock into the Finished state!
-            self.state = GenState::Finished;
-            self.finished = true;
             self.last_burst_instant = Some(std::time::Instant::now());
-
             info!(
-                "PacketGenerator {}: Finished generating {} packets this run. Waiting for STOP signal.",
+                "PacketGenerator {}: Finished generating {} packets this run. Resetting to Idle.",
                 self.id, self.packets_generated_this_run
             );
+            self.reset_to_idle();
             batch.clear();
             return Directive::Next(self.next_node.clone());
         }
@@ -418,11 +432,10 @@ impl Node for GeneratorNode {
         } else {
             usize::MAX
         };
-        let frames_to_generate = std::cmp::min(std::cmp::min(self.batch_size, remaining), crate::MAX_BATCH_SIZE);
+        let frames_to_generate = std::cmp::min(std::cmp::min(self.batch_size, remaining), MAX_BATCH_SIZE);
 
         if frames_to_generate == 0 {
-            self.state = GenState::Idle;
-            self.finished = true;
+            self.reset_to_idle();
             batch.clear();
             return Directive::Next(self.next_node.clone());
         }

@@ -52,7 +52,7 @@ impl Node for PcapRxNode {
 
         // 2. Allocate a batch of frames (e.g., 64)
         // We allocate max batch size, even if file has fewer packets left (we return unused later)
-        let mut pdus = registry.allocate_pdus(self.umem_group_id, xbricks_lib::MAX_BATCH_SIZE);
+        let mut pdus = registry.allocate_pdus(self.umem_group_id, MAX_BATCH_SIZE);
 
         if pdus.is_empty() {
             // System is backed up, retry next cycle
@@ -139,6 +139,7 @@ use pcap_file::pcap::{PcapWriter, PcapPacket};
 use xbricks_base::interface::batch::Batch;
 use xbricks_base::{Directive, Node, NodeId};
 use xbricks_base::frame_registry::get_worker_frame_registry;
+use xbricks_protocol::wbatch::MAX_BATCH_SIZE;
 
 pub struct PcapTxNode {
     id: NodeId,
