@@ -394,23 +394,6 @@ impl Pdu {
     }
 }
 
-#[inline]
-pub fn update_tcp_checksum_(tcp_header: &mut TcpHeader, ip_payload_size: usize, ip_src: u32, ip_dst: u32) {
-    let chk;
-    {
-        chk = ipv4_checksum(
-            tcp_header as *mut TcpHeader as *mut u8,
-            ip_payload_size,
-            8,
-            &[],
-            ip_src,
-            ip_dst,
-            6u32,
-        );
-    }
-    tcp_header.set_checksum(chk);
-}
-
 #[cfg(test)]
 
 mod tests {

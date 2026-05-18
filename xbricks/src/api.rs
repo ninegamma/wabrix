@@ -42,6 +42,12 @@ pub struct AppState {
 }
 
 #[derive(Deserialize)]
+pub struct PipelineConfigUpdatePayload {
+    pub pipeline_name: String,
+    pub poll_frequency: u64,
+}
+
+#[derive(Deserialize)]
 pub struct NodeUpdatePayload {
     pub pipeline_name: String,
     pub node_id: String,
@@ -184,6 +190,7 @@ pub(crate) fn spawn_management_api(state: AppState) -> (oneshot::Sender<()>, Joi
             .route("/api/ws/terminal", get(terminal_ws_handler))
             .route("/api/hardware/update", axum::routing::post(save_hardware_config))
             .route("/api/pipeline/update", axum::routing::post(hot_update_node))
+            .route("/api/pipeline/update_config", axum::routing::post(hot_update_pipeline_config))
             .route("/api/layout", axum::routing::post(save_layout))
             .route("/api/dataplane/command", axum::routing::post(dataplane_command))
             .route("/api/ws/telemetry", get(telemetry_ws_handler))
@@ -291,10 +298,14 @@ async fn get_topology(State(state): State<AppState>) -> Json<TopologyResponse> {
         }
     }
 
-    // 6. Add PipelineHeader nodes — one per pipeline, carries name+workers, has saved position
+    // 6. Add PipelineHeader nodes — one per pipeline, carries name+workers+poll_frequency
     for pipeline in &config_guard.pipelines {
         let id = format!("pipeline_header/{}", pipeline.name);
-        let data = serde_json::json!({ "name": pipeline.name, "workers": pipeline.workers });
+        let data = serde_json::json!({
+            "name": pipeline.name,
+            "workers": pipeline.workers,
+            "poll_frequency": pipeline.poll_frequency,
+        });
         ui_nodes.push(UiNode { position: saved_pos(&id), id, r#type: "pipeline_header".to_string(), data });
     }
 
@@ -852,4 +863,31 @@ async fn save_layout(
 }
 async fn get_version() -> impl IntoResponse {
     Json(serde_json::json!({ "version": env!("CARGO_PKG_VERSION") }))
+}
+
+async fn hot_update_pipeline_config(
+    State(state): State<AppState>,
+    Json(payload): Json<PipelineConfigUpdatePayload>,
+) -> impl axum::response::IntoResponse {
+    let current_system = state.shared_state.load();
+    let pipeline_rcu = match current_system.pipelines.get(&payload.pipeline_name) {
+        Some(rcu) => rcu,
+        None => {
+            log::error!("Pipeline '{}' not found for poll_frequency update", payload.pipeline_name);
+            return axum::http::StatusCode::NOT_FOUND;
+        }
+    };
+
+    let current_arc = pipeline_rcu.load();
+    let mut new_config = (**current_arc).clone();
+    new_config.poll_frequency = payload.poll_frequency.max(1);
+    pipeline_rcu.store(Arc::new(new_config));
+    log::info!("poll_frequency for pipeline '{}' set to {} Hz", payload.pipeline_name, payload.poll_frequency);
+
+    let mut base_config = state.config.write().await;
+    if let Some(pipeline) = base_config.pipelines.iter_mut().find(|p| p.name == payload.pipeline_name) {
+        pipeline.poll_frequency = payload.poll_frequency.max(1);
+    }
+
+    axum::http::StatusCode::OK
 }

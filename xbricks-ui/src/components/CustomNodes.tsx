@@ -25,7 +25,7 @@ export type PipelineNodeData = NodeConfig & { pipeline_name?: string };
 export type XskNodeType = Node<XskMapping, 'xsk'>;
 export type WorkerNodeType = Node<WorkerConfig, 'worker'>;
 export type PipelineNodeType = Node<PipelineNodeData, 'pipeline'>;
-export type PipelineHeaderData = { name: string; workers: number[] };
+export type PipelineHeaderData = { name: string; workers: number[]; poll_frequency?: number };
 export type PipelineHeaderNodeType = Node<PipelineHeaderData, 'pipeline_header'>;
 
 // ==========================================
@@ -307,6 +307,24 @@ export function WorkerNode({ data }: NodeProps<WorkerNodeType>) {
 
 export function PipelineHeaderNode({ data }: NodeProps<PipelineHeaderNodeType>) {
     const c = pipelineColor(data.name);
+    const [pollFreq, setPollFreq] = useState<string>(String(data.poll_frequency ?? 1000));
+    const [editing, setEditing] = useState(false);
+
+    const commitPollFrequency = async () => {
+        setEditing(false);
+        const val = parseInt(pollFreq, 10);
+        if (isNaN(val) || val < 1) { setPollFreq(String(data.poll_frequency ?? 1000)); return; }
+        try {
+            await fetch('/api/pipeline/update_config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ pipeline_name: data.name, poll_frequency: val }),
+            });
+            // propagate updated value back into node data for save-to-disk
+            (data as any).poll_frequency = val;
+        } catch (e) { console.error('poll_frequency update failed', e); }
+    };
+
     return (
         <div style={{
             background: c.bg,
@@ -325,6 +343,35 @@ export function PipelineHeaderNode({ data }: NodeProps<PipelineHeaderNodeType>) 
                 <div>
                     <strong style={{ color: '#94a3b8' }}>workers:</strong>{' '}
                     <span style={{ color: c.handle }}>[{data.workers.join(', ')}]</span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginTop: '2px' }}>
+                    <strong style={{ color: c.border }}>poll_freq:</strong>
+                    {editing ? (
+                        <input
+                            className="nodrag"
+                            type="number"
+                            min={1}
+                            value={pollFreq}
+                            onChange={e => setPollFreq(e.target.value)}
+                            onBlur={commitPollFrequency}
+                            onKeyDown={e => { if (e.key === 'Enter') commitPollFrequency(); if (e.key === 'Escape') { setEditing(false); setPollFreq(String(data.poll_frequency ?? 1000)); } }}
+                            autoFocus
+                            style={{
+                                width: '70px', background: '#1e293b', border: `1px solid ${c.border}`,
+                                color: '#f8fafc', borderRadius: '3px', padding: '1px 4px',
+                                fontSize: '11px', fontFamily: 'monospace',
+                            }}
+                        />
+                    ) : (
+                        <span
+                            onClick={() => setEditing(true)}
+                            title="Click to edit (hot-changeable)"
+                            style={{
+                                color: c.border, cursor: 'pointer', borderBottom: `1px dashed ${c.border}`,
+                                paddingBottom: '1px',
+                            }}
+                        >{pollFreq} Hz</span>
+                    )}
                 </div>
             </div>
             <Handle type="source" position={Position.Bottom} style={{ background: c.handle, width: 12, height: 3, borderRadius: 1 }} />

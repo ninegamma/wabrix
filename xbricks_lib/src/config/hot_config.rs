@@ -41,6 +41,9 @@ pub struct HotPipelineConfig {
 
     // 🐌 SLOW PATH: Axum API uses this to translate UI strings into the Vec index
     pub name_to_index: HashMap<String, usize>,
+
+    /// Timer poll frequency in Hz. Hot-changeable — workers read this on each iteration.
+    pub poll_frequency: u64,
 }
 
 /// This is what we will pass to both the Axum API and the Worker Threads

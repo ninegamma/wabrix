@@ -450,7 +450,11 @@ impl SystemBuilder {
                 )
                 .map_err(|e| anyhow::anyhow!(e))?;
                 // Create the pipeline runner
-                let runner = crate::pipeline::PipelineRunner::new(pipeline_instance_cfg.name.clone(), worker_id, nodes, source_indices, xbricks_system.platform_data.tsc_frequency)
+                let pipeline_rcu = shared_state.pipelines
+                    .get(&pipeline_instance_cfg.name)
+                    .expect("Pipeline RCU missing for runner")
+                    .clone();
+                let runner = crate::pipeline::PipelineRunner::new(pipeline_instance_cfg.name.clone(), worker_id, nodes, source_indices, xbricks_system.platform_data.tsc_frequency, pipeline_rcu)
                     .map_err(|e| anyhow::anyhow!(e))?;
 
                 runners.push(runner);

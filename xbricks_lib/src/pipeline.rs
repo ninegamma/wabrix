@@ -2,6 +2,7 @@ use std::arch::x86_64::_rdtsc;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use arc_swap::ArcSwap;
 use core_affinity::CoreId;
 use log::{debug, info};
 use crate::toml_parser::PipelineInstance;
@@ -590,7 +591,7 @@ impl PipelineFactory {
         let final_nodes = built_nodes.into_iter().map(|n| n.unwrap()).collect();
 
         // Store the fully-populated hot config now that all nodes have been initialised.
-        pipeline_rcu.store(Arc::new(HotPipelineConfig { fast_nodes, name_to_index }));
+        pipeline_rcu.store(Arc::new(HotPipelineConfig { fast_nodes, name_to_index, poll_frequency: pipeline_instance.poll_frequency }));
 
         // =========================================================
         // --- PASS 3: Topological Source Detection (In-Degree = 0)
@@ -660,8 +661,8 @@ pub struct PipelineRunner {
     timer_indices: Vec<usize>,
     last_timer_poll: u64,
     tsc_freq: u64,
-    /// poll frequency in Hz, e.g., each milli -> 1000 Hz
-    poll_frequency: u64,
+    /// RCU handle for this pipeline's hot config — poll_frequency is read from here at runtime
+    pipeline_rcu: Arc<ArcSwap<HotPipelineConfig>>,
 }
 
 impl PipelineRunner {
@@ -680,6 +681,7 @@ impl PipelineRunner {
         nodes: Vec<Box<dyn Node>>,
         source_indices: Vec<usize>,
         tsc_freq: u64,
+        pipeline_rcu: Arc<ArcSwap<HotPipelineConfig>>,
     ) -> Result<Self, String> {
         if nodes.is_empty() {
             return Err("Pipeline must have at least one node".to_string());
@@ -710,7 +712,7 @@ impl PipelineRunner {
             last_timer_poll: 0,
             timer_indices,
             tsc_freq,
-            poll_frequency: 1,
+            pipeline_rcu,
         })
     }
 
@@ -798,8 +800,8 @@ impl PipelineRunner {
         // =========================================================
         let now = unsafe { std::arch::x86_64::_rdtsc() };
 
-        // Ensure we only poll based on the configured frequency
-        if now - self.last_timer_poll > self.tsc_freq / self.poll_frequency {
+        let poll_frequency = self.pipeline_rcu.load().poll_frequency.max(1);
+        if now - self.last_timer_poll > self.tsc_freq / poll_frequency {
             self.last_timer_poll = now;
 
             for i in 0..self.timer_indices.len() {

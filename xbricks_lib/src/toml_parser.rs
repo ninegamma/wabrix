@@ -176,11 +176,17 @@ pub struct WorkerConfig {
     pub partitions: Vec<PartitionRequest>,
 }
 
+fn default_poll_frequency() -> u64 {
+    1000
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, TS)]
 pub struct PipelineConfig {
     pub name: String,
     pub workers: Vec<usize>,
     pub nodes: Vec<NodeConfig>,
+    #[serde(default = "default_poll_frequency")]
+    pub poll_frequency: u64,
 }
 
 fn deserialize_args<'de, D>(deserializer: D) -> Result<HashMap<String, String>, D::Error>
@@ -300,6 +306,7 @@ impl NodeConfig {
 pub struct PipelineInstance {
     pub name: String,
     pub nodes: Vec<NodeConfig>,
+    pub poll_frequency: u64,
 }
 
 /// Configuration for a single Worker Thread.
@@ -504,6 +511,7 @@ impl XBricksConfig {
                         wasm_data: None,
                     },
                 ],
+                poll_frequency: default_poll_frequency(),
             };
 
             self.pipelines.push(pipeline);
@@ -1393,6 +1401,7 @@ impl XBricksConfig {
                 system_builder.workers[worker_builder_index].pipelines.push(PipelineInstance {
                     name: pipeline_conf.name.clone(),
                     nodes: pipeline_instance_nodes,
+                    poll_frequency: pipeline_conf.poll_frequency,
                 });
             }
         }

@@ -113,6 +113,22 @@ impl InterfaceSetup {
 
             if existing_queues == self.queues {
                 info!("✓ Veth pair {} already exists with {} queues", self.name, existing_queues);
+                // Still apply ipnet: flush stale addresses and re-assign the configured one.
+                if let (Some(ref ipnet), Some(ref peer_name), Some(ref namespace)) =
+                    (&self.ipnet, &self.peer, &self.namespace)
+                {
+                    let _ = Command::new("ip")
+                        .args(&["netns", "exec", namespace, "ip", "addr", "flush", "dev", peer_name])
+                        .output();
+                    let out = Command::new("ip")
+                        .args(&["netns", "exec", namespace, "ip", "addr", "add", ipnet, "dev", peer_name])
+                        .output()?;
+                    if out.status.success() {
+                        info!("✓ Set IP address {} on {}", ipnet, peer_name);
+                    } else {
+                        warn!("Failed to set IP {} on {}: {}", ipnet, peer_name, String::from_utf8_lossy(&out.stderr));
+                    }
+                }
                 return Ok(());
             }
 
@@ -382,22 +398,31 @@ impl InterfaceSetup {
         let onoff = if enabled { "on" } else { "off" };
 
         let is_veth = self.iface_type.as_deref() == Some("veth");
-        let target = if is_veth {
+
+        // For a namespaced veth peer the interface lives inside the namespace,
+        // so ethtool must be run via `ip netns exec <ns>` to find it.
+        let (target, namespace) = if is_veth {
             match self.peer.as_deref() {
-                Some(p) => p.to_string(),
+                Some(p) => (p.to_string(), self.namespace.as_deref()),
                 None => {
                     warn!("veth interface {} has no peer set; skipping checksum offload configuration", self.name);
                     return Ok(());
                 }
             }
         } else {
-            self.name.clone()
+            (self.name.clone(), None)
         };
 
         info!("Setting TX checksum offload {} on {}", onoff, target);
-        let output = Command::new("sudo")
-            .args(&["ethtool", "-K", &target, "tx", onoff])
-            .output()?;
+        let output = if let Some(ns) = namespace {
+            Command::new("ip")
+                .args(&["netns", "exec", ns, "ethtool", "-K", &target, "tx", onoff])
+                .output()?
+        } else {
+            Command::new("sudo")
+                .args(&["ethtool", "-K", &target, "tx", onoff])
+                .output()?
+        };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

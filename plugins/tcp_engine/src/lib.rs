@@ -11,6 +11,7 @@ use macaddr::MacAddr6;
 
 use xbricks_protocol::headers::{HeaderKind, IpHeader, MacHeader, TcpHeader};
 use xbricks_protocol::headers::hstack::HeaderStack;
+use xbricks_protocol::helpers::{prepare_checksums_and_ttl, update_tcp_checksum};
 use xbricks_protocol::wbatch::Pdu0;
 use crate::exports::xbricks::plugins::packet_engine::Guest;
 
@@ -132,21 +133,38 @@ impl Guest for TcpEngine {
         let local_config = CONFIG.lock().clone().unwrap_or_default();
 
         for pdu in pdus.iter_mut() {
+            let mut action = 0;
+            let mut len = 64;
             if pdu.is_a_tick(umem_addr) {
-                // TICK FRAME: empty frames sent by PacketGenerator 
-                // (Useful for triggering Timeouts or active SYNs in the future)
-                actions.push(ROUTE_DROP);
-                lengths.push(64);
+                let mut generated_reply = false;
+                // 1. Scan your table for a connection that needs to send a packet
+                // (e.g. find ONE connection that has expired its Retransmission Timer)
+                /* if let Some((flow_key, conn)) = find_timed_out_connection(table) {
+                    let data_ptr = pdu.data_ptr(umem_addr) as *mut u8;
+                    len = write_tcp_reply(data_ptr, &local_config, ...);
+                    action = ROUTE_TX;
+                    generated_reply = true;
+                }
+                */
+
+                // 2. If no timeouts needed this frame, drop it safely
+                if !generated_reply {
+                    action = ROUTE_DROP;
+                    action |= 2 << 16;
+                    len = 64; // Better to set len to 0 when dropping to save TX ring bandwidth
+                }
             } else if pdu.headers().fingerprint() == HeaderStack::TCP_OVER_IPV4 {
                 // TCP FRAME
-                let (action, len) = handle_tcp_packet(pdu, table, &local_config, umem_addr);
-                actions.push(action);
-                lengths.push(len);
+                (action, len) = handle_tcp_packet(pdu, table, &local_config, umem_addr);
+                action |= 0 << 16;
             } else {
                 // Not TCP -> Forward to standard Linux networking stack
-                actions.push(ROUTE_LINUX);
-                lengths.push(pdu.data_len());
+                action = ROUTE_LINUX;
+                action |= 1 << 16;
+                len = pdu.data_len();
             }
+            actions.push(action);
+            lengths.push(len);
         }
 
         (actions, lengths)
@@ -195,9 +213,16 @@ fn handle_tcp_packet(
     let seq_num = tcp_hdr.seq_num();
     let ack_num = tcp_hdr.ack_num();
 
-    // Calculate approximate payload size
-    let hdr_len = 14 + (ip_hdr.ihl() * 4) + (tcp_hdr.data_offset() * 4);
-    let payload_len = pdu.data_len().saturating_sub(hdr_len as u32);
+    // =========================================================
+    // Calculate true payload using IPv4 Total Length
+    // =========================================================
+    let ip_total_len = ip_hdr.length() as u32;
+    let ip_hdr_len = (ip_hdr.ihl() * 4) as u32;
+    let tcp_hdr_len = (tcp_hdr.data_offset() * 4) as u32;
+
+    // The true TCP payload is the IP Total Length minus both headers.
+    // This safely ignores any trailing Ethernet zero-padding! (which is counted by pdu.data_len())
+    let payload_len = ip_total_len.saturating_sub(ip_hdr_len + tcp_hdr_len);
 
     let mut action_opt = None;
     let mut current_state = None;
@@ -299,9 +324,9 @@ fn run_tcp_state_machine(
         }
         TcpState::Established => {
             if tcp_flags & FLAG_FIN != 0 {
-                conn.state = TcpState::CloseWait;
+                conn.state = TcpState::LastAck;
                 conn.rcv_nxt = seq_num.wrapping_add(1).wrapping_add(payload_len);
-                return reply!(FLAG_ACK);
+                return reply!(FLAG_FIN | FLAG_ACK);
             } else if tcp_flags & FLAG_ACK != 0 && payload_len > 0 {
                 conn.rcv_nxt = conn.rcv_nxt.wrapping_add(payload_len);
                 return reply!(FLAG_ACK);
@@ -380,6 +405,8 @@ fn write_tcp_reply(
     ip.set_length(40);
     ip.set_flags(0x2);
 
+    ip.update_checksum();
+
     let mut tcp = TcpHeader::new();
     tcp.set_flags(flags);
     tcp.set_src_port(src_port);
@@ -387,6 +414,13 @@ fn write_tcp_reply(
     tcp.set_data_offset(5);
     tcp.set_seq_num(seq_num);
     tcp.set_ack_num(ack_num);
+
+    // we have space to receive data!
+    tcp.set_window_size(64240);
+
+    // Because this is a pure protocol reply (SYN/ACK/RST) with no application data,
+    // the IP payload size is exactly the size of the TCP header (20 bytes).
+    update_tcp_checksum(&mut tcp, 20, src_ip, dst_ip);
 
     let mac_size = core::mem::size_of::<MacHeader>();
     let ip_size = core::mem::size_of::<IpHeader>();

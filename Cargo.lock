@@ -4140,6 +4140,7 @@ dependencies = [
  "anyhow",
  "byteorder",
  "fnv",
+ "log",
  "macaddr",
  "network-types",
 ]

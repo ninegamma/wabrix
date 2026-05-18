@@ -180,9 +180,12 @@ export default function App() {
                 .map(n => n.data);
 
             nodes.filter(n => n.type === 'pipeline_header').forEach(n => {
-                const ph = n.data as { name: string; workers: number[] };
+                const ph = n.data as { name: string; workers: number[]; poll_frequency?: number };
                 const p = (fullConfig.pipelines as any[]).find((p: any) => p.name === ph.name);
-                if (p) p.workers = ph.workers;
+                if (p) {
+                    p.workers = ph.workers;
+                    if (ph.poll_frequency !== undefined) p.poll_frequency = ph.poll_frequency;
+                }
             });
 
             // Write back pipeline node args (and pps) edited in the sidebar
