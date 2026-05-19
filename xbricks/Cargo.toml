@@ -25,7 +25,7 @@ ts-rs = { workspace = true }
 arc-swap = { workspace = true }
 xbricks_lib = { path = "../xbricks_lib" }
 xbricks_base = { path = "../xbricks_base" }
-xbricks_protocol = { path = "../xbricks_protocol"}
+xbricks_protocol = { workspace= true}
 
 [build-dependencies]
 anyhow = { workspace = true }

@@ -14,7 +14,7 @@ use xbricks_protocol::TELEMETRY_FLAG;
 // 1. Generate bindings.
 // Note: `async: true` is required to use `instantiate_async` and `call_async`
 bindgen!({
-    path: "../wit/xbricks.wit",
+    path: "../../xbricks_public/wit/xbricks.wit",
     world: "filter-plugin",
     // async: true,
 });

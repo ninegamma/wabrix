@@ -51,7 +51,7 @@ id = "tcp_engine"
 type = "WasmEngine"
 routes = ["shared_tx_sink", "veth_sink", "drop"]
 labels = ["tx", "veth", "drops"]
-args= { wasm_file_path = "/home/rainer1956/rust/xbrix/target/wasm32-wasip2/release/tcp_engine.wasm", umem = "0" }
+args= { wasm_file_path = "/home/rainer1956/rust/xbricks_public/target/wasm32-wasip2/release/tcp_engine.wasm", umem = "0" }
 hot_args= {}
 
 [pipelines.nodes.wasm_data]
@@ -72,7 +72,7 @@ id = "nd_icmp_filter"
 type = "WasmInspectorNode"
 routes = ["shared_tx_sink", "drop"]
 labels = ["icmp ping", "icmp reply", "icmp other", "any other"]
-args= { umem = "1", wasm_file_path = "/home/rainer1956/rust/xbrix/target/wasm32-wasip2/release/icmp_filter.wasm" }
+args= { umem = "1", wasm_file_path = "/home/rainer1956/rust/xbricks_public/target/wasm32-wasip2/release/icmp_filter.wasm" }
 hot_args= {}
 
 [[pipelines.nodes]]

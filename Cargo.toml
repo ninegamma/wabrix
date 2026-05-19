@@ -2,8 +2,6 @@
 members = [
     "ipblower",
     "xbricks",
-    "plugins/*",
-    "xbricks_protocol",
     "xbricks_lib",
     "xbricks_wasm",
     "xbricks_base",
@@ -13,15 +11,13 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 version = "0.1.0"
-license = "MIT"
+publish = false
+license-file = "LICENSE.txt"
 
 [workspace.dependencies]
-# Define the exact version here once
-# libbpf-rs = "=0.26.0-beta.1"
+xbricks_protocol = { path = "../xbricks_public/xbricks_protocol" }
 libbpf-rs = "^0.26.2"
-#libbpf-sys = "=1.6.1+v1.6.1"
 libbpf-sys = { version = "1.7", default-features = false }
-#xsk-rs = { git = "https://github.com/rstade/xsk-rs", branch = "rstade", version = "0.8.1" }
 xsk-rs = { path = "../xsk-rs" }
 # Add these for the Wasm side of the house:
 wit-bindgen = "0.54"

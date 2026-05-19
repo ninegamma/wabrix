@@ -12,7 +12,7 @@ log = { workspace = true }
 xsk-rs = { workspace = true }
 dashmap = "6.1" # Using stable 6.1 instead of 7.0-rc2 for reliability
 xbricks_base = { path = "../xbricks_base" }
-xbricks_protocol = { path = "../xbricks_protocol"}
+xbricks_protocol = { workspace = true }
 crossbeam-channel = { workspace = true }
 
 [lib]

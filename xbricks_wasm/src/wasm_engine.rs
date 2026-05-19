@@ -17,7 +17,7 @@ use xbricks_protocol::wbatch::MAX_BATCH_SIZE;
 // 1. Generate bindings.
 // Note: `async: true` is required to use `instantiate_async` and `call_async`
 bindgen!({
-    path: "../wit/xbricks.wit",
+    path: "../../xbricks_public/wit/xbricks.wit",
     world: "engine-plugin",
     // async: true,
 });

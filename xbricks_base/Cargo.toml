@@ -6,7 +6,7 @@ version.workspace = true
 [dependencies]
 xsk-rs = { workspace = true }
 macaddr = { workspace = true }
-xbricks_protocol = { path = "../xbricks_protocol" }
+xbricks_protocol = { workspace = true }
 crossbeam-channel = { workspace = true }
 log = { workspace = true }
 tokio = { workspace = true }
