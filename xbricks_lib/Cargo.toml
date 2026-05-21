@@ -5,6 +5,7 @@ version.workspace = true
 
 [dependencies]
 xbricks_base = { path = "../xbricks_base" }
+xbricks_protocol = { workspace = true }
 
 # Standard Tools
 anyhow = { workspace = true }
@@ -35,8 +36,6 @@ crossbeam-channel = { workspace = true }
 core_affinity = "0.8"
 rand = "0.10"
 
-# Local Protocals
-xbricks_protocol = { workspace = true }
 
 # Wasm
 xbricks_wasm = { path = "../xbricks_wasm", optional = true }

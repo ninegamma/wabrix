@@ -124,8 +124,10 @@ async fn main() -> anyhow::Result<()> {
                 let sys_builder = current_config.to_system_builder()
                     .context("Failed to create system builder").unwrap();
 
-                let xbricks_system = sys_builder.build(Some(&interface_skels), platform_data.clone())
-                    .map_err(|e| anyhow::anyhow!("Failed to build XDP system: {}", e))?;
+                let xbricks_system = tokio::task::block_in_place(|| {
+                    sys_builder.build(Some(&interface_skels), platform_data.clone())
+                        .map_err(|e| anyhow::anyhow!("Failed to build XDP system: {}", e))
+                })?;
 
                 active_shared_state.store(xbricks_system.shared_state.clone());
 

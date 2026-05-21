@@ -4,7 +4,7 @@
 TS_RS_EXPORT_DIR = { value = "xbricks-ui/src/types", relative = true }
 
 [build]
-# Optimization: Since you are doing AF_XDP, force native CPU instructions
+# Optimization: Since we are doing AF_XDP, force native CPU instructions
 # for the whole workspace. (This acts as the default).
 rustflags = ["-C", "target-cpu=native"]
 

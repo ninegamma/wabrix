@@ -13,6 +13,7 @@ pub(crate) use crate::nodes::{
 pub(crate) use crate::{BatchRx, BatchTx};
 use xbricks_base::system::PlatformData;
 use separator::Separatable;
+use xbricks_protocol::helpers::parse_suffixed_number;
 use xbricks_base::frame_registry::{set_tsc_frequency, set_worker_frame_registry};
 use xbricks_base::{frame_registry, Directive, Node, NodeId};
 use crate::config::hot_config::{HotNodeData, HotPipelineConfig, NodeDynamicState};
@@ -183,7 +184,7 @@ impl PipelineFactory {
                         .map_err(|_| format!("PacketGenerator {} 'umem' must be a number", node_conf.id))?;
                     // e.g. args = { pps = "1M" }
                     let pps: u64 = if let Some(pps_str) = node_conf.hot_args.get("pps") {
-                        crate::toml_parser::parse_pps(pps_str)
+                        parse_suffixed_number(pps_str)
                             .map_err(|e| format!("PacketGenerator {}: invalid pps: {}", node_conf.id, e))?
                     } else {
                         1_000
@@ -207,12 +208,12 @@ impl PipelineFactory {
                     // "no-packets" (human-readable like ipblower's --no-packets, e.g. "100K")
                     let packets_to_generate = node_conf
                         .effective_arg("packet_count")
-                        .and_then(|s| crate::toml_parser::parse_pps(s).ok().map(|v| v as usize))
+                        .and_then(|s| parse_suffixed_number(s).ok().map(|v| v as usize))
                         .or_else(|| {
                             node_conf
                                 .args
                                 .get("no-packets")
-                                .and_then(|s| crate::toml_parser::parse_pps(s).ok().map(|v| v as usize))
+                                .and_then(|s| parse_suffixed_number(s).ok().map(|v| v as usize))
                         })
                         .unwrap_or(0);
 
@@ -576,7 +577,8 @@ impl PipelineFactory {
                             telemetry_metrics,
                             partition_start_bytes,
                             umem_id as u8,
-                            node_conf.wasm_data.clone().unwrap_or_default()
+                            node_conf.wasm_data.clone().unwrap_or_default(),
+                            platform_data
                         ))
                     }
                 }

@@ -139,6 +139,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use toml_edit::{ser, DocumentMut, Item};
 use tower_http::services::ServeDir;
+use xbricks_protocol::helpers::parse_suffixed_number;
 use xbricks_base::NodeId;
 use xbricks_lib::config::hot_config::{NodeDynamicState, SharedSystemState};
 use xbricks_lib::generator_node::GenState;
@@ -780,13 +781,13 @@ async fn hot_update_node(
             &mut new_config.fast_nodes[target_node_index].dynamic_state
         {
             if let Some(pps_str) = hot_args.get("pps") {
-                match xbricks_lib::toml_parser::parse_pps(pps_str) {
+                match parse_suffixed_number(pps_str) {
                     Ok(v) => { *pps_limit = v; }
                     Err(e) => { log::warn!("hot_args pps parse error: {}", e); }
                 }
             }
             if let Some(count_str) = hot_args.get("packet_count") {
-                match xbricks_lib::toml_parser::parse_pps(count_str) {
+                match parse_suffixed_number(count_str) {
                     Ok(v) => { *packet_limit = v as usize; }
                     Err(e) => { log::warn!("hot_args packet_count parse error: {}", e); }
                 }

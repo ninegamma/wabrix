@@ -7,6 +7,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use std::collections::{HashMap, HashSet};
 use ts_rs::TS;
+use xbricks_protocol::helpers::parse_suffixed_number;
 use xbricks_base::RuntimeUmemConfig;
 use xbricks_base::frame_registry::MAX_UMEM;
 use crate::system_builder::SystemBuilder;
@@ -317,43 +318,7 @@ pub struct WorkerBuilderConfig {
     pub pipelines: Vec<PipelineInstance>, // List of pipelines this worker runs
 }
 
-pub fn parse_pps(pps_str: &str) -> Result<u64> {
-    let s = pps_str.to_lowercase();
 
-    // 1. Handle the "max" case
-    if s == "max" {
-        return Ok(u64::MAX);
-    }
-
-    // 2. Identify the suffix and determine the multiplier
-    let (numeric_part, multiplier) = if s.ends_with('k') {
-        (&s[..s.len() - 1], 1_000.0)
-    } else if s.ends_with('m') {
-        (&s[..s.len() - 1], 1_000_000.0)
-    } else if s.ends_with('g') {
-        (&s[..s.len() - 1], 1_000_000_000.0)
-    } else {
-        (s.as_str(), 1.0)
-    };
-
-    // 3. Parse as f64 to allow decimals like "2.5"
-    let base_val: f64 = numeric_part.trim().parse().map_err(|_| {
-        anyhow!(
-            "Invalid PPS format: '{}'.\n\
-            Expected a number (integer or decimal) optionally followed by k, m, or g.\n\
-            Examples: '500', '10k', '2.5M', or 'max'.",
-            pps_str
-        )
-    })?;
-
-    // 4. Validation checks
-    if base_val <= 0.0 || base_val.is_nan() || base_val.is_infinite() {
-        return Err(anyhow!("PPS must be a positive number or 'max'."));
-    }
-
-    // 5. Convert to u64
-    Ok((base_val * multiplier) as u64)
-}
 
 impl XBricksConfig {
     /// Load configuration from a TOML file and validate it
@@ -399,8 +364,8 @@ impl XBricksConfig {
         dst_ip: Option<&str>,
         dst_mac: Option<&str>,
     ) {
-        let total_pps = parse_pps(pps).unwrap_or(u64::MAX);
-        let total_packets = parse_pps(no_packets).unwrap_or(0);
+        let total_pps = parse_suffixed_number(pps).unwrap_or(u64::MAX);
+        let total_packets = parse_suffixed_number(no_packets).unwrap_or(0);
 
         // Calculate per-worker values for PPS
         let pps_per_worker = if total_pps == u64::MAX {
@@ -903,7 +868,7 @@ impl XBricksConfig {
                                 node.id
                             ));
                         }
-                        Some(pps_str) => match parse_pps(pps_str) {
+                        Some(pps_str) => match parse_suffixed_number(pps_str) {
                             Err(_) => {
                                 return Err(anyhow!(
                                     "Pipeline '{}': node '{}' (PacketGenerator) invalid pps value '{}'",

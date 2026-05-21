@@ -13,6 +13,7 @@ use crossbeam_channel::Sender;
 use xbricks_base::frame_registry::get_worker_frame_registry;
 use xbricks_protocol::TELEMETRY_FLAG;
 use xbricks_protocol::wbatch::MAX_BATCH_SIZE;
+use xbricks_base::system::PlatformData;
 
 // 1. Generate bindings.
 // Note: `async: true` is required to use `instantiate_async` and `call_async`
@@ -56,6 +57,7 @@ impl WasmEngine {
         partition_start_bytes: u32,
         umem_id: u8,
         wasm_data: HashMap<String, String>,
+        platform_data: &PlatformData,
     ) -> Self {
         // 1. Fetch the Component from the Manager's DashMap cache
         // This takes nanoseconds if already loaded, avoiding disk I/O.
@@ -95,7 +97,7 @@ impl WasmEngine {
         if !wasm_data.is_empty() {
             let data: Vec<(String, String)> = wasm_data.into_iter().collect();
             bindings.xbricks_plugins_packet_engine()
-                .call_init_data(&mut store, &data)
+                .call_init_data(&mut store, &data, platform_data.tsc_frequency)
                 .expect("Failed to call init-data on Wasm inspector");
         }
 
