@@ -79,6 +79,51 @@ impl SystemBuilder {
             umem_groups[config.umem_config.group_id].get_or_insert_with(Vec::new).push(config);
         }
 
+        // Pre-scan: count WASM instances per umem_id and adjust reserved_frames to be
+        // evenly divisible before partition layout and WasmManager creation.
+        #[cfg(feature = "wasm")]
+        {
+            let mut wasm_counts = vec![0usize; MAX_UMEM];
+            for worker in &self.workers {
+                for pipeline in &worker.pipelines {
+                    for node in &pipeline.nodes {
+                        if node.args.contains_key("wasm_file_path") {
+                            if let Some(id_str) = node.args.get("umem") {
+                                if let Ok(uid) = id_str.parse::<usize>() {
+                                    if uid < MAX_UMEM {
+                                        wasm_counts[uid] += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for (uid, &count) in wasm_counts.iter().enumerate() {
+                if count == 0 { continue; }
+                if let Some(umem_conf_arc) = self.runtime_umems[uid].as_ref() {
+                    let orig = umem_conf_arc.reserved_frames;
+                    let frame_size = umem_conf_arc.frame_size;
+                    let adjusted = (orig / count as u32) * count as u32;
+                    if adjusted != orig {
+                        let mut new_conf = (**umem_conf_arc).clone();
+                        new_conf.reserved_frames = adjusted;
+                        self.runtime_umems[uid] = Some(Arc::new(new_conf));
+                        log::info!(
+                            "UMEM {}: reserved_frames reduced from {} to {} to be evenly divisible by {} WASM instance(s)",
+                            uid, orig, adjusted, count
+                        );
+                    }
+                    let frames_per_instance = adjusted / count as u32;
+                    let mb_per_instance = frames_per_instance as f64 * frame_size as f64 / (1024.0 * 1024.0);
+                    log::info!(
+                        "UMEM {}: each of {} WASM node(s) gets {} reserved frame(s) ({:.2} MB)",
+                        uid, count, frames_per_instance, mb_per_instance
+                    );
+                }
+            }
+        }
+
         // 3. Calculate partition allocation for each worker
         // Indexed by worker_id (0..num_workers).
         let mut worker_partitions: Vec<Vec<(usize, UmemPartition)>> = vec![Vec::new(); num_workers];
@@ -400,20 +445,6 @@ impl SystemBuilder {
                             }
                         }
 
-                    }
-                }
-            }
-            // Validate: reserved_frames must be evenly divisible by instance count
-            for (uid, &count) in totals.iter().enumerate() {
-                if count == 0 { continue; }
-                if let Some(umem_conf) = self.runtime_umems[uid].as_ref() {
-                    if umem_conf.reserved_frames % count as u32 != 0 {
-                        // We must panic or return an error here because uneven partitions
-                        // will cause WASM sandboxes to miscalculate memory offsets!
-                        panic!(
-                            "UMEM {}: reserved_frames ({}) must be divisible by the number of WASM instances ({})",
-                            uid, umem_conf.reserved_frames, count
-                        );
                     }
                 }
             }

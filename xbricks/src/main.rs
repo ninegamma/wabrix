@@ -69,12 +69,13 @@ async fn main() -> anyhow::Result<()> {
     // Create a swap-able pointer to hold the live system state
     let active_shared_state = Arc::new(arc_swap::ArcSwap::new(initial_state));
 
+    let config_path = Arc::new(RwLock::new(opt.config.clone()));
     let app_state = AppState {
         config: shared_config.clone(),
         shared_state: active_shared_state.clone(),
         console_tx: console_tx.clone(),
         cmd_tx: cmd_tx.clone(),
-        config_path: Arc::new(RwLock::new(opt.config.clone())),
+        config_path: config_path.clone(),
         telemetry_tx: telemetry_tx.clone(),
     };
     let (axum_shutdown_tx, axum_join_handle) = spawn_management_api(app_state);
@@ -94,10 +95,21 @@ async fn main() -> anyhow::Result<()> {
 
             // We use a block here to strictly enforce Rust's Drop semantics for hardware
             let action = {
-                // 1. Read the latest config
+                // 1. Reload config from disk so manual edits are picked up on every start
                 let current_config = {
-                    let guard = shared_config.read().await;
-                    guard.clone()
+                    let path = config_path.read().await;
+                    match xbricks_lib::toml_parser::XBricksConfig::from_file(&*path) {
+                        Ok(fresh) => {
+                            info!("Configuration reloaded from: {}", *path);
+                            let mut guard = shared_config.write().await;
+                            *guard = fresh.clone();
+                            fresh
+                        }
+                        Err(e) => {
+                            error!("Failed to reload config from {}: {}. Using last known good config.", *path, e);
+                            shared_config.read().await.clone()
+                        }
+                    }
                 };
 
                 // 2. System Checks
