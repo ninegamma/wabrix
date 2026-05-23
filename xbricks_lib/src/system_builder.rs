@@ -89,8 +89,8 @@ impl SystemBuilder {
             for worker in &self.workers {
                 for pipeline in &worker.pipelines {
                     for node in &pipeline.nodes {
-                        if node.args.contains_key("wasm_file_path") {
-                            if let Some(id_str) = node.args.get("umem") {
+                        if node.node_config.args.contains_key("wasm_file_path") {
+                            if let Some(id_str) = node.node_config.args.get("umem") {
                                 if let Ok(uid) = id_str.parse::<usize>() {
                                     if uid < MAX_UMEM {
                                         wasm_counts[uid] += 1;
@@ -430,10 +430,10 @@ impl SystemBuilder {
                     for node in &pipeline.nodes {
 
                         // GENERIC WASM DETECTOR: Does this node load a WASM plugin?
-                        if node.args.contains_key("wasm_file_path") {
+                        if node.node_config.args.contains_key("wasm_file_path") {
 
                             // If it uses WASM, it MUST be bound to a UMEM
-                            if let Some(id_str) = node.args.get("umem") {
+                            if let Some(id_str) = node.node_config.args.get("umem") {
                                 if let Ok(uid) = id_str.parse::<usize>() {
                                     if uid < MAX_UMEM {
                                         totals[uid] += 1;
@@ -442,7 +442,7 @@ impl SystemBuilder {
                             } else {
                                 log::warn!(
                                     "Node '{}' has a 'wasm_file_path' but no 'umem' argument!",
-                                    node.id
+                                    node.node_instance_id
                                 );
                             }
                         }

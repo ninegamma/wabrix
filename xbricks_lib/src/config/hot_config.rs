@@ -28,7 +28,6 @@ pub enum NodeDynamicState {
 #[derive(Debug, Clone, Default)]
 pub struct HotNodeData {
     pub routes: Vec<NodeId>,
-    // REPLACED HashMap with a strongly typed Enum!
     pub dynamic_state: NodeDynamicState,
 }
 

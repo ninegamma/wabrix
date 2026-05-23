@@ -10,6 +10,8 @@ use ts_rs::TS;
 use xbricks_protocol::helpers::parse_suffixed_number;
 use xbricks_base::RuntimeUmemConfig;
 use xbricks_base::frame_registry::MAX_UMEM;
+use xbricks_base::node_instance_id::NodeInstanceId;
+use crate::config::hot_config::NodeDynamicState;
 use crate::system_builder::SystemBuilder;
 use crate::xsocket::XdpSocketConfig;
 
@@ -292,6 +294,12 @@ pub struct NodeConfig {
     #[serde(default, deserialize_with = "deserialize_wasm_data")]
     pub wasm_data: Option<HashMap<String, String>>,
 }
+#[derive(Debug, Clone)]
+pub struct NodeInstance {
+    pub node_config: NodeConfig,
+    pub state: NodeDynamicState,
+    pub node_instance_id: NodeInstanceId,
+}
 
 
 impl NodeConfig {
@@ -306,7 +314,7 @@ impl NodeConfig {
 #[derive(Debug, Clone)]
 pub struct PipelineInstance {
     pub name: String,
-    pub nodes: Vec<NodeConfig>,
+    pub nodes: Vec<NodeInstance>,
     pub poll_frequency: u64,
 }
 
@@ -1323,7 +1331,7 @@ impl XBricksConfig {
                 // This is where we handle the specific "slice" of the pipeline this worker runs.
                 let mut pipeline_instance_nodes = Vec::new();
 
-                for node_conf in &pipeline_conf.nodes {
+                for (node_index, node_conf) in pipeline_conf.nodes.iter().enumerate() {
                     // 4. Handle "Queues" Argument
                     // If the config defines "queues = [0, 1]", and this is the 2nd worker (index 1),
                     // we must pick '1'.
@@ -1349,16 +1357,26 @@ impl XBricksConfig {
                         assigned_queue = Vec::from([node_conf.queues.as_ref().unwrap()[worker_idx_in_pipeline]]);
                     }
 
-                    // Create the node config for the builder
-                    pipeline_instance_nodes.push(NodeConfig {
-                        id: node_conf.id.clone(),
-                        node_type: node_conf.node_type.clone(),
-                        routes: node_conf.routes.clone(),
-                        queues: Some(assigned_queue),
-                        labels: node_conf.labels.clone(),
-                        args: node_conf.args.clone(),
-                        hot_args: node_conf.hot_args.clone(),
-                        wasm_data: node_conf.wasm_data.clone(),
+                    // Create the node instance for the builder
+                    pipeline_instance_nodes.push(NodeInstance {
+                        node_config: NodeConfig {
+                            id: node_conf.id.clone(),
+                            node_type: node_conf.node_type.clone(),
+                            routes: node_conf.routes.clone(),
+                            queues: Some(assigned_queue),
+                            labels: node_conf.labels.clone(),
+                            args: node_conf.args.clone(),
+                            hot_args: node_conf.hot_args.clone(),
+                            wasm_data: node_conf.wasm_data.clone(),
+                        },
+                        state: NodeDynamicState::default(),
+                        node_instance_id: NodeInstanceId::new(
+                            node_index as u32,
+                            worker_id as u32,
+                            pipeline_conf.name.clone(),
+                            node_conf.id.clone(),
+                            node_conf.node_type.clone(),
+                        ),
                     });
                 }
 

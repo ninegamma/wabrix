@@ -63,10 +63,10 @@ impl PipelineFactory {
         // The vector index will be the NodeId index.
         let mut id_map: HashMap<String, NodeId> = HashMap::new();
         for (index, node_conf) in pipeline_instance.nodes.iter().enumerate() {
-            if id_map.contains_key(&node_conf.id) {
-                return Err(format!("Duplicate Node ID: {}", node_conf.id));
+            if id_map.contains_key(&node_conf.node_config.id) {
+                return Err(format!("Duplicate Node ID: {}", node_conf.node_config.id));
             }
-            id_map.insert(node_conf.id.clone(), NodeId::new(index as u32, node_conf.id.clone()));
+            id_map.insert(node_conf.node_config.id.clone(), NodeId::new(index as u32, node_conf.node_config.id.clone()));
         }
 
         // =========================================================
@@ -85,10 +85,10 @@ impl PipelineFactory {
         let mut resolved_routes = Vec::new();
 
         for (index, node_conf) in pipeline_instance.nodes.iter().enumerate() {
-            name_to_index.insert(node_conf.id.clone(), index);
+            name_to_index.insert(node_conf.node_config.id.clone(), index);
 
 
-            for r_str in &node_conf.routes {
+            for r_str in &node_conf.node_config.routes {
                 let rid = id_map.get(r_str)
                     .ok_or(format!("Route target '{}' not found", r_str))?
                     .clone();
@@ -101,9 +101,9 @@ impl PipelineFactory {
         // Map node_id -> interface name (for BatchTxNode and BatchRxNode)
         let mut node_interfaces: HashMap<String, String> = HashMap::new();
         for node_conf in &pipeline_instance.nodes {
-            if node_conf.node_type == "BatchTxNode" || node_conf.node_type == "BatchRxNode" {
-                if let Some(iface) = node_conf.args.get("interface") {
-                    node_interfaces.insert(node_conf.id.clone(), iface.clone());
+            if node_conf.node_config.node_type == "BatchTxNode" || node_conf.node_config.node_type == "BatchRxNode" {
+                if let Some(iface) = node_conf.node_config.args.get("interface") {
+                    node_interfaces.insert(node_conf.node_config.id.clone(), iface.clone());
                 }
             }
         }
@@ -116,45 +116,45 @@ impl PipelineFactory {
         }
 
         // --- PASS 2: Instantiation ---
-        for node_conf in &pipeline_instance.nodes {
-            let my_id = id_map[&node_conf.id].clone();
+        for node_instance in &pipeline_instance.nodes {
+            let my_id = id_map[&node_instance.node_config.id].clone();
 
-            let node_impl: Box<dyn Node> = match node_conf.node_type.as_str() {
+            let node_impl: Box<dyn Node> = match node_instance.node_config.node_type.as_str() {
                 // === 1. RX Node ===
                 "BatchRxNode" => {
-                    let next_str = node_conf
-                        .routes
+                    let next_str = node_instance
+                        .node_config.routes
                         .first()
-                        .ok_or(format!("Node {} missing routes[0]", node_conf.id))?;
+                        .ok_or(format!("Node {} missing routes[0]", node_instance.node_config.id))?;
                     let next_id = id_map
                         .get(next_str)
-                        .ok_or(format!("Node {} points to unknown next '{}'", node_conf.id, next_str))?
+                        .ok_or(format!("Node {} points to unknown next '{}'", node_instance.node_config.id, next_str))?
                         .clone();
 
-                    let iface = node_conf
-                        .args
+                    let iface = node_instance
+                        .node_config.args
                         .get("interface")
-                        .ok_or(format!("RxNode {} missing 'interface' arg", node_conf.id))?;
+                        .ok_or(format!("RxNode {} missing 'interface' arg", node_instance.node_config.id))?;
 
-                    assert!(node_conf.queues.is_some());
-                    assert_eq!(node_conf.queues.as_ref().unwrap().len(), 1);
-                    let queue_id = node_conf.queues.as_ref().unwrap()[0] as usize;
+                    assert!(node_instance.node_config.queues.is_some());
+                    assert_eq!(node_instance.node_config.queues.as_ref().unwrap().len(), 1);
+                    let queue_id = node_instance.node_config.queues.as_ref().unwrap()[0] as usize;
 
                     // Parse batch_size from args (default: 64, max: MAX_BATCH_SIZE)
-                    let batch_size = node_conf
-                        .effective_arg("batch_size")
+                    let batch_size = node_instance
+                        .node_config.effective_arg("batch_size")
                         .and_then(|s| s.parse::<usize>().ok())
                         .unwrap_or(64);
-                    debug!("BatchRxNode {}: batch_size={}", node_conf.id, batch_size);
+                    debug!("BatchRxNode {}: batch_size={}", node_instance.node_config.id, batch_size);
 
                     // Validate batch_size
                     if batch_size == 0 {
-                        return Err(format!("BatchRxNode {}: batch_size must be > 0", node_conf.id));
+                        return Err(format!("BatchRxNode {}: batch_size must be > 0", node_instance.node_config.id));
                     }
                     if batch_size > MAX_BATCH_SIZE {
                         return Err(format!(
                             "BatchRxNode {}: batch_size ({}) exceeds maximum of {}",
-                            node_conf.id, batch_size, MAX_BATCH_SIZE
+                            node_instance.node_config.id, batch_size, MAX_BATCH_SIZE
                         ));
                     }
 
@@ -168,33 +168,33 @@ impl PipelineFactory {
 
                 // === 2. PacketGenerator Node ===
                 "PacketGenerator" => {
-                    let next_str = node_conf
-                        .routes
+                    let next_str = node_instance
+                        .node_config.routes
                         .first()
-                        .ok_or(format!("Node {} missing routes[0]", node_conf.id))?;
+                        .ok_or(format!("Node {} missing routes[0]", node_instance.node_config.id))?;
                     let next_id = id_map
                         .get(next_str)
-                        .ok_or(format!("Node {} points to unknown next '{}'", node_conf.id, next_str))?
+                        .ok_or(format!("Node {} points to unknown next '{}'", node_instance.node_config.id, next_str))?
                         .clone();
 
                     // Get UMEM ID
-                    let umem_group_id = node_conf
-                        .args
+                    let umem_group_id = node_instance
+                        .node_config.args
                         .get("umem")
-                        .ok_or(format!("PacketGenerator {} missing 'umem' in args", node_conf.id))?
+                        .ok_or(format!("PacketGenerator {} missing 'umem' in args", node_instance.node_config.id))?
                         .parse::<usize>()
-                        .map_err(|_| format!("PacketGenerator {} 'umem' must be a number", node_conf.id))?;
+                        .map_err(|_| format!("PacketGenerator {} 'umem' must be a number", node_instance.node_config.id))?;
                     // e.g. args = { pps = "1M" }
-                    let pps: u64 = if let Some(pps_str) = node_conf.hot_args.get("pps") {
+                    let pps: u64 = if let Some(pps_str) = node_instance.node_config.hot_args.get("pps") {
                         parse_suffixed_number(pps_str)
-                            .map_err(|e| format!("PacketGenerator {}: invalid pps: {}", node_conf.id, e))?
+                            .map_err(|e| format!("PacketGenerator {}: invalid pps: {}", node_instance.node_config.id, e))?
                     } else {
                         1_000
                     };
 
                     // Get packets per iteration (default to 256)
-                    let batch_size = node_conf
-                        .effective_arg("batch_size")
+                    let batch_size = node_instance
+                        .node_config.effective_arg("batch_size")
                         .and_then(|s| s.parse::<usize>().ok())
                         .unwrap_or(256);
 
@@ -202,18 +202,18 @@ impl PipelineFactory {
                     if batch_size > MAX_BATCH_SIZE {
                         return Err(format!(
                             "PacketGenerator {}: batch_size ({}) exceeds maximum of {}",
-                            node_conf.id, batch_size, MAX_BATCH_SIZE
+                            node_instance.node_config.id, batch_size, MAX_BATCH_SIZE
                         ));
                     }
 
                     // Get packets_to_generate: accepts "packets_to_generate" (raw number) or
                     // "no-packets" (human-readable like ipblower's --no-packets, e.g. "100K")
-                    let packets_to_generate = node_conf
-                        .effective_arg("packet_count")
+                    let packets_to_generate = node_instance
+                        .node_config.effective_arg("packet_count")
                         .and_then(|s| parse_suffixed_number(s).ok().map(|v| v as usize))
                         .or_else(|| {
-                            node_conf
-                                .args
+                            node_instance
+                                .node_config.args
                                 .get("no-packets")
                                 .and_then(|s| parse_suffixed_number(s).ok().map(|v| v as usize))
                         })
@@ -228,9 +228,9 @@ impl PipelineFactory {
                         let mut found_interface: Option<String> = None;
 
                         // Traverse the chain to find a BatchTxNode
-                        while let Some(current_node) = pipeline_instance.nodes.iter().find(|n| n.id == current_node_id) {
+                        while let Some(current_node) = pipeline_instance.nodes.iter().find(|n| n.node_config.id == current_node_id) {
                             if visited.contains(&current_node_id) {
-                                debug!("PacketGenerator {}: Cycle detected in node chain", node_conf.id);
+                                debug!("PacketGenerator {}: Cycle detected in node chain", node_instance.node_config.id);
                                 break;
                             }
                             visited.insert(current_node_id.clone());
@@ -242,7 +242,7 @@ impl PipelineFactory {
                             }
 
                             // Move to next node if it exists
-                            if let Some(next) = current_node.routes.first() {
+                            if let Some(next) = current_node.node_config.routes.first() {
                                 current_node_id = next.clone();
                             } else {
                                 // Reached end of chain
@@ -255,7 +255,7 @@ impl PipelineFactory {
                             use xbricks_base::system::get_mac_from_ifname;
                             match get_mac_from_ifname(&iface) {
                                 Ok(mac) => {
-                                    debug!("PacketGenerator {}: Using MAC {} from interface {}", node_conf.id, mac, iface);
+                                    debug!("PacketGenerator {}: Using MAC {} from interface {}", node_instance.node_config.id, mac, iface);
                                     mac
                                 }
                                 Err(e) => {
@@ -270,7 +270,7 @@ impl PipelineFactory {
                             // Default MAC (all zeros) if no sink node found with interface
                             debug!(
                                 "PacketGenerator {}: No sink node with interface found in chain, using default MAC 00:00:00:00:00:00",
-                                node_conf.id
+                                node_instance.node_config.id
                             );
                             MacAddr6::new(0, 0, 0, 0, 0, 0)
                         }
@@ -278,8 +278,8 @@ impl PipelineFactory {
                     // Parse combined "dst" arg: "ip:mac" format (e.g. "192.168.177.1:08:bf:b8:0a:0b:0c"),
                     // matching ipblower's --dst option but using ':' as the ip/mac separator.
                     // Individual "dst_ip" and "dst_mac" args take precedence if also present.
-                    let (dst_from_combined_ip, dst_from_combined_mac) = node_conf
-                        .effective_arg("dst")
+                    let (dst_from_combined_ip, dst_from_combined_mac) = node_instance
+                        .node_config.effective_arg("dst")
                         .and_then(|s| {
                             // The IP is dotted-decimal; split on the first ':' to separate it from the MAC.
                             s.find(':').map(|pos| (&s[..pos], &s[pos + 1..]))
@@ -301,15 +301,15 @@ impl PipelineFactory {
                         .unwrap_or((None, None));
 
                     // Parse destination IP from args (default to 192.168.177.1)
-                    let dst_ip = node_conf
-                        .effective_arg("dst_ip")
+                    let dst_ip = node_instance
+                        .node_config.effective_arg("dst_ip")
                         .and_then(|s| s.parse::<std::net::Ipv4Addr>().ok())
                         .or(dst_from_combined_ip)
                         .unwrap_or(std::net::Ipv4Addr::new(192, 168, 177, 1));
 
                     // Parse destination MAC from args (default to 08:bf:b8:0a:0b:0c)
-                    let dst_mac = node_conf
-                        .effective_arg("dst_mac")
+                    let dst_mac = node_instance
+                        .node_config.effective_arg("dst_mac")
                         .and_then(|s| {
                             let parts: Vec<&str> = s.split(':').collect();
                             if parts.len() == 6 {
@@ -323,7 +323,7 @@ impl PipelineFactory {
                         .unwrap_or(MacAddr6::new(0x08, 0xbf, 0xb8, 0x0a, 0x0b, 0x0c));
 
                     // 3. Inject it into the fast_nodes array
-                    let index = *name_to_index.get(&node_conf.id).ok_or(format!("Node {} not found", node_conf.id))?;
+                    let index = *name_to_index.get(&node_instance.node_config.id).ok_or(format!("Node {} not found", node_instance.node_config.id))?;
                     fast_nodes[index] = HotNodeData {
                         routes: vec![next_id.clone()],
                         dynamic_state: NodeDynamicState::Generator {
@@ -341,12 +341,12 @@ impl PipelineFactory {
                         (platform_data.tsc_frequency / pps as u64 * batch_size as u64).saturating_sub(PATCH_CYCLES);
                     debug!(
                         "PacketGenerator {}: pps={}, batch_size={}, packets_to_generate={}, min_interbatch_gap={}, src_mac={}, dst_ip={}, dst_mac={}",
-                        node_conf.id, pps, batch_size, packets_to_generate, min_interbatch_gap, src_mac, dst_ip, dst_mac
+                        node_instance.node_config.id, pps, batch_size, packets_to_generate, min_interbatch_gap, src_mac, dst_ip, dst_mac
                     );
 
                     // Detect if this generator should start immediately (ipblower)
                     // or start idle (xbricks GUI). Default to false. ipblower sets autostart="true".
-                    let autostart = node_conf.args.get("autostart")
+                    let autostart = node_instance.node_config.args.get("autostart")
                         .map(|s| s.to_lowercase() == "true")
                         .unwrap_or(false);
 
@@ -357,7 +357,7 @@ impl PipelineFactory {
                     let tm_is_running = Arc::new(AtomicBool::new(false));
                     if let Some(ref mut reg) = telemetry_registry {
                         reg.register(
-                            node_conf.id.clone(),
+                            node_instance.node_config.id.clone(),
                             vec![
                                 "total_generated".to_string(),
                                 "pkts_this_run".to_string(),
@@ -374,10 +374,10 @@ impl PipelineFactory {
                     // NEW: Resolve WASM properties if the feature is enabled
                     // =========================================================
                     #[cfg(feature = "wasm")]
-                    let (wasm_mgr_opt, wasm_path_opt, partition_start_bytes) = if let Some(path) = node_conf.args.get("wasm_file_path") {
+                    let (wasm_mgr_opt, wasm_path_opt, partition_start_bytes) = if let Some(path) = node_instance.node_config.args.get("wasm_file_path") {
                         let manager = wasm_managers[umem_group_id]
                             .as_ref()
-                            .ok_or(format!("PacketGenerator {}: no WasmManager for umem {}", node_conf.id, umem_group_id))?;
+                            .ok_or(format!("PacketGenerator {}: no WasmManager for umem {}", node_instance.node_config.id, umem_group_id))?;
 
                         // Compute this instance's reserved-memory partition
                         let instance_idx = wasm_instance_counters[umem_group_id];
@@ -420,21 +420,21 @@ impl PipelineFactory {
                         #[cfg(feature = "wasm")]
                         partition_start_bytes,
                         #[cfg(feature = "wasm")]
-                        node_conf.wasm_data.clone().unwrap_or_default(),
+                        node_instance.node_config.wasm_data.clone().unwrap_or_default(),
                         platform_data.clone(),
                     ))
                 }
 
                 // === 3. TX Node ===
                 "BatchTxNode" => {
-                    let iface = node_conf
-                        .args
+                    let iface = node_instance
+                        .node_config.args
                         .get("interface")
-                        .ok_or(format!("TxNode {} missing 'interface' arg", node_conf.id))?;
+                        .ok_or(format!("TxNode {} missing 'interface' arg", node_instance.node_config.id))?;
 
-                    assert!(node_conf.queues.is_some());
-                    assert_eq!(node_conf.queues.as_ref().unwrap().len(), 1);
-                    let queue_id = node_conf.queues.as_ref().unwrap()[0] as usize;
+                    assert!(node_instance.node_config.queues.is_some());
+                    assert_eq!(node_instance.node_config.queues.as_ref().unwrap().len(), 1);
+                    let queue_id = node_instance.node_config.queues.as_ref().unwrap()[0] as usize;
 
                     // Take ownership of the TX component of the socket
                     let tx_sink = xsocket_mgr
@@ -449,7 +449,7 @@ impl PipelineFactory {
                     let dropped_pkts = Arc::new(AtomicU64::new(0));
                     if let Some(ref mut reg) = telemetry_registry {
                         reg.register(
-                            node_conf.id.clone(),
+                            node_instance.node_config.id.clone(),
                             vec!["dropped".to_string()],
                             vec![dropped_pkts.clone()],
                             vec![Arc::new(AtomicU64::new(0))],
@@ -461,13 +461,13 @@ impl PipelineFactory {
 
                 // === 5. FastParser Node ===
                 "FastParserNode" => {
-                    let next_str = node_conf
-                        .routes
+                    let next_str = node_instance
+                        .node_config.routes
                         .first()
-                        .ok_or(format!("Node {} missing routes[0]", node_conf.id))?;
+                        .ok_or(format!("Node {} missing routes[0]", node_instance.node_config.id))?;
                     let next_id = id_map
                         .get(next_str)
-                        .ok_or(format!("Node {} points to unknown next '{}'", node_conf.id, next_str))?
+                        .ok_or(format!("Node {} points to unknown next '{}'", node_instance.node_config.id, next_str))?
                         .clone();
 
                     Box::new(FastParserNode::new(my_id.clone(), next_id))
@@ -477,50 +477,50 @@ impl PipelineFactory {
                 // === 6. Wasm Nodes (Inspector & Engine) ===
                 #[cfg(feature = "wasm")]
                 "WasmInspectorNode" | "WasmEngine" => {
-                    let node_type = node_conf.node_type.as_str();
+                    let node_type = node_instance.node_config.node_type.as_str();
 
-                    let wasm_path = node_conf
-                        .args
+                    let wasm_path = node_instance
+                        .node_config.args
                         .get("wasm_file_path")
-                        .ok_or_else(|| format!("{} {} missing 'wasm_file_path' in args", node_type, node_conf.id))?;
+                        .ok_or_else(|| format!("{} {} missing 'wasm_file_path' in args", node_type, node_instance.node_config.id))?;
 
-                    let umem_id = node_conf
-                        .args
+                    let umem_id = node_instance
+                        .node_config.args
                         .get("umem")
-                        .ok_or_else(|| format!("{} {} missing 'umem' in args", node_type, node_conf.id))?
+                        .ok_or_else(|| format!("{} {} missing 'umem' in args", node_type, node_instance.node_config.id))?
                         .parse::<usize>()
-                        .map_err(|_| format!("{} {} 'umem' must be a number", node_type, node_conf.id))?;
+                        .map_err(|_| format!("{} {} 'umem' must be a number", node_type, node_instance.node_config.id))?;
 
                     let manager = wasm_managers[umem_id]
                         .as_ref()
                         .ok_or_else(|| format!(
                             "{} {}: no WasmManager for umem {}",
-                            node_type, node_conf.id, umem_id
+                            node_type, node_instance.node_config.id, umem_id
                         ))?;
 
-                    if node_conf.routes.len() > 255 {
+                    if node_instance.node_config.routes.len() > 255 {
                         return Err(format!(
                             "{} {} cannot have more than 255 routes",
-                            node_type, node_conf.id
+                            node_type, node_instance.node_config.id
                         ));
                     }
                     // ==========================================================
                     // DYNAMIC ROUTING TABLE BUILDER
                     // Loop through however many routes the user provided in TOML
                     // ==========================================================
-                    let mut routing_table = Vec::with_capacity(node_conf.routes.len());
-                    for route_name in &node_conf.routes {
+                    let mut routing_table = Vec::with_capacity(node_instance.node_config.routes.len());
+                    for route_name in &node_instance.node_config.routes {
                         let target_id = id_map
                             .get(route_name)
                             .ok_or_else(|| format!(
                                 "{} {}: route target '{}' not found",
-                                node_type, node_conf.id, route_name
+                                node_type, node_instance.node_config.id, route_name
                             ))?
                             .clone();
                         routing_table.push(target_id);
                     }
 
-                    let labels = node_conf.labels.clone();
+                    let labels = node_instance.node_config.labels.clone();
                     let num_buckets = labels.as_ref().map_or(0, |l| l.len());
                     let counters_pkts: Vec<Arc<AtomicU64>> = (0..num_buckets)
                         .map(|_| Arc::new(AtomicU64::new(0)))
@@ -531,7 +531,7 @@ impl PipelineFactory {
 
                     if let Some(registry) = telemetry_registry.as_mut() {
                         registry.register(
-                            node_conf.id.clone(),
+                            node_instance.node_config.id.clone(),
                             labels.clone().unwrap_or_default(),
                             counters_pkts.clone(),
                             counters_bytes.clone(),
@@ -540,7 +540,7 @@ impl PipelineFactory {
                     }
 
                     let telemetry_metrics = xbricks_base::telemetry::TelemetryMetrics {
-                        node_id: node_conf.id.clone(),
+                        node_id: node_instance.node_config.id.clone(),
                         labels: labels.unwrap_or_default(),
                         counters_pkts,
                         counters_bytes,
@@ -566,7 +566,7 @@ impl PipelineFactory {
                             telemetry_metrics,
                             partition_start_bytes,
                             umem_id as u8,
-                            node_conf.wasm_data.clone().unwrap_or_default()
+                            node_instance.node_config.wasm_data.clone().unwrap_or_default()
                         ))
                     } else {
                         use xbricks_wasm::WasmEngine;
@@ -581,12 +581,12 @@ impl PipelineFactory {
                             telemetry_metrics,
                             partition_start_bytes,
                             umem_id as u8,
-                            node_conf.wasm_data.clone().unwrap_or_default(),
+                            node_instance.node_config.wasm_data.clone().unwrap_or_default(),
                             platform_data
                         ))
                     }
                 }
-                _ => return Err(format!("Unknown Node Type: {}", node_conf.node_type)),
+                _ => return Err(format!("Unknown Node Type: {}", node_instance.node_config.node_type)),
             };
 
             // Place the built node into the vector at the index corresponding to its NodeId
@@ -607,7 +607,7 @@ impl PipelineFactory {
 
         for node_conf in &pipeline_instance.nodes {
             // Count routes
-            for route_str in &node_conf.routes {
+            for route_str in &node_conf.node_config.routes {
                 if let Some(target_id) = id_map.get(route_str) {
                     in_degrees[target_id.index as usize] += 1;
                 }
