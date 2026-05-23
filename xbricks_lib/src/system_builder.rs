@@ -1,14 +1,15 @@
 // src/system_builder.rs
 
-use crossbeam_channel::{unbounded, Sender, Receiver};
 use std::sync::Arc;
 use std::collections::HashMap;
 use core_affinity::CoreId;
+use crossbeam_channel::unbounded;
 use xsk_rs::{Umem, };
 use log::{warn, debug, info, error};
+use tokio::sync::broadcast::Sender;
 use xsk_rs::config::{FrameSize, QueueSize};
 //use xbricks_wasm::wasm_manager::WasmManager;
-use xbricks_base::{RuntimeUmemConfig, SystemBus, UmemPartition};
+use xbricks_base::{ControlEvent, RuntimeUmemConfig, SystemBus, UmemPartition};
 use xbricks_base::frame_registry::{FrameRegistry, MAX_UMEM};
 use crate::xsocket::{XSocket, XSocketRx, XSocketTx, XdpSocketConfig};
 use crate::{BatchRx, BatchTx};
@@ -47,6 +48,7 @@ impl SystemBuilder {
         mut self,
         interface_skels: Option<&HashMap<String, Arc<XscrubberSkel<'static>>>>,
         platform_data: PlatformData,
+        ctrl_tx: Option<Sender::<ControlEvent>>,
     ) -> Result<Box<XBricksSystem>, Box<dyn std::error::Error>> {
 
         use crate::config::hot_config::SharedSystemState;
@@ -465,11 +467,13 @@ impl SystemBuilder {
             let mut runners = Vec::new();
             for pipeline_instance_cfg in &worker.pipelines {
                 // Build the node DAG for this pipeline instance
+                let builder_ctrl_tx = ctrl_tx.clone();
                 let (nodes, source_indices) = crate::pipeline::PipelineFactory::build(
                     pipeline_instance_cfg,
                     worker_id,
                     &mut xbricks_system.xsocket_registry,
                     Some(&mut telemetry_registry),
+                    builder_ctrl_tx,
                     &xbricks_system.platform_data,
                     #[cfg(feature = "wasm")]
                     &self.wasm_managers,

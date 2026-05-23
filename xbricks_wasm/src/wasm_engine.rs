@@ -1,15 +1,16 @@
 use std::collections::HashMap;
 use std::mem::MaybeUninit;
 use std::sync::atomic::Ordering;
+use tokio::sync::broadcast::{Receiver, Sender};
+use tokio::sync::broadcast::error::TryRecvError;
 use crate::wasm_manager::{MyHostState, WasmManager}; // Assuming WasmManager is defined here
 use wasmtime::Store;
 use wasmtime::component::{bindgen, ResourceTable};
 use wasmtime_wasi::WasiCtxBuilder;
-use xbricks_base::{Directive, Node, NodeId};
+use xbricks_base::{ControlEvent, Directive, Node, NodeId};
 use xbricks_base::interface::batch::Batch;
 use xbricks_base::interface::Pdu;
 use xbricks_base::telemetry::TelemetryMetrics;
-use crossbeam_channel::Sender;
 use xbricks_base::frame_registry::get_worker_frame_registry;
 use xbricks_protocol::TELEMETRY_FLAG;
 use xbricks_protocol::wbatch::MAX_BATCH_SIZE;
@@ -25,14 +26,16 @@ bindgen!({
 
 pub struct WasmEngine {
     id: NodeId,
-    // Wasmtime state: Store holds the UMEM handle via MyHostState
+    /// Wasmtime state: Store holds the UMEM handle via MyHostState
     store: Store<MyHostState>,
-    // The generated bindings struct (named after the 'world' in CamelCase)
+    /// The generated bindings struct (named after the 'world' in CamelCase)
     bindings: EnginePlugin,
-    // Index corresponds to the Route ID returned by Wasm
+    /// Index corresponds to the Route ID returned by Wasm
     routing_table: Vec<NodeId>,
-    // Telemetry dispatch channel
+    /// Telemetry dispatch channel
     telemetry_tx: Option<Sender<u32>>,
+    /// Control event receiver channel
+    control_rx: Option<Receiver<ControlEvent>>,
     processed_packets: usize,
     #[cfg(feature = "profiling")]
     total_cycles: u64,
@@ -53,6 +56,7 @@ impl WasmEngine {
         wasm_file_path: &str,
         routing_table: Vec<NodeId>, // Accept any number of routes
         telemetry_tx: Option<Sender<u32>>,
+        control_rx: Option<Receiver<ControlEvent>>,
         telemetry_metrics: TelemetryMetrics,
         partition_start_bytes: u32,
         umem_id: u8,
@@ -107,6 +111,7 @@ impl WasmEngine {
             bindings,
             routing_table,
             telemetry_tx,
+            control_rx,
             processed_packets: 0,
             #[cfg(feature = "profiling")]
             total_cycles: 0,
@@ -296,6 +301,42 @@ impl Node for WasmEngine {
         self.processed_packets += allocated;
         // 3. Hand off to the exact same shared WASM execution and routing logic!
         self.execute_wasm_and_route(batch)
+    }
+
+    fn requires_control_events(&self) -> bool {
+        true
+    }
+
+    fn poll_control_events(&mut self) {        // FAST PATH: If the Axum channel is disabled, instantly return.
+        let Some(rx) = &mut self.control_rx else {
+            return;
+        };
+
+        // If we reach here, 'rx' is a mutable reference to the active Receiver.
+        loop {
+            match rx.try_recv() {
+                Ok(event) => {
+                    log::info!("NODE {}: Processing GUI Opcode {}", self.id, event.opcode);
+                    tokio::task::block_in_place(|| {
+                        let _ = self.bindings
+                            .xbricks_plugins_packet_engine()
+                            .call_on_control_event(&mut self.store, event.opcode, &event.payload);
+                    });
+                }
+                Err(TryRecvError::Empty) => {
+                    break;
+                }
+                Err(TryRecvError::Lagged(skipped_count)) => {
+                    log::warn!("NODE {}: Lagged! Missed {} control events.", self.id, skipped_count);
+                }
+                Err(TryRecvError::Closed) => {
+                    // The Axum server was destroyed, set the option to None 
+                    // so we stop checking it on future iterations.
+                    self.control_rx = None;
+                    break;
+                }
+            }
+        }
     }
 
     fn processed_packets(&self) -> usize {

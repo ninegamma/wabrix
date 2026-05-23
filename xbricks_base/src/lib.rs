@@ -6,6 +6,7 @@ pub mod frame_registry;
 pub mod system;
 pub mod common;
 pub mod telemetry;
+pub mod node_instance_id;
 
 use core::fmt::Display;
 use crossbeam_channel::Sender;
@@ -101,6 +102,8 @@ pub enum Directive {
     Stop,
 }
 
+
+
 pub trait Node: Send + std::any::Any {
     fn id(&self) -> &NodeId;
 
@@ -108,12 +111,16 @@ pub trait Node: Send + std::any::Any {
     /// It modifies the batch in-place (RTC efficiency).
     fn process(&mut self, batch: &mut Batch) -> Directive;
 
+    /// Control-path for timers (defaults to doing nothing)
     fn requires_timers(&self) -> bool { false }
-
-    // Control-path (defaults to doing nothing)
     fn poll_timers(&mut self, batch: &mut Batch, current_tsc: u64) -> Directive {
         Directive::Stop // Default implementation does nothing
     }
+
+    /// do we have a control channel (defaults to doing nothing)
+    fn requires_control_events(&self) -> bool { false }
+    /// called by the scheduler when a control event is received  (defaults to doing nothing)
+    fn poll_control_events(&mut self) { }
 
     /// called before startup, e.g., rx nodes can replenish the fill queue
     fn prepare(&mut self) -> anyhow::Result<()> {
@@ -184,4 +191,10 @@ impl Display for NodeId {
         // 2. Let the formatter apply the, e.g., {:20} or {:>20} rules!
         f.pad(&output)
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct ControlEvent {
+    pub opcode: u32,
+    pub payload: Vec<u8>,
 }

@@ -59,8 +59,8 @@ src_ip = "10.10.10.222"
 src_mac = "44:49:88:06:63:38" # enp2s0f0np0 (WASM Side)
 dst_ip = "10.10.10.31"
 dst_mac = "44:49:88:06:63:39" # enp2s0f1np1 (Linux Side)
-syn_rate = "100000"   # Hertz
-syn_limit = "100"
+syn_rate = "2"   # Hertz
+syn_limit = "50"
 close_timeout = "5000"  # millis
 
 [[pipelines.nodes]]

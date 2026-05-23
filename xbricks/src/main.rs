@@ -13,6 +13,7 @@ use separator::Separatable;
 use tokio::sync::{mpsc, RwLock};
 use xbricks_lib::config::hot_config::SharedSystemState;
 use logger::WsLogger;
+use xbricks_base::ControlEvent;
 use xbricks_lib::probe_kernel_fds;
 use xbricks_base::telemetry::{spawn_telemetry_ice_for_ifaces, spawn_pipeline_telemetry, TMLiveStats};
 use xbricks_base::system::PlatformData;
@@ -30,6 +31,7 @@ async fn main() -> anyhow::Result<()> {
     // 1. Create the broadcast channel FIRST
     let (console_tx, _rx) = tokio::sync::broadcast::channel::<String>(1000);
     let (telemetry_tx, _) = tokio::sync::broadcast::channel::<TMLiveStats>(100);
+    let (ctrl_tx, _) = tokio::sync::broadcast::channel::<ControlEvent>(100);
 
     // 2. Hijack the global `log` crate and attach it to our channel
     let logger = WsLogger::new(console_tx.clone());
@@ -77,6 +79,7 @@ async fn main() -> anyhow::Result<()> {
         cmd_tx: cmd_tx.clone(),
         config_path: config_path.clone(),
         telemetry_tx: telemetry_tx.clone(),
+        ctrl_tx: ctrl_tx.clone(),
     };
     let (axum_shutdown_tx, axum_join_handle) = spawn_management_api(app_state);
 
@@ -135,9 +138,11 @@ async fn main() -> anyhow::Result<()> {
                 info!("Building XDP system from configuration...");
                 let sys_builder = current_config.to_system_builder()
                     .context("Failed to create system builder").unwrap();
+                // Clone the transmitter for the builder
+                let builder_ctrl_tx = Some(ctrl_tx.clone()) ;
 
                 let xbricks_system = tokio::task::block_in_place(|| {
-                    sys_builder.build(Some(&interface_skels), platform_data.clone())
+                    sys_builder.build(Some(&interface_skels), platform_data.clone(), builder_ctrl_tx)
                         .map_err(|e| anyhow::anyhow!("Failed to build XDP system: {}", e))
                 })?;
 

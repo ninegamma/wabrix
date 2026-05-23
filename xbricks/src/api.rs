@@ -14,6 +14,18 @@ use axum::{
 };
 use axum::extract::ws::Utf8Bytes;
 use futures_util::{sink::SinkExt, stream::StreamExt};
+use axum::response::IntoResponse;
+use tokio::sync::broadcast::Sender;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
+use toml_edit::{ser, DocumentMut, Item};
+use tower_http::services::ServeDir;
+use xbricks_protocol::helpers::parse_suffixed_number;
+use xbricks_base::{ControlEvent, NodeId};
+use xbricks_lib::config::hot_config::{NodeDynamicState, SharedSystemState};
+use xbricks_lib::generator_node::GenState;
+use xbricks_base::telemetry::{TMLiveStats};
+use xbricks_protocol::wbatch::MAX_BATCH_SIZE;
 
 // A type alias to make the signatures much cleaner
 pub type SharedConfig = Arc<RwLock<XBricksConfig>>;
@@ -28,6 +40,12 @@ pub enum SystemCommand {
     Shutdown, // Kill the entire application
 }
 
+#[derive(Deserialize)]
+pub struct GuiEventRequest {
+    pub opcode: u32,
+    pub payload: Vec<u8>,
+}
+
 // --- The Master Application State ---
 #[derive(Clone)]
 pub struct AppState {
@@ -39,6 +57,7 @@ pub struct AppState {
     /// Path to the active .toml configuration file (mutable so saves can redirect)
     pub config_path: Arc<tokio::sync::RwLock<String>>,
     pub telemetry_tx: tokio::sync::broadcast::Sender<TMLiveStats>,
+    pub ctrl_tx: Sender<ControlEvent>,
 }
 
 #[derive(Deserialize)]
@@ -134,17 +153,6 @@ struct UiEdge {
     target: String,
 }
 
-use axum::response::IntoResponse;
-use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
-use toml_edit::{ser, DocumentMut, Item};
-use tower_http::services::ServeDir;
-use xbricks_protocol::helpers::parse_suffixed_number;
-use xbricks_base::NodeId;
-use xbricks_lib::config::hot_config::{NodeDynamicState, SharedSystemState};
-use xbricks_lib::generator_node::GenState;
-use xbricks_base::telemetry::{TMLiveStats};
-use xbricks_protocol::wbatch::MAX_BATCH_SIZE;
 
 /// Information about a network interface that supports XDP native mode with zerocopy.
 #[derive(Serialize)]
@@ -533,6 +541,20 @@ async fn dataplane_command(
         return axum::http::StatusCode::INTERNAL_SERVER_ERROR;
     }
     axum::http::StatusCode::OK
+}
+
+// Axum Handler
+pub async fn handle_gui_event(
+    State(ctrl_tx): State<Sender<ControlEvent>>,
+    Json(request): Json<GuiEventRequest>,
+) {
+    let event = ControlEvent {
+        opcode: request.opcode,
+        payload: request.payload,
+    };
+
+    // Shoot it across the thread boundary into the dataplane!
+    let _ = ctrl_tx.send(event);
 }
 
 /// Serialize `config` to a human-readable TOML file at `path`, applying the same

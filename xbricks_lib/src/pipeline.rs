@@ -13,9 +13,10 @@ pub(crate) use crate::nodes::{
 pub(crate) use crate::{BatchRx, BatchTx};
 use xbricks_base::system::PlatformData;
 use separator::Separatable;
+use tokio::sync::broadcast::{Receiver, Sender};
 use xbricks_protocol::helpers::parse_suffixed_number;
 use xbricks_base::frame_registry::{set_tsc_frequency, set_worker_frame_registry};
-use xbricks_base::{frame_registry, Directive, Node, NodeId};
+use xbricks_base::{frame_registry, ControlEvent, Directive, Node, NodeId};
 use crate::config::hot_config::{HotNodeData, HotPipelineConfig, NodeDynamicState};
 #[cfg(feature = "wasm")]
 use xbricks_wasm::wasm_manager::WasmManager;
@@ -46,6 +47,7 @@ impl PipelineFactory {
         worker_id: usize,
         xsocket_mgr: &mut dyn XSocketRxTxProvider,
         mut telemetry_registry: Option<&mut TelemetryRegistry>,
+        ctrl_tx: Option<Sender<ControlEvent>>,
         platform_data: &PlatformData,
         #[cfg(feature = "wasm")]
         wasm_managers: &Vec<Option<Arc<WasmManager>>>,
@@ -568,12 +570,14 @@ impl PipelineFactory {
                         ))
                     } else {
                         use xbricks_wasm::WasmEngine;
+                        let worker_rx = ctrl_tx.as_ref().map(|tx| tx.subscribe());
                         Box::new(WasmEngine::new(
                             my_id.clone(),
                             manager,
                             wasm_path,
                             routing_table,
                             None,
+                            worker_rx,
                             telemetry_metrics,
                             partition_start_bytes,
                             umem_id as u8,
@@ -661,6 +665,8 @@ pub struct PipelineRunner {
     full_batch_count: usize,
     /// Cache the indices of nodes that need timers
     timer_indices: Vec<usize>,
+    /// Cache the indices of nodes that need control events
+    control_indices: Vec<usize>,
     last_timer_poll: u64,
     tsc_freq: u64,
     /// RCU handle for this pipeline's hot config — poll_frequency is read from here at runtime
@@ -701,6 +707,14 @@ impl PipelineRunner {
             .map(|(index, _)| index)
             .collect();
 
+        // Pre-calculate which nodes want timers during setup
+        let control_indices: Vec<usize> = nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.requires_control_events())
+            .map(|(index, _)| index)
+            .collect();
+
         Ok(PipelineRunner {
             name,
             worker_id,
@@ -713,6 +727,7 @@ impl PipelineRunner {
             full_batch_count,
             last_timer_poll: 0,
             timer_indices,
+            control_indices,
             tsc_freq,
             pipeline_rcu,
         })
@@ -777,12 +792,12 @@ impl PipelineRunner {
     /// Returns (packets_processed, status_code)
     /// - packets_processed: number of packets handled in this run
     /// - status_code: 0 for success, negative for errors, positive for specific statuses
-    /// Execute one iteration of the pipeline
     pub fn run_iteration(&mut self) -> (u32, i32) {
         let mut total_packets_this_iteration = 0;
+        let mut timer_work_done = false;
 
         // =========================================================
-        // 1. INGRESS: Process all entry points in the DAG
+        //    INGRESS: Process all entry points in the DAG
         // =========================================================
         for i in 0..self.source_indices.len() {
             let source_idx = self.source_indices[i];
@@ -798,7 +813,7 @@ impl PipelineRunner {
         }
 
         // =========================================================
-        // 2. TIMERS: Process asynchronous events (e.g., TCP Retransmits)
+        //    TIMERS: Process asynchronous events (e.g., TCP Retransmits)
         // =========================================================
         let now = unsafe { std::arch::x86_64::_rdtsc() };
 
@@ -817,22 +832,31 @@ impl PipelineRunner {
                 // WasmEngine::poll_timers drains working_batch into Directive::Split
                 // sub-batches, so guard on the directive, not working_batch.len().
                 if !matches!(directive, Directive::Stop) {
+                    // We generated packets via a timer! Do not go to sleep!
+                    timer_work_done = true;
                     self.execute_directive_chain(directive);
                 }
+            }
+
+            for i in 0..self.control_indices.len() {
+                let idx = self.control_indices[i];
+                self.nodes[idx].poll_control_events();
             }
         }
 
         // =========================================================
-        // 3. STATISTICS & ADAPTIVE POLLING
+        //    STATISTICS & ADAPTIVE POLLING
         // =========================================================
-        if total_packets_this_iteration > 0 {
+        if total_packets_this_iteration > 0 || timer_work_done {
             self.packets_processed += total_packets_this_iteration as u64;
             self.runs_with_work += 1;
+            (total_packets_this_iteration, 0)
         } else {
             self.runs_idle += 1;
+            (0,1)
         }
 
-        (total_packets_this_iteration, if total_packets_this_iteration > 0 { 0 } else { 1 })
+
     }
 
     // Inside PipelineRunner implementation

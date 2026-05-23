@@ -26,6 +26,7 @@ arc-swap = { workspace = true }
 xbricks_lib = { path = "../xbricks_lib" }
 xbricks_base = { path = "../xbricks_base" }
 xbricks_protocol = { workspace= true}
+crossbeam-channel = "0.5.15"
 
 [build-dependencies]
 anyhow = { workspace = true }

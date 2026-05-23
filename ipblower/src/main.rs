@@ -168,7 +168,7 @@ async fn main() -> anyhow::Result<()> {
     // --- BUILD SYSTEM FROM CONFIGURATION ---
     info!("Building XDP system from configuration...");
     let sys_builder = config.to_system_builder()?;
-    let xbricks_system = match sys_builder.build(None, platform_data.clone()) {
+    let xbricks_system = match sys_builder.build(None, platform_data.clone(), None) {
         Ok(system) => system,
         Err(e) => {
             eprintln!("Failed to build XDP system: {}", e);

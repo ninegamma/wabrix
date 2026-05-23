@@ -47,7 +47,7 @@ id = "nd_wasm_inspector"
 type = "WasmInspectorNode"
 routes = ["nd_veth_sink", "nd_drop"]
 labels = ["icmp ping", "icmp reply", "icmp other", "any other"]
-args= { wasm_file_path = "/home/rainer1956/rust/xbrix/target/wasm32-wasip2/release/icmp_filter.wasm", umem = "0" }
+args= { wasm_file_path = "/home/rainer1956/rust/xbricks_public/target/wasm32-wasip2/release/icmp_filter.wasm", umem = "0" }
 
 [pipelines.nodes.hot_args]
 
@@ -97,7 +97,7 @@ id = "nd_icmp_filter"
 type = "WasmInspectorNode"
 routes = ["nd_transmitter", "nd_drop"]
 labels = ["icmp ping", "icmp reply", "icmp other", "any other"]
-args= { wasm_file_path = "/home/rainer1956/rust/xbrix/target/wasm32-wasip2/release/icmp_filter.wasm", umem = "1" }
+args= { wasm_file_path = "/home/rainer1956/rust/xbricks_public/target/wasm32-wasip2/release/icmp_filter.wasm", umem = "1" }
 
 [pipelines.nodes.hot_args]
 
@@ -129,7 +129,7 @@ workers = [0, 1]
 id = "pctgen"
 type = "PacketGenerator"
 routes = ["tx_sink_1"]
-args= { wasm_file_path = "/home/rainer1956/rust/xbrix/target/wasm32-wasip2/release/generator_plugin.wasm", umem = "0",   no-zerocopy = "false" }
+args= { wasm_file_path = "/home/rainer1956/rust/xbricks_public/target/wasm32-wasip2/release/generator_plugin.wasm", umem = "0",   no-zerocopy = "false" }
 
 [pipelines.nodes.hot_args]
 packet_count = "256000"
