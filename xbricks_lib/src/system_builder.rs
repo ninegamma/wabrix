@@ -48,7 +48,7 @@ impl SystemBuilder {
         mut self,
         interface_skels: Option<&HashMap<String, Arc<XscrubberSkel<'static>>>>,
         platform_data: PlatformData,
-        ctrl_tx: Option<Sender::<ControlEvent>>,
+        ctrl_tx: Option<Sender::<Arc<ControlEvent>>>,
     ) -> Result<Box<XBricksSystem>, Box<dyn std::error::Error>> {
 
         use crate::config::hot_config::SharedSystemState;
@@ -88,7 +88,7 @@ impl SystemBuilder {
             let mut wasm_counts = vec![0usize; MAX_UMEM];
             for worker in &self.workers {
                 for pipeline in &worker.pipelines {
-                    for node in &pipeline.nodes {
+                    for node in &pipeline.node_instances {
                         if node.node_config.args.contains_key("wasm_file_path") {
                             if let Some(id_str) = node.node_config.args.get("umem") {
                                 if let Ok(uid) = id_str.parse::<usize>() {
@@ -427,7 +427,7 @@ impl SystemBuilder {
             let mut totals = vec![0usize; MAX_UMEM];
             for worker in &self.workers {
                 for pipeline in &worker.pipelines {
-                    for node in &pipeline.nodes {
+                    for node in &pipeline.node_instances {
 
                         // GENERIC WASM DETECTOR: Does this node load a WASM plugin?
                         if node.node_config.args.contains_key("wasm_file_path") {
@@ -466,6 +466,16 @@ impl SystemBuilder {
 
             let mut runners = Vec::new();
             for pipeline_instance_cfg in &worker.pipelines {
+                // --- Extract the Node Identities from the blueprint ---
+                let node_identities: Vec<xbricks_base::node_instance_id::NodeInstanceId> = pipeline_instance_cfg
+                    .node_instances
+                    .iter()
+                    .map(|n| n.node_instance_id.clone())
+                    .collect();
+
+                // --- Create a dedicated receiver for this Runner ---
+                let runner_control_rx = ctrl_tx.as_ref().map(|tx| tx.subscribe());
+
                 // Build the node DAG for this pipeline instance
                 let builder_ctrl_tx = ctrl_tx.clone();
                 let (nodes, source_indices) = crate::pipeline::PipelineFactory::build(
@@ -484,13 +494,24 @@ impl SystemBuilder {
                     &mut wasm_instance_counters,
                 )
                 .map_err(|e| anyhow::anyhow!(e))?;
-                // Create the pipeline runner
+                
                 let pipeline_rcu = shared_state.pipelines
                     .get(&pipeline_instance_cfg.name)
                     .expect("Pipeline RCU missing for runner")
                     .clone();
-                let runner = crate::pipeline::PipelineRunner::new(pipeline_instance_cfg.name.clone(), worker_id, nodes, source_indices, xbricks_system.platform_data.tsc_frequency, pipeline_rcu)
-                    .map_err(|e| anyhow::anyhow!(e))?;
+                
+                // Create the pipeline runner
+                let runner = crate::pipeline::PipelineRunner::new(
+                    pipeline_instance_cfg.name.clone(),
+                    worker_id,
+                    nodes,
+                    source_indices,
+                    node_identities,   
+                    runner_control_rx,
+                    xbricks_system.platform_data.tsc_frequency,
+                    pipeline_rcu
+                )
+                .map_err(|e| anyhow::anyhow!(e))?;
 
                 runners.push(runner);
             }

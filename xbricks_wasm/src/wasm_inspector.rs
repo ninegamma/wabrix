@@ -29,7 +29,7 @@ pub struct WasmInspectorNode {
     routing_table: Vec<NodeId>,
     // Telemetry dispatch channel
     telemetry_tx: Option<Sender<u32>>,
-    processed_packets: usize,
+    processed_packets: u64,
     #[cfg(feature = "profiling")]
     total_cycles: u64,
     telemetry_metrics: TelemetryMetrics,
@@ -132,7 +132,7 @@ impl Node for WasmInspectorNode {
             self.id, self.umem_id
         );
 
-        self.processed_packets += len;
+        self.processed_packets += len as u64;
 
         // ==========================================================
         // 1. CROSS THE WASM BOUNDARY (The 4KB L1-Cache Transfer)
@@ -238,7 +238,7 @@ impl Node for WasmInspectorNode {
         }
     }
 
-    fn processed_packets(&self) -> usize {
+    fn processed_packets(&self) -> u64 {
         self.processed_packets
     }
 

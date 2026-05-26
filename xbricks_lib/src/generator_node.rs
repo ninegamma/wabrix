@@ -43,15 +43,15 @@ pub struct GeneratorNode {
     /// Worker ID for this generator instance
     worker_id: usize,
     /// Number of packets to generate per batch
-    batch_size: usize,
+    batch_size: u32,
     /// minimum interbatch gap in tsc cycles
     min_interbatch_gap: u64,
     lastbatch_timestamp: u64,
     start_delay: u64,
     start_time: u64,
-    packets_to_generate: usize,
+    packets_to_generate: u64,
     /// Total packets generated per worker
-    total_generated: usize,
+    total_generated: u64,
     /// Flag indicating if generation is complete
     finished: bool,
     /// Timestamp of first packet burst (TSC cycles)
@@ -69,13 +69,13 @@ pub struct GeneratorNode {
     dst_ip: Ipv4Addr,
     /// Destination MAC address
     dst_mac: MacAddr6,
-    next_log_threshold: usize,
+    next_log_threshold: u64,
     scratch_pdus: [core::mem::MaybeUninit<Pdu>; MAX_BATCH_SIZE],
     #[cfg(feature = "profiling")]
     total_cycles: u64,
     // new fields for GUI controlled generator
     state: GenState,
-    packets_generated_this_run: usize,
+    packets_generated_this_run: u64,
     shared_state: Arc<SharedSystemState>,
     pipeline_name: String,
     // telemetry atomics shared with TelemetryRegistry
@@ -109,9 +109,9 @@ impl GeneratorNode {
         next_node: NodeId,
         umem_group_id: usize,
         worker_id: usize,
-        batch_size: usize,
+        batch_size: u32,
         min_interbatch_gap: u64,    // minimum interbatch_gap in tsc cycles
-        packets_to_generate: usize, // 0: no limit
+        packets_to_generate: u64, // 0: no limit
         src_mac: MacAddr6,
         dst_ip: Ipv4Addr,
         dst_mac: MacAddr6,
@@ -275,7 +275,7 @@ impl GeneratorNode {
         self.tm_is_running.store(false, Ordering::Relaxed);
     }
 
-    pub fn get_stats(&self) -> usize {
+    pub fn get_stats(&self) -> u64 {
         self.total_generated
     }
 
@@ -430,9 +430,9 @@ impl Node for GeneratorNode {
         let remaining = if self.packets_to_generate > 0 {
             self.packets_to_generate.saturating_sub(self.packets_generated_this_run)
         } else {
-            usize::MAX
+            u64::MAX
         };
-        let frames_to_generate = std::cmp::min(std::cmp::min(self.batch_size, remaining), MAX_BATCH_SIZE);
+        let frames_to_generate = std::cmp::min(std::cmp::min(self.batch_size as u64, remaining), MAX_BATCH_SIZE as u64);
 
         if frames_to_generate == 0 {
             self.reset_to_idle();
@@ -440,7 +440,7 @@ impl Node for GeneratorNode {
             return Directive::Next(self.next_node.clone());
         }
 
-        let allocated = frame_registry.allocate_pdus_into(self.umem_group_id, &mut self.scratch_pdus[..frames_to_generate]);
+        let allocated = frame_registry.allocate_pdus_into(self.umem_group_id, &mut self.scratch_pdus[..frames_to_generate as usize]);
 
         if allocated == 0 {
             // We are temporarily out of frames (RX socket is hoarding, or TX ring is full).
@@ -536,8 +536,8 @@ impl Node for GeneratorNode {
             self.last_burst_timestamp = now;
 
             // Increment both counters!
-            self.total_generated += generated as usize;
-            self.packets_generated_this_run += generated as usize;
+            self.total_generated += generated;
+            self.packets_generated_this_run += generated;
             self.tm_total.store(self.total_generated as u64, Ordering::Relaxed);
             self.tm_this_run.store(self.packets_generated_this_run as u64, Ordering::Relaxed);
             if let Some(first) = self.first_burst_instant {
@@ -552,7 +552,7 @@ impl Node for GeneratorNode {
             #[cfg(feature = "profiling")]
             self.tm_avg_cycles.store(self.total_cycles, Ordering::Relaxed);
 
-            const LOG_INTERVAL: usize = 1_000_000;
+            const LOG_INTERVAL: u64 = 1_000_000;
             if self.total_generated >= self.next_log_threshold {
                 log::trace!("PacketGenNode {}: Generated {} packets", self.id, self.total_generated);
                 self.next_log_threshold += LOG_INTERVAL;
@@ -571,11 +571,11 @@ impl Node for GeneratorNode {
     }
 
     #[inline]
-    fn processed_packets(&self) -> usize {
+    fn processed_packets(&self) -> u64 {
         self.total_generated
     }
 
-    fn full_batch_count(&self) -> Option<usize> {
+    fn full_batch_count(&self) -> Option<u32> {
         Some(self.batch_size)
     }
 

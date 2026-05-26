@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use arc_swap::ArcSwap;
 use core_affinity::CoreId;
 use log::{debug, info};
-use crate::toml_parser::PipelineInstance;
+use crate::toml_parser::{NodeInstance, PipelineInstance};
 pub(crate) use crate::nodes::{
     BatchRxNode, BatchTxNode, DropNode, FastParserNode,
 };
@@ -22,6 +22,7 @@ use crate::config::hot_config::{HotNodeData, HotPipelineConfig, NodeDynamicState
 use xbricks_wasm::wasm_manager::WasmManager;
 use xbricks_base::telemetry::TelemetryRegistry;
 use xbricks_protocol::wbatch::MAX_BATCH_SIZE;
+use xbricks_base::node_instance_id::NodeInstanceId;
 use xbricks_wasm::WasmEngine;
 use crate::generator_node::{GenState, GeneratorNode};
 
@@ -47,7 +48,7 @@ impl PipelineFactory {
         worker_id: usize,
         xsocket_mgr: &mut dyn XSocketRxTxProvider,
         mut telemetry_registry: Option<&mut TelemetryRegistry>,
-        ctrl_tx: Option<Sender<ControlEvent>>,
+        ctrl_tx: Option<Sender<Arc<ControlEvent>>>,
         platform_data: &PlatformData,
         #[cfg(feature = "wasm")]
         wasm_managers: &Vec<Option<Arc<WasmManager>>>,
@@ -62,7 +63,7 @@ impl PipelineFactory {
         // Map "string_id" -> NodeId
         // The vector index will be the NodeId index.
         let mut id_map: HashMap<String, NodeId> = HashMap::new();
-        for (index, node_conf) in pipeline_instance.nodes.iter().enumerate() {
+        for (index, node_conf) in pipeline_instance.node_instances.iter().enumerate() {
             if id_map.contains_key(&node_conf.node_config.id) {
                 return Err(format!("Duplicate Node ID: {}", node_conf.node_config.id));
             }
@@ -79,12 +80,12 @@ impl PipelineFactory {
             .clone();
 
         // Create a vector pre-filled with defaults, sized exactly to our node count
-        let mut fast_nodes = vec![HotNodeData::default(); pipeline_instance.nodes.len()];
+        let mut fast_nodes = vec![HotNodeData::default(); pipeline_instance.node_instances.len()];
         let mut name_to_index = HashMap::new();
         // Resolve string routes to fast NodeIds
         let mut resolved_routes = Vec::new();
 
-        for (index, node_conf) in pipeline_instance.nodes.iter().enumerate() {
+        for (index, node_conf) in pipeline_instance.node_instances.iter().enumerate() {
             name_to_index.insert(node_conf.node_config.id.clone(), index);
 
 
@@ -100,7 +101,7 @@ impl PipelineFactory {
         // --- PASS 1.5: Collect interface information from nodes ---
         // Map node_id -> interface name (for BatchTxNode and BatchRxNode)
         let mut node_interfaces: HashMap<String, String> = HashMap::new();
-        for node_conf in &pipeline_instance.nodes {
+        for node_conf in &pipeline_instance.node_instances {
             if node_conf.node_config.node_type == "BatchTxNode" || node_conf.node_config.node_type == "BatchRxNode" {
                 if let Some(iface) = node_conf.node_config.args.get("interface") {
                     node_interfaces.insert(node_conf.node_config.id.clone(), iface.clone());
@@ -109,14 +110,14 @@ impl PipelineFactory {
         }
 
         // Validate that we have a node list
-        let mut built_nodes: Vec<Option<Box<dyn Node>>> = Vec::with_capacity(pipeline_instance.nodes.len());
+        let mut built_nodes: Vec<Option<Box<dyn Node>>> = Vec::with_capacity(pipeline_instance.node_instances.len());
         // Fill with None initially so we can insert at specific indices
-        for _ in 0..pipeline_instance.nodes.len() {
+        for _ in 0..pipeline_instance.node_instances.len() {
             built_nodes.push(None);
         }
 
         // --- PASS 2: Instantiation ---
-        for node_instance in &pipeline_instance.nodes {
+        for node_instance in &pipeline_instance.node_instances {
             let my_id = id_map[&node_instance.node_config.id].clone();
 
             let node_impl: Box<dyn Node> = match node_instance.node_config.node_type.as_str() {
@@ -210,12 +211,12 @@ impl PipelineFactory {
                     // "no-packets" (human-readable like ipblower's --no-packets, e.g. "100K")
                     let packets_to_generate = node_instance
                         .node_config.effective_arg("packet_count")
-                        .and_then(|s| parse_suffixed_number(s).ok().map(|v| v as usize))
+                        .and_then(|s| parse_suffixed_number(s).ok().map(|v| v ))
                         .or_else(|| {
                             node_instance
                                 .node_config.args
                                 .get("no-packets")
-                                .and_then(|s| parse_suffixed_number(s).ok().map(|v| v as usize))
+                                .and_then(|s| parse_suffixed_number(s).ok().map(|v| v ))
                         })
                         .unwrap_or(0);
 
@@ -228,7 +229,7 @@ impl PipelineFactory {
                         let mut found_interface: Option<String> = None;
 
                         // Traverse the chain to find a BatchTxNode
-                        while let Some(current_node) = pipeline_instance.nodes.iter().find(|n| n.node_config.id == current_node_id) {
+                        while let Some(current_node) = pipeline_instance.node_instances.iter().find(|n| n.node_config.id == current_node_id) {
                             if visited.contains(&current_node_id) {
                                 debug!("PacketGenerator {}: Cycle detected in node chain", node_instance.node_config.id);
                                 break;
@@ -330,7 +331,7 @@ impl PipelineFactory {
                             state: GenState::Idle,
                             pps_limit: pps,
                             packet_limit: packets_to_generate,
-                            batch_size,
+                            batch_size: batch_size as u32,
                             dst_ip,
                             dst_mac
                         },
@@ -398,7 +399,7 @@ impl PipelineFactory {
                         next_id,
                         umem_group_id,
                         worker_id,
-                        batch_size,
+                        batch_size as u32,
                         min_interbatch_gap,
                         packets_to_generate,
                         src_mac,
@@ -577,7 +578,6 @@ impl PipelineFactory {
                             wasm_path,
                             routing_table,
                             None,
-                            worker_rx,
                             telemetry_metrics,
                             partition_start_bytes,
                             umem_id as u8,
@@ -603,9 +603,9 @@ impl PipelineFactory {
         // --- PASS 3: Topological Source Detection (In-Degree = 0)
         // =========================================================
         // Create an array to count how many times each node is targeted
-        let mut in_degrees = vec![0; pipeline_instance.nodes.len()];
+        let mut in_degrees = vec![0; pipeline_instance.node_instances.len()];
 
-        for node_conf in &pipeline_instance.nodes {
+        for node_conf in &pipeline_instance.node_instances {
             // Count routes
             for route_str in &node_conf.node_config.routes {
                 if let Some(target_id) = id_map.get(route_str) {
@@ -655,6 +655,10 @@ pub struct PipelineRunner {
     nodes: Vec<Box<dyn Node>>,
     /// Tracks the source node IDs for each entry point
     source_indices: Vec<usize>,
+    /// The parallel array of rich identities for routing
+    node_identities: Vec<NodeInstanceId>,
+    /// The runner holds the control channel, not the nodes
+    control_rx: Option<Receiver<Arc<ControlEvent>>>,
     /// Reusable batch container to avoid allocations
     /// Cleared and reused on each execution
     working_batch: crate::Batch,
@@ -688,6 +692,8 @@ impl PipelineRunner {
         worker_id: usize,
         nodes: Vec<Box<dyn Node>>,
         source_indices: Vec<usize>,
+        node_identities: Vec<NodeInstanceId>,
+        control_rx: Option<Receiver<Arc<ControlEvent>>>,
         tsc_freq: u64,
         pipeline_rcu: Arc<ArcSwap<HotPipelineConfig>>,
     ) -> Result<Self, String> {
@@ -697,7 +703,7 @@ impl PipelineRunner {
 
         // We can just use the batch count of the first source node (or fallback to max)
         let first_source = source_indices.first().copied().unwrap_or(0);
-        let full_batch_count = nodes[first_source].full_batch_count().unwrap_or(MAX_BATCH_SIZE);
+        let full_batch_count = nodes[first_source].full_batch_count().unwrap_or(MAX_BATCH_SIZE as u32) as usize;
 
         // Pre-calculate which nodes want timers during setup
         let timer_indices: Vec<usize> = nodes
@@ -720,6 +726,8 @@ impl PipelineRunner {
             worker_id,
             nodes,
             source_indices,
+            node_identities,
+            control_rx,
             working_batch: crate::Batch::new(),
             packets_processed: 0,
             runs_with_work: 0,
@@ -837,11 +845,28 @@ impl PipelineRunner {
                     self.execute_directive_chain(directive);
                 }
             }
+            // =========================================================
+            //    CONTROL EVENTS: Runner acts as the Router
+            // =========================================================
+            if let Some(rx) = &mut self.control_rx {
+                // Drain all pending commands from the Axum API
+                while let Ok(event) = rx.try_recv() {
 
-            for i in 0..self.control_indices.len() {
-                let idx = self.control_indices[i];
-                self.nodes[idx].poll_control_events();
+                    // Evaluate the wildcard pattern against every node in this pipeline
+                    for (idx, identity) in self.node_identities.iter().enumerate() {
+
+                        // Assuming you moved the matches_pattern() method onto NodeInstanceId
+                        if identity.matches_pattern(&event.address_pattern) {
+
+                            log::info!("Runner routing event opcode {} to node {}", event.opcode, identity.node_name);
+
+                            // Directly invoke the handler on the matched node
+                            self.nodes[idx].handle_control_event(&event);
+                        }
+                    }
+                }
             }
+
         }
 
         // =========================================================
@@ -1016,7 +1041,7 @@ impl PipelineStats {
 #[derive(Debug, Clone)]
 pub struct NodeStats {
     pub node_id: NodeId,
-    pub packets_processed: usize,
+    pub packets_processed: u64,
     pub burst_duration_cycles: Option<u64>,
     pub burst_duration: Option<std::time::Duration>,
     #[cfg(feature = "profiling")]

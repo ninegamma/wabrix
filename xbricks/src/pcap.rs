@@ -10,7 +10,7 @@ pub struct PcapRxNode {
     umem_group_id: usize,
     loop_file: bool,
     file_path: String,
-    processed_packets: usize,
+    processed_packets: u64,
 }
 
 impl PcapRxNode {
@@ -114,8 +114,8 @@ impl Node for PcapRxNode {
 
         // 7. Return unused frames to registry
         // If we allocated 64 but only read 10 packets, return 54.
-        if pdus_used < pdus.len() {
-            let _unused = pdus.split_off(pdus_used);
+        if pdus_used < pdus.len() as u64 {
+            let _unused = pdus.split_off(pdus_used as usize);
         }
 
         // 8. Output
@@ -126,7 +126,7 @@ impl Node for PcapRxNode {
             Directive::Stop
         }
     }
-    fn processed_packets(&self) -> usize {
+    fn processed_packets(&self) -> u64 {
         self.processed_packets
     }
 }
@@ -145,7 +145,7 @@ pub struct PcapTxNode {
     id: NodeId,
     writer: PcapWriter<BufWriter<File>>,
     umem_group_id: usize, // Needed to know where to return frames
-    written_packets: usize,
+    written_packets: u64,
 }
 
 impl PcapTxNode {
@@ -198,7 +198,7 @@ impl Node for PcapTxNode {
         Directive::Stop // We consumed the batch
     }
 
-    fn processed_packets(&self) -> usize {
+    fn processed_packets(&self) -> u64 {
         self.written_packets
     }
 }

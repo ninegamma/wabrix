@@ -8,7 +8,7 @@ pub struct BatchRxNode {
     id: NodeId,
     next_node: NodeId,
     rx_source: Box<dyn BatchRx + Send>,
-    received_packets: usize,
+    received_packets: u64,
     batch_size: usize,
     #[cfg(feature = "profiling")]
     total_cycles: u64,
@@ -67,7 +67,7 @@ impl Node for BatchRxNode {
             Ok(count) => {
                 if count > 0 {
                     // trace!("Source {}: received {} packets", self.id, count);
-                    self.received_packets += count;
+                    self.received_packets += count as u64;
 
                     #[cfg(feature = "profiling")]
                     {
@@ -117,12 +117,12 @@ impl Node for BatchRxNode {
     }
 
     #[inline]
-    fn processed_packets(&self) -> usize {
+    fn processed_packets(&self) -> u64 {
         self.received_packets
     }
 
-    fn full_batch_count(&self) -> Option<usize> {
-        Some(self.batch_size)
+    fn full_batch_count(&self) -> Option<u32> {
+        Some(self.batch_size as u32)
     }
 
     #[cfg(feature = "profiling")]
@@ -245,8 +245,8 @@ impl Node for BatchTxNode {
     }
 
     #[inline]
-    fn processed_packets(&self) -> usize {
-        self.sent_packets as usize
+    fn processed_packets(&self) -> u64 {
+        self.sent_packets
     }
 
     #[cfg(feature = "profiling")]
@@ -269,7 +269,7 @@ pub struct QueueNode {
     tx: Sender<Batch>,
     /// The ID of the node that should process this batch on the destination side
     next_node_id: NodeId,
-    processed_packets: usize,
+    processed_packets: u64,
     #[cfg(feature = "profiling")]
     total_cycles: u64,
 }
@@ -304,7 +304,7 @@ impl Node for QueueNode {
         let result = match self.tx.try_send(batch_to_send) {
             Ok(_) => {
                 // Return Stop because this thread's RTC path for this batch ends here.
-                self.processed_packets += packet_count;
+                self.processed_packets += packet_count as u64;
                 Directive::Stop
             }
             Err(e) => {
@@ -325,7 +325,7 @@ impl Node for QueueNode {
         result
     }
 
-    fn processed_packets(&self) -> usize {
+    fn processed_packets(&self) -> u64 {
         self.processed_packets
     }
 
@@ -392,8 +392,8 @@ impl Node for DropNode {
     }
 
     #[inline]
-    fn processed_packets(&self) -> usize {
-        self.dropped_count as usize
+    fn processed_packets(&self) -> u64 {
+        self.dropped_count
     }
 
     #[cfg(feature = "profiling")]
@@ -415,7 +415,7 @@ use xbricks_base::{Directive, Node, NodeId};
 pub struct FastParserNode {
     id: NodeId,
     next_node: NodeId,
-    processed_packets: usize,
+    processed_packets: u64,
     #[cfg(feature = "profiling")]
     total_cycles: u64,
 }
@@ -465,7 +465,7 @@ impl Node for FastParserNode {
             log::trace!("Current Pdu: {}", current_pdu);
         }
 
-        self.processed_packets += len;
+        self.processed_packets += len as u64;
 
         #[cfg(feature = "profiling")]
         {
@@ -477,7 +477,7 @@ impl Node for FastParserNode {
     }
 
     #[inline]
-    fn processed_packets(&self) -> usize {
+    fn processed_packets(&self) -> u64 {
         self.processed_packets
     }
 

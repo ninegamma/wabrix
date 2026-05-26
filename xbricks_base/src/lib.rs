@@ -119,17 +119,18 @@ pub trait Node: Send + std::any::Any {
 
     /// do we have a control channel (defaults to doing nothing)
     fn requires_control_events(&self) -> bool { false }
-    /// called by the scheduler when a control event is received  (defaults to doing nothing)
-    fn poll_control_events(&mut self) { }
+
+    /// called by the scheduler when a control event is received for this node (defaults to doing nothing)
+    fn handle_control_event(&mut self, event: &ControlEvent) {}
 
     /// called before startup, e.g., rx nodes can replenish the fill queue
     fn prepare(&mut self) -> anyhow::Result<()> {
         Ok(())
     }
 
-    fn processed_packets(&self) -> usize;
+    fn processed_packets(&self) -> u64;
 
-    fn full_batch_count(&self) -> Option<usize> {
+    fn full_batch_count(&self) -> Option<u32> {
         None
     }
 
@@ -193,8 +194,13 @@ impl Display for NodeId {
     }
 }
 
-#[derive(Clone, Debug)]
+///no support of cloning here, because we use Arc
+#[derive(Debug)]
 pub struct ControlEvent {
+    /// address pattern like "w0/*/rx_node" or "*/*/*/WasmInspectorNode"
+    /// The format is: {worker}/{pipeline}/{node_name}/{node_type}
+    /// Missing trailing segments are implicitly treated as wildcards.
+    pub address_pattern: String,
     pub opcode: u32,
     pub payload: Vec<u8>,
 }

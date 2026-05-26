@@ -35,8 +35,7 @@ pub struct WasmEngine {
     /// Telemetry dispatch channel
     telemetry_tx: Option<Sender<u32>>,
     /// Control event receiver channel
-    control_rx: Option<Receiver<ControlEvent>>,
-    processed_packets: usize,
+    processed_packets: u64,
     #[cfg(feature = "profiling")]
     total_cycles: u64,
     telemetry_metrics: TelemetryMetrics,
@@ -56,7 +55,6 @@ impl WasmEngine {
         wasm_file_path: &str,
         routing_table: Vec<NodeId>, // Accept any number of routes
         telemetry_tx: Option<Sender<u32>>,
-        control_rx: Option<Receiver<ControlEvent>>,
         telemetry_metrics: TelemetryMetrics,
         partition_start_bytes: u32,
         umem_id: u8,
@@ -111,7 +109,6 @@ impl WasmEngine {
             bindings,
             routing_table,
             telemetry_tx,
-            control_rx,
             processed_packets: 0,
             #[cfg(feature = "profiling")]
             total_cycles: 0,
@@ -224,7 +221,7 @@ impl Node for WasmEngine {
             "NODE {}: PDU from wrong Umem arrived", self.id
         );
 
-        self.processed_packets += batch.len();
+        self.processed_packets += batch.len() as u64;
 
         // Hand off to the shared logic
         let directive = self.execute_wasm_and_route(batch);
@@ -298,7 +295,7 @@ impl Node for WasmEngine {
             let _ = batch.push(pdu);
         }
 
-        self.processed_packets += allocated;
+        self.processed_packets += allocated as u64;
         // 3. Hand off to the exact same shared WASM execution and routing logic!
         self.execute_wasm_and_route(batch)
     }
@@ -307,39 +304,16 @@ impl Node for WasmEngine {
         true
     }
 
-    fn poll_control_events(&mut self) {        // FAST PATH: If the Axum channel is disabled, instantly return.
-        let Some(rx) = &mut self.control_rx else {
-            return;
-        };
-
-        // If we reach here, 'rx' is a mutable reference to the active Receiver.
-        loop {
-            match rx.try_recv() {
-                Ok(event) => {
-                    log::info!("NODE {}: Processing GUI Opcode {}", self.id, event.opcode);
-                    tokio::task::block_in_place(|| {
-                        let _ = self.bindings
-                            .xbricks_plugins_packet_engine()
-                            .call_on_control_event(&mut self.store, event.opcode, &event.payload);
-                    });
-                }
-                Err(TryRecvError::Empty) => {
-                    break;
-                }
-                Err(TryRecvError::Lagged(skipped_count)) => {
-                    log::warn!("NODE {}: Lagged! Missed {} control events.", self.id, skipped_count);
-                }
-                Err(TryRecvError::Closed) => {
-                    // The Axum server was destroyed, set the option to None 
-                    // so we stop checking it on future iterations.
-                    self.control_rx = None;
-                    break;
-                }
-            }
-        }
+    fn handle_control_event(&mut self, event: &ControlEvent) {
+        // We only get here if the PipelineRunner already verified the wildcard matched us!
+        tokio::task::block_in_place(|| {
+            let _ = self.bindings
+                .xbricks_plugins_packet_engine()
+                .call_on_control_event(&mut self.store, event.opcode, &event.payload);
+        });
     }
 
-    fn processed_packets(&self) -> usize {
+    fn processed_packets(&self) -> u64 {
         self.processed_packets
     }
 

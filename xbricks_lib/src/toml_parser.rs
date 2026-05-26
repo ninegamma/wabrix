@@ -314,7 +314,7 @@ impl NodeConfig {
 #[derive(Debug, Clone)]
 pub struct PipelineInstance {
     pub name: String,
-    pub nodes: Vec<NodeInstance>,
+    pub node_instances: Vec<NodeInstance>,
     pub poll_frequency: u64,
 }
 
@@ -1383,7 +1383,7 @@ impl XBricksConfig {
                 // Append this pipeline configuration to the worker's list
                 system_builder.workers[worker_builder_index].pipelines.push(PipelineInstance {
                     name: pipeline_conf.name.clone(),
-                    nodes: pipeline_instance_nodes,
+                    node_instances: pipeline_instance_nodes,
                     poll_frequency: pipeline_conf.poll_frequency,
                 });
             }

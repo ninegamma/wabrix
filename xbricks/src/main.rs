@@ -31,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
     // 1. Create the broadcast channel FIRST
     let (console_tx, _rx) = tokio::sync::broadcast::channel::<String>(1000);
     let (telemetry_tx, _) = tokio::sync::broadcast::channel::<TMLiveStats>(100);
-    let (ctrl_tx, _) = tokio::sync::broadcast::channel::<ControlEvent>(100);
+    let (ctrl_tx, _) = tokio::sync::broadcast::channel::<Arc<ControlEvent>>(100);
 
     // 2. Hijack the global `log` crate and attach it to our channel
     let logger = WsLogger::new(console_tx.clone());
