@@ -52,7 +52,6 @@ impl PipelineFactory {
         platform_data: &PlatformData,
         #[cfg(feature = "wasm")]
         wasm_managers: &Vec<Option<Arc<WasmManager>>>,
-        // NEW: Pass the shared state so nodes can hold a reference to it
         shared_state: Arc<crate::config::hot_config::SharedSystemState>,
         #[cfg(feature = "wasm")]
         wasm_instance_totals: &[usize],
@@ -71,7 +70,7 @@ impl PipelineFactory {
         }
 
         // =========================================================
-        // --- NEW PASS 1.2: Populate Initial Hot Configuration ---
+        // --- PASS 1.2: Populate Initial Hot Configuration ---
         // =========================================================
         // Grab the specific RCU pointer for this pipeline
         let pipeline_rcu = shared_state.pipelines
@@ -358,7 +357,7 @@ impl PipelineFactory {
                     let tm_is_running = Arc::new(AtomicBool::new(false));
                     if let Some(ref mut reg) = telemetry_registry {
                         reg.register(
-                            node_instance.node_config.id.clone(),
+                            format!("{}/{}", pipeline_instance.name, node_instance.node_config.id),
                             vec![
                                 "total_generated".to_string(),
                                 "pkts_this_run".to_string(),
@@ -450,7 +449,7 @@ impl PipelineFactory {
                     let dropped_pkts = Arc::new(AtomicU64::new(0));
                     if let Some(ref mut reg) = telemetry_registry {
                         reg.register(
-                            node_instance.node_config.id.clone(),
+                            format!("{}/{}", pipeline_instance.name, node_instance.node_config.id),
                             vec!["dropped".to_string()],
                             vec![dropped_pkts.clone()],
                             vec![Arc::new(AtomicU64::new(0))],
@@ -532,7 +531,7 @@ impl PipelineFactory {
 
                     if let Some(registry) = telemetry_registry.as_mut() {
                         registry.register(
-                            node_instance.node_config.id.clone(),
+                            format!("{}/{}", pipeline_instance.name, node_instance.node_config.id),
                             labels.clone().unwrap_or_default(),
                             counters_pkts.clone(),
                             counters_bytes.clone(),
@@ -820,13 +819,14 @@ impl PipelineRunner {
             self.execute_directive_chain(directive);
         }
 
-        // =========================================================
-        //    TIMERS: Process asynchronous events (e.g., TCP Retransmits)
-        // =========================================================
+
         let now = unsafe { std::arch::x86_64::_rdtsc() };
 
         let poll_frequency = self.pipeline_rcu.load().poll_frequency.max(1);
         if now - self.last_timer_poll > self.tsc_freq / poll_frequency {
+            // =========================================================
+            //    TIMERS: Process asynchronous events (e.g., TCP Retransmits)
+            // =========================================================
             self.last_timer_poll = now;
 
             for i in 0..self.timer_indices.len() {
@@ -846,7 +846,7 @@ impl PipelineRunner {
                 }
             }
             // =========================================================
-            //    CONTROL EVENTS: Runner acts as the Router
+            //    CONTROL EVENTS: Runner acts as the Router at poll_frequency
             // =========================================================
             if let Some(rx) = &mut self.control_rx {
                 // Drain all pending commands from the Axum API

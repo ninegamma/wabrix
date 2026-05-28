@@ -243,61 +243,69 @@ impl Node for WasmEngine {
     // TIMER / RETRANSMISSION PROCESSING
     // ----------------------------------------------------
     fn poll_timers(&mut self, batch: &mut Batch, current_tsc: u64) -> Directive {
-        let n_requested_frames = self.bindings
-            .xbricks_plugins_packet_engine()
-            .call_process_timers(&mut self.store, current_tsc)
-            .unwrap_or_else(|err| {
-                log::error!("NODE {}: Error processing poll_timers: {}", self.id, err);
-                0
-            });
+        #[cfg(feature = "profiling")]
+        let start_cycles = unsafe { core::arch::x86_64::_rdtsc() };
 
-        if n_requested_frames == 0 {
-            return Directive::Stop;
-        }
+        // Evaluate the core logic into a single variable using a block expression
+        let directive = {
+            let n_requested_frames = self.bindings
+                .xbricks_plugins_packet_engine()
+                .call_process_timers(&mut self.store, current_tsc)
+                .unwrap_or_else(|err| {
+                    log::error!("NODE {}: Error processing poll_timers: {}", self.id, err);
+                    0
+                });
 
-        // 1. Allocate exact memory from the shared FrameRegistry
-        let registry = unsafe { &mut *get_worker_frame_registry() };
-        let mut scratch: [MaybeUninit<Pdu>; MAX_BATCH_SIZE] = core::array::from_fn(|_| MaybeUninit::uninit());
-        let frames_to_allocate = std::cmp::min(n_requested_frames as usize, MAX_BATCH_SIZE);
+            if n_requested_frames == 0 {
+                Directive::Stop
+            } else {
+                // 1. Allocate exact memory from the shared FrameRegistry
+                let registry = unsafe { &mut *get_worker_frame_registry() };
+                let mut scratch: [MaybeUninit<Pdu>; MAX_BATCH_SIZE] = core::array::from_fn(|_| MaybeUninit::uninit());
+                let frames_to_allocate = std::cmp::min(n_requested_frames as usize, MAX_BATCH_SIZE);
 
-        let allocated = registry.allocate_pdus_into(
-            self.umem_id as usize,
-            &mut scratch[..frames_to_allocate]
-        );
+                let allocated = registry.allocate_pdus_into(
+                    self.umem_id as usize,
+                    &mut scratch[..frames_to_allocate]
+                );
 
-        if allocated == 0 {
-            log::warn!("NODE {}: Timer starved of UMEM frames!", self.id);
-            return Directive::Stop;
-        }
+                if allocated == 0 {
+                    log::warn!("NODE {}: Timer starved of UMEM frames!", self.id);
+                    Directive::Stop
+                } else {
+                    // 2. Load and initialize the freshly allocated PDUs into the Batch
+                    batch.clear();
+                    for i in 0..allocated {
+                        let mut pdu = unsafe { scratch[i].assume_init_read() };
+                        let umem_addr = pdu.umem_addr();
+                        let data_ptr = pdu.data_ptr(umem_addr) as *mut u8;
 
-        // 2. Load and initialize the freshly allocated PDUs into the Batch
-        batch.clear();
-        for i in 0..allocated {
-            let mut pdu = unsafe { scratch[i].assume_init_read() };
+                        unsafe {
+                            core::ptr::write_bytes(data_ptr, 0, 12);
+                            *data_ptr.add(12) = 0x88;
+                            *data_ptr.add(13) = 0xB5;
+                        }
 
-            // Resolve the physical memory address for this specific frame
-            let umem_addr = pdu.umem_addr();
-            let data_ptr = pdu.data_ptr(umem_addr) as *mut u8;
+                        pdu.w.set_data_length(64);
+                        let _ = batch.push(pdu);
+                    }
 
-            unsafe {
-                // Zero out the MAC addresses (first 12 bytes) to prevent leaking old data
-                core::ptr::write_bytes(data_ptr, 0, 12);
+                    self.processed_packets += allocated as u64;
 
-                // Write the EtherType (0x88B5 - Local Experimental) at offset 12 and 13.
-                *data_ptr.add(12) = 0x88;
-                *data_ptr.add(13) = 0xB5;
+                    // 3. Hand off to WASM execution (evaluates to Directive)
+                    self.execute_wasm_and_route(batch)
+                }
             }
+        }; // <-- The block ends here, yielding the final Directive
 
-            // CRITICAL: Set to a valid minimum Ethernet frame size so WASM parses it!
-            pdu.w.set_data_length(64);
-
-            // Ignore the Result; we bounded `allocated` to MAX_BATCH_SIZE
-            let _ = batch.push(pdu);
+        // Exactly one exit point for profiling
+        #[cfg(feature = "profiling")]
+        {
+            let elapsed = unsafe { core::arch::x86_64::_rdtsc() } - start_cycles;
+            self.total_cycles += elapsed;
         }
 
-        self.processed_packets += allocated as u64;
-        // 3. Hand off to the exact same shared WASM execution and routing logic!
-        self.execute_wasm_and_route(batch)
+        directive
     }
 
     fn requires_control_events(&self) -> bool {

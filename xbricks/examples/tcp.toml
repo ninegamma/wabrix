@@ -1,6 +1,6 @@
 [xbricks]
 ifaces= [
-    { name = "enp2s0f0np0", rxd = 8096, txd = 2048, irq_core = 8 },
+    { name = "enp2s0f0np0", rxd = 8096, txd = 8096, irq_core = 8 },
     { name = "veth_xbricks", rxd = 1024, txd = 1024, type = "veth", namespace = "ns-xbricks", peer = "tap-veth", mac_if = "enp2s0f0np0", ipnet = "10.10.10.222/24", checksum_offload = false },
 ]
 umem= [
@@ -51,17 +51,17 @@ id = "tcp_engine"
 type = "WasmEngine"
 routes = ["shared_tx_sink", "veth_sink", "drop"]
 labels = ["Drops", "Linux", "Replies", "SYNs", "FINs"]
-args= { wasm_file_path = "/home/rainer1956/rust/xbricks_public/target/wasm32-wasip2/release/tcp_engine.wasm", umem = "0" }
+args= { umem = "0", wasm_file_path = "/home/rainer1956/rust/xbricks_public/target/wasm32-wasip2/release/tcp_engine.wasm" }
 hot_args= {}
 
 [pipelines.nodes.wasm_data]
+dst_mac = "44:49:88:06:63:39"
+syn_rate = "1000"
 src_ip = "10.10.10.222"
-src_mac = "44:49:88:06:63:38" # enp2s0f0np0 (WASM Side)
+syn_limit = "50k"
+close_timeout = "5000"
+src_mac = "44:49:88:06:63:38"
 dst_ip = "10.10.10.31"
-dst_mac = "44:49:88:06:63:39" # enp2s0f1np1 (Linux Side)
-syn_rate = "2"   # Hertz
-syn_limit = "50"
-close_timeout = "5000"  # millis
 
 [[pipelines.nodes]]
 id = "nd_parser_veth"
@@ -75,7 +75,7 @@ id = "nd_icmp_filter"
 type = "WasmInspectorNode"
 routes = ["shared_tx_sink", "drop"]
 labels = ["icmp ping", "icmp reply", "icmp other", "any other"]
-args= { umem = "1", wasm_file_path = "/home/rainer1956/rust/xbricks_public/target/wasm32-wasip2/release/icmp_filter.wasm" }
+args= { wasm_file_path = "/home/rainer1956/rust/xbricks_public/target/wasm32-wasip2/release/icmp_filter.wasm", umem = "1" }
 hot_args= {}
 
 [[pipelines.nodes]]
@@ -101,70 +101,70 @@ routes = []
 args= {}
 hot_args= {}
 
-[layout.iface_veth_xbricks]
-x = 685.3797
-y = -3.5324233
+[layout."unified_nic0/shared_tx_sink"]
+x = 828.8908
+y = 811.5017
 
-[layout."unified_nic0/nd_parser"]
-x = 215.85324
-y = 997.55975
+[layout."unified_nic0/veth_sink"]
+x = 832.4232
+y = 981.7747
+
+[layout.xsk_1]
+x = 481.38226
+y = 335.46075
+
+[layout."unified_nic0/nd_veth_source"]
+x = -83.27108
+y = 735.8661
+
+[layout."unified_nic0/rx_source"]
+x = -75.35836
+y = 970.47784
 
 [layout.iface_enp2s0f0np0]
 x = -75.35836
 y = 38.856655
 
 [layout."unified_nic0/nd_icmp_filter"]
-x = 474.09555
+x = 515.7322
 y = 737.78156
-
-[layout."unified_nic0/veth_sink"]
-x = 832.4232
-y = 981.7747
-
-[layout.worker_0]
-x = -78.890785
-y = 338.87372
-
-[layout."pipeline_header/unified_nic0"]
-x = -264.36786
-y = 859.5557
 
 [layout."unified_nic0/drop"]
 x = 834.77814
 y = 1114.3687
 
-[layout."unified_nic0/shared_tx_sink"]
-x = 828.8908
-y = 811.5017
-
-[layout.umem_0]
-x = 193.87372
-y = -2.3549488
-
 [layout.xsk_0]
 x = 207.23549
 y = 335.46075
 
-[layout."unified_nic0/rx_source"]
-x = -75.35836
-y = 970.47784
-
-[layout."unified_nic0/tcp_engine"]
-x = 496.4676
-y = 977.0648
+[layout."pipeline_header/unified_nic0"]
+x = -306.0045
+y = 860.6233
 
 [layout."unified_nic0/nd_parser_veth"]
 x = 213.49829
 y = 754.26624
 
-[layout.xsk_1]
-x = 481.38226
-y = 335.46075
+[layout."unified_nic0/tcp_engine"]
+x = 466.57465
+y = 894.8592
+
+[layout.umem_0]
+x = 193.87372
+y = -2.3549488
 
 [layout.umem_1]
 x = 438.58362
 y = -4.7098975
 
-[layout."unified_nic0/nd_veth_source"]
-x = -80.06826
-y = 740.13654
+[layout."unified_nic0/nd_parser"]
+x = 215.85324
+y = 997.55975
+
+[layout.worker_0]
+x = -78.890785
+y = 338.87372
+
+[layout.iface_veth_xbricks]
+x = 685.3797
+y = -3.5324233

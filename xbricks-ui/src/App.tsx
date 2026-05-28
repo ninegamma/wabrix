@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { ReactFlow, Background, Controls, useNodesState, useEdgesState } from '@xyflow/react';
 import type { Node, Edge } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
@@ -148,6 +148,11 @@ const menuSeparatorStyle: React.CSSProperties = {
 export default function App() {
     const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
     const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
+    // Mirror of nodes kept in a ref so loadTopology can read current positions
+    // without adding `nodes` to its dependency array (which would cause
+    // the telemetry-watcher effect to reconnect on every position change).
+    const nodesRef = useRef<Node[]>([]);
+    useEffect(() => { nodesRef.current = nodes; }, [nodes]);
     const [error, setError] = useState<string | null>(null);
     const [configPath, setConfigPath] = useState<string>('xbricks.toml');
     const [showFileBrowser, setShowFileBrowser] = useState(false);
@@ -468,7 +473,7 @@ export default function App() {
     };
 
 
-    useEffect(() => {
+    const loadTopology = useCallback(() => {
         axios.get('/api/topology')
             .then((response) => {
                 const knownTypes = new Set(['iface', 'umem', 'xsk', 'worker', 'pipeline_header']);
@@ -570,17 +575,62 @@ export default function App() {
 
                 const allEdges = [...backendEdges, ...xskEdges, ...workerEdges, ...routeEdges];
 
+                // Overlay current drag positions so reloads (e.g. after restart)
+                // never reset positions the user has moved but not yet saved.
+                const currentPosMap = new Map(nodesRef.current.map(n => [n.id, n.position]));
+                const positionedNodes = initialNodes.map((n: any) => {
+                    const pos = currentPosMap.get(n.id);
+                    return pos ? { ...n, position: pos } : n;
+                });
+
                 if (hasSavedLayout) {
-                    setNodes(initialNodes);
+                    setNodes(positionedNodes);
                     setEdges(allEdges);
                 } else {
-                    const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(initialNodes, allEdges, 'LR');
+                    const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(positionedNodes, allEdges, 'LR');
                     setNodes(layoutedNodes);
                     setEdges(layoutedEdges);
                 }
             })
             .catch((err) => setError(err.message));
     }, [setNodes, setEdges]);
+
+    useEffect(() => { loadTopology(); }, [loadTopology]);
+
+    // Re-fetch topology when the data plane comes back after a restart.
+    // Uses WebSocket reconnect as the restart signal rather than per-message
+    // is_active_run changes (which fluctuate and would cause continuous reloads).
+    useEffect(() => {
+        let shouldReloadOnReconnect = false; // don't reload on the very first connect
+        let socket: WebSocket;
+        let stopped = false;
+
+        const connect = () => {
+            if (stopped) return;
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            socket = new WebSocket(`${protocol}//${window.location.host}/api/ws/telemetry`);
+            socket.onmessage = (event) => {
+                if (!shouldReloadOnReconnect) return;
+                try {
+                    const s = JSON.parse(event.data);
+                    // First message after a reconnect: reload if data plane is running.
+                    shouldReloadOnReconnect = false;
+                    if (s.is_active_run) loadTopology();
+                } catch (_) {}
+            };
+            socket.onclose = () => {
+                // WS dropped → mark that a reload is needed on the next reconnect.
+                shouldReloadOnReconnect = true;
+                if (!stopped) setTimeout(connect, 2000);
+            };
+        };
+
+        connect();
+        return () => {
+            stopped = true;
+            if (socket && socket.readyState !== WebSocket.CLOSED) socket.close();
+        };
+    }, [loadTopology]);
 
 
     // No-op: layout is only persisted when the user explicitly saves to disk.

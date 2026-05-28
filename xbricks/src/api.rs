@@ -75,6 +75,9 @@ pub struct NodeUpdatePayload {
     /// Hot-updatable args. Updated in the in-memory base config so File→Save
     /// persists them; takes effect on next pipeline restart.
     pub hot_args: Option<HashMap<String, String>>,
+    /// WASM init data. Written to the in-memory base config; takes effect on
+    /// next pipeline restart (wasm_data is passed at node creation time).
+    pub wasm_data: Option<HashMap<String, String>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -194,6 +197,7 @@ pub(crate) fn spawn_management_api(state: AppState) -> (oneshot::Sender<()>, Joi
             .route("/api/hardware/update", axum::routing::post(save_hardware_config))
             .route("/api/pipeline/update", axum::routing::post(hot_update_node))
             .route("/api/pipeline/update_config", axum::routing::post(hot_update_pipeline_config))
+            .route("/api/control/event", axum::routing::post(handle_gui_event))
             .route("/api/layout", axum::routing::post(save_layout))
             .route("/api/dataplane/command", axum::routing::post(dataplane_command))
             .route("/api/ws/telemetry", get(telemetry_ws_handler))
@@ -537,19 +541,17 @@ async fn dataplane_command(
     axum::http::StatusCode::OK
 }
 
-// Axum Handler
 pub async fn handle_gui_event(
-    State(ctrl_tx): State<Sender<ControlEvent>>,
+    State(state): State<AppState>,
     Json(request): Json<GuiEventRequest>,
-) {
-    let event = ControlEvent {
-        address_pattern: request.address_pattern.clone(), // e.g., "w0/*/rx_node"
+) -> axum::http::StatusCode {
+    let event = Arc::new(ControlEvent {
+        address_pattern: request.address_pattern.clone(),
         opcode: request.opcode,
         payload: request.payload,
-    };
-
-    // Shoot it across the thread boundary to the pipeline runners in the dataplane!
-    let _ = ctrl_tx.send(event);
+    });
+    let _ = state.ctrl_tx.send(event);
+    axum::http::StatusCode::OK
 }
 
 /// Serialize `config` to a human-readable TOML file at `path`, applying the same
@@ -730,68 +732,68 @@ async fn hot_update_node(
 ) -> impl axum::response::IntoResponse {
 
     // =================================================================
-    // PART 1: RCU HOT SWAP (Updates the Live Data Plane)
+    // STEP 1: BASE CONFIG UPDATE — always runs, works when dataplane is offline.
+    // wasm_data is not hot-swappable; it only takes effect on next restart.
+    // hot_args are mirrored here so File→Save persists them.
     // =================================================================
-
-    // 1. Load the active outer system state
-    let current_system = state.shared_state.load();
-
-    // 2. Get the specific RCU pointer for this pipeline
-    let pipeline_rcu = match current_system.pipelines.get(&payload.pipeline_name) {
-        Some(rcu) => rcu,
-        None => {
-            log::error!("Pipeline '{}' not found for hot update", payload.pipeline_name);
-            return axum::http::StatusCode::NOT_FOUND;
-        }
-    };
-
-    // 2. READ & COPY: Load the current state and clone it
-    let current_arc = pipeline_rcu.load();
-    let mut new_config = (**current_arc).clone();
-
-    // 3. Find the target node's integer index
-    let target_node_index = match new_config.name_to_index.get(&payload.node_id) {
-        Some(&idx) => idx,
-        None => {
-            log::error!("Node '{}' not found in pipeline '{}'", payload.node_id, payload.pipeline_name);
-            return axum::http::StatusCode::NOT_FOUND;
-        }
-    };
-
-    // 4. MODIFY ROUTES: Translate Strings from UI into fast NodeIds
-    if let Some(new_route_strings) = &payload.routes {
-        let mut resolved_routes = Vec::new();
-        for route_str in new_route_strings {
-            if let Some(&target_idx) = new_config.name_to_index.get(route_str) {
-                resolved_routes.push(NodeId::new(target_idx as u32, route_str.clone()));
-            } else {
-                log::error!("Target route '{}' not found", route_str);
-                return axum::http::StatusCode::BAD_REQUEST;
-            }
-        }
-        new_config.fast_nodes[target_node_index].routes = resolved_routes;
-    }
-
-    // 5. UPDATE HOT PARAMETERS (If provided)
-    if let Some(ref hot_args) = payload.hot_args {
-        // We use our new bridge function to apply the strings to the typed state!
-        new_config.fast_nodes[target_node_index].dynamic_state.update_from_strings(hot_args);
-    }
-
-    // 6. UPDATE: Atomically swap the pointer.
-    // The next time a worker running this pipeline hits a batch boundary,
-    // it will instantly use the new routing array.
-    pipeline_rcu.store(Arc::new(new_config));
-    log::info!("Live update applied to node: {} in pipeline: {}", payload.node_id, payload.pipeline_name);
-
-    // 7. PERSIST hot_args to the in-memory base config so File→Save captures them.
-    if let Some(hot_args) = payload.hot_args {
+    if payload.hot_args.is_some() || payload.wasm_data.is_some() {
         let mut base_config = state.config.write().await;
         if let Some(pipeline) = base_config.pipelines.iter_mut().find(|p| p.name == payload.pipeline_name) {
             if let Some(node) = pipeline.nodes.iter_mut().find(|n| n.id == payload.node_id) {
-                node.hot_args = hot_args;
+                if let Some(hot_args) = payload.hot_args.as_ref() {
+                    node.hot_args = hot_args.clone();
+                }
+                if let Some(wasm_data) = payload.wasm_data.as_ref() {
+                    node.wasm_data = Some(wasm_data.clone());
+                }
             }
         }
+    }
+
+    // =================================================================
+    // STEP 2: LIVE RCU HOT SWAP — only for routes / hot_args, only when
+    // the dataplane is running. Skipped gracefully if pipeline not found.
+    // =================================================================
+    if payload.routes.is_some() || payload.hot_args.is_some() {
+        let current_system = state.shared_state.load();
+        let pipeline_rcu = match current_system.pipelines.get(&payload.pipeline_name) {
+            Some(rcu) => rcu,
+            None => {
+                // Dataplane not running — base config already updated above, that's sufficient.
+                return axum::http::StatusCode::OK;
+            }
+        };
+
+        let current_arc = pipeline_rcu.load();
+        let mut new_config = (**current_arc).clone();
+
+        let target_node_index = match new_config.name_to_index.get(&payload.node_id) {
+            Some(&idx) => idx,
+            None => {
+                log::error!("Node '{}' not found in pipeline '{}'", payload.node_id, payload.pipeline_name);
+                return axum::http::StatusCode::NOT_FOUND;
+            }
+        };
+
+        if let Some(new_route_strings) = &payload.routes {
+            let mut resolved_routes = Vec::new();
+            for route_str in new_route_strings {
+                if let Some(&target_idx) = new_config.name_to_index.get(route_str) {
+                    resolved_routes.push(NodeId::new(target_idx as u32, route_str.clone()));
+                } else {
+                    log::error!("Target route '{}' not found", route_str);
+                    return axum::http::StatusCode::BAD_REQUEST;
+                }
+            }
+            new_config.fast_nodes[target_node_index].routes = resolved_routes;
+        }
+
+        if let Some(ref hot_args) = payload.hot_args {
+            new_config.fast_nodes[target_node_index].dynamic_state.update_from_strings(hot_args);
+        }
+
+        pipeline_rcu.store(Arc::new(new_config));
+        log::info!("Live update applied to node: {} in pipeline: {}", payload.node_id, payload.pipeline_name);
     }
 
 /*

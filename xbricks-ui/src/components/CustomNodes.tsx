@@ -551,7 +551,7 @@ const GeneratorControlButton = ({
         socket.onmessage = (event) => {
             try {
                 const s: TMLiveStats = JSON.parse(event.data);
-                if (s.tmstats_name !== pipelineNodeId) return;
+                if (s.tmstats_name !== `${pipelineName}/${pipelineNodeId}`) return;
                 const isActive = s.is_active_run;
                 const wasActive = prevActiveRef.current;
                 prevActiveRef.current = isActive;
@@ -646,19 +646,57 @@ export function PipelineNode({ data, id }: NodeProps<PipelineNodeType>) {
         socket.onmessage = (event) => {
             try {
                 const s: TMLiveStats = JSON.parse(event.data);
-                if (s.tmstats_name === data.id) {
+                const qualifiedId = data.pipeline_name ? `${data.pipeline_name}/${data.id}` : data.id;
+                if (s.tmstats_name === qualifiedId) {
                     setDroppedCount(Number(s.counters_pkts[0] ?? 0));
                 }
             } catch (_) {}
         };
         return () => { if (socket.readyState === WebSocket.OPEN) socket.close(); };
-    }, [data.id, data.type]);
+    }, [data.id, data.type, data.pipeline_name]);
 
     const label = data.id;
     const colors = pipelineColor(data.pipeline_name);
     const routes: string[] = Array.isArray(data.routes) ? data.routes : [];
     const args = data.args && Object.keys(data.args).length > 0 ? data.args : null;
     const hotArgs = (data as any).hot_args && Object.keys((data as any).hot_args).length > 0 ? (data as any).hot_args as Record<string, string> : null;
+    const [wasmDataEdits, setWasmDataEdits] = useState<Record<string, string>>(data.wasm_data ?? {});
+    const wasmDataFocusedRef = useRef(false);
+    useEffect(() => {
+        if (!wasmDataFocusedRef.current) setWasmDataEdits(data.wasm_data ?? {});
+    }, [data.wasm_data]);
+    const hasWasmData = Object.keys(wasmDataEdits).length > 0;
+
+    // Operational state for WasmEngine nodes (null = unknown/not yet set)
+    // 0 = Offline, 1 = Online, 2 = Bypass  (StandardOpcode::SetOperationalState = 0x0001)
+    const [opState, setOpState] = useState<0 | 1 | 2 | null>(null);
+    const sendOpState = useCallback((state: 0 | 1 | 2) => {
+        if (!data.pipeline_name) return;
+        setOpState(state);
+        fetch('/api/control/event', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                address_pattern: `*/${data.pipeline_name}/${data.id}/*`,
+                opcode: 0x0001,
+                payload: [state],
+            }),
+        }).catch(console.error);
+    }, [data.pipeline_name, data.id]);
+
+    // StandardOpcode::FlushState = 0x0002, mode=1
+    const sendFlush = useCallback(() => {
+        if (!data.pipeline_name) return;
+        fetch('/api/control/event', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                address_pattern: `*/${data.pipeline_name}/${data.id}/*`,
+                opcode: 0x0002,
+                payload: [1],
+            }),
+        }).catch(console.error);
+    }, [data.pipeline_name, data.id]);
 
     // Collect all outgoing connection points (deduplicated, preserving order)
     const outgoing: { id: string; label: string }[] = [];
@@ -701,8 +739,8 @@ export function PipelineNode({ data, id }: NodeProps<PipelineNodeType>) {
 
             {showTelemetry && (
                 data.type === 'PacketGenerator'
-                    ? <GeneratorStatsPopover nodeId={data.id} onClose={closeTelemetry} />
-                    : <TelemetryPopover ifaceName={data.id} onClose={closeTelemetry} />
+                    ? <GeneratorStatsPopover nodeId={data.pipeline_name ? `${data.pipeline_name}/${data.id}` : data.id} onClose={closeTelemetry} />
+                    : <TelemetryPopover ifaceName={data.pipeline_name ? `${data.pipeline_name}/${data.id}` : data.id} onClose={closeTelemetry} />
             )}
 
             <Handle type="target" position={Position.Left} style={{ background: colors.handle }} />
@@ -733,6 +771,100 @@ export function PipelineNode({ data, id }: NodeProps<PipelineNodeType>) {
                             <strong style={{ color: colors.border }}>{k}:</strong>{' '}{v}
                         </div>
                     ))}
+                </div>
+            )}
+
+            {hasWasmData && (
+                <div style={{
+                    fontSize: '11px', lineHeight: '1.6', marginTop: '6px',
+                    borderTop: `1px solid ${colors.divider}`, paddingTop: '4px',
+                }}>
+                    <div style={{ fontSize: '10px', color: '#64748b', marginBottom: '3px' }}>wasm_data</div>
+                    {Object.entries(wasmDataEdits).map(([k, v]) => (
+                        <div key={k} style={{ display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '2px' }}>
+                            <strong style={{ color: '#94a3b8', flexShrink: 0, minWidth: '90px' }}>{k}:</strong>
+                            <input
+                                className="nodrag"
+                                type="text"
+                                value={v}
+                                onFocus={() => { wasmDataFocusedRef.current = true; }}
+                                onChange={e => setWasmDataEdits(prev => ({ ...prev, [k]: e.target.value }))}
+                                onBlur={() => {
+                                    wasmDataFocusedRef.current = false;
+                                    if (!data.pipeline_name) return;
+                                    fetch('/api/pipeline/update', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({
+                                            pipeline_name: data.pipeline_name,
+                                            node_id: data.id,
+                                            wasm_data: wasmDataEdits,
+                                        }),
+                                    }).catch(console.error);
+                                }}
+                                style={{
+                                    background: '#0f172a',
+                                    border: '1px solid #334155',
+                                    borderRadius: '3px',
+                                    color: '#f8fafc',
+                                    fontFamily: 'monospace',
+                                    fontSize: '11px',
+                                    padding: '1px 4px',
+                                    flex: 1,
+                                    minWidth: 0,
+                                }}
+                            />
+                        </div>
+                    ))}
+                </div>
+            )}
+
+            {data.type === 'WasmEngine' && (
+                <div style={{ marginTop: '6px', borderTop: `1px solid ${colors.divider}`, paddingTop: '4px' }}>
+                    <div style={{ fontSize: '10px', color: '#64748b', marginBottom: '3px' }}>operational state</div>
+                    <div style={{ display: 'flex', gap: '4px' }}>
+                        {([['Offline', 0, '#ef4444', '#450a0a'], ['Online', 1, '#10b981', '#052e16'], ['Bypass', 2, '#f59e0b', '#1c1409']] as const).map(([label, val, fg, bg]) => (
+                            <button
+                                key={label}
+                                className="nodrag"
+                                onClick={() => sendOpState(val)}
+                                style={{
+                                    flex: 1,
+                                    padding: '2px 0',
+                                    fontSize: '10px',
+                                    fontFamily: 'monospace',
+                                    fontWeight: opState === val ? 'bold' : 'normal',
+                                    cursor: 'pointer',
+                                    borderRadius: '3px',
+                                    border: `1px solid ${opState === val ? fg : '#334155'}`,
+                                    background: opState === val ? bg : '#0f172a',
+                                    color: opState === val ? fg : '#64748b',
+                                    transition: 'all 0.15s',
+                                }}
+                            >
+                                {label}
+                            </button>
+                        ))}
+                        <button
+                            className="nodrag"
+                            onClick={sendFlush}
+                            style={{
+                                flex: 1,
+                                padding: '2px 0',
+                                fontSize: '10px',
+                                fontFamily: 'monospace',
+                                fontWeight: 'normal',
+                                cursor: 'pointer',
+                                borderRadius: '3px',
+                                border: '1px solid #334155',
+                                background: '#0f172a',
+                                color: '#38bdf8',
+                                transition: 'all 0.15s',
+                            }}
+                        >
+                            Flush
+                        </button>
+                    </div>
                 </div>
             )}
 
