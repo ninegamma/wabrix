@@ -1,9 +1,11 @@
 use dashmap::DashMap;
 use std::sync::{Arc, Mutex};
-use wasmtime::component::{Component, Linker, ResourceTable};
+use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, LinearMemory, MemoryCreator, MemoryType, OptLevel, Result};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use xsk_rs::Umem;
+use crate::wasm_engine;
+use crate::wasm_engine::exports::xbricks;
 // --- 1. Memory Layer (The Zero-Copy Bridge) ---
 
 /// Thread-safe handle to the mmap'd AF_XDP UMEM region.
@@ -112,6 +114,20 @@ impl WasiView for MyHostState {
     }
 }
 
+// Wasmtime generates the trait path based on your package name
+impl crate::wasm_engine::xbricks::plugins::logging::Host for MyHostState {
+    fn log(&mut self, level: u32, message: String) {
+        // Map the u32 back to Rust log levels
+        match level {
+            1 => log::error!("WASM Node: {}", message),
+            2 => log::warn!("WASM Node: {}", message),
+            3 => log::info!("WASM Node: {}", message),
+            4 => log::info!("WASM Node: {}", message),
+            _ => log::trace!("WASM Node: {}", message),
+        }
+    }
+}
+
 // --- 3. Management Layer (Orchestration) ---
 
 pub struct WasmManager {
@@ -154,8 +170,13 @@ impl WasmManager {
             .memory_init_cow(false);
 
         let engine = Engine::new(&config)?;
-        let mut linker = Linker::new(&engine);
+        let mut linker: Linker<MyHostState>  = Linker::new(&engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
+
+        wasm_engine::EnginePlugin::add_to_linker::<MyHostState, HasSelf<MyHostState>>(
+            &mut linker,
+            |state| state
+        ).expect("Failed to link EnginePlugin world");
 
         Ok(Self {
             engine,

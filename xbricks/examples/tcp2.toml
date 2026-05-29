@@ -55,18 +55,24 @@ hot_args= {}
 id = "tcp_engine"
 type = "WasmEngine"
 routes = ["shared_tx_sink", "veth_sink", "drop"]
-labels = ["Drops", "Linux", "Replies", "SYNs", "FINs", "RSTs", "SYN-ACKs", "ACKs"]
+labels = [
+    "SentSyn", "SentSynAck", "SentSynAck2", "SentFin", "SentFinPssv",
+    "SentAck4Fin", "SentAck", "SentRst", "RecvSyn", "RecvSynAck", "RecvSynAck2",
+    "RecvFin", "RecvFinPssv", "RecvAck4Fin", "RecvAck", "RecvRst",
+    "Unexpected", "RecvPayload", "SentPayload", "TickDrop", "ToLinux",
+    "Drop",
+]
 args= { umem = "0", wasm_file_path = "/home/rainer1956/rust/xbricks_public/target/wasm32-wasip2/release/tcp_engine.wasm" }
 hot_args= {}
 
 [pipelines.nodes.wasm_data]
 dst_ip = "10.10.10.31"
 dst_mac = "44:49:88:06:63:39"
-syn_limit = "2500"
+syn_limit = "3"
 close_timeout = "5000"
 src_ip = "10.10.10.222"
 src_mac = "44:49:88:06:63:38"
-syn_rate = "100"
+syn_rate = "1"
 
 [[pipelines.nodes]]
 id = "nd_parser_veth"
@@ -141,7 +147,13 @@ hot_args= {}
 id = "tcp_engine"
 type = "WasmEngine"
 routes = ["shared_tx_sink", "veth_sink", "drop"]
-labels = ["Drops", "Linux", "Replies", "SYNs", "FINs"]
+labels = [
+    "SentSyn", "SentSynAck", "SentSynAck2", "SentFin", "SentFinPssv",
+    "SentAck4Fin", "SentAck", "SentRst", "RecvSyn", "RecvSynAck", "RecvSynAck2",
+    "RecvFin", "RecvFinPssv", "RecvAck4Fin", "RecvAck", "RecvRst",
+    "Unexpected", "RecvPayload", "SentPayload", "TickDrop", "ToLinux",
+    "Drop",
+]
 args= { wasm_file_path = "/home/rainer1956/rust/xbricks_public/target/wasm32-wasip2/release/tcp_engine.wasm", umem = "0" }
 hot_args= {}
 

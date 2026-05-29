@@ -100,7 +100,7 @@ impl WasmEngine {
             let data: Vec<(String, String)> = wasm_data.into_iter().collect();
             bindings.xbricks_plugins_packet_engine()
                 .call_init_data(&mut store, &data, platform_data.tsc_frequency)
-                .expect("Failed to call init-data on Wasm inspector");
+                .expect("Failed to call init-data on packet-engine");
         }
 
         Self {
@@ -150,8 +150,30 @@ impl WasmEngine {
             return Directive::Stop;
         }
 
+        // ==========================================================
+        // 2. HYBRID TELEMETRY EXTRACTION
+        // ==========================================================
+        let out_of_band_stats = self.bindings.xbricks_plugins_packet_engine()
+            .call_get_telemetry(&mut self.store)
+            .unwrap_or_else(|e| {
+                log::error!("Failed to call get-telemetry on packet-engine: {}", e);
+                vec![]
+            });
+
+        let use_out_of_band = !out_of_band_stats.is_empty();
+
+        if use_out_of_band {
+            // NEW METHOD: Wasm maintains the absolute total.
+            // We safely overwrite the host atomics with the absolute values.
+            for (idx, &count) in out_of_band_stats.iter().enumerate() {
+                if idx < self.telemetry_metrics.counters_pkts.len() {
+                    self.telemetry_metrics.counters_pkts[idx].store(count, Ordering::Relaxed);
+                }
+            }
+        }
+
         // ==========================================
-        // 2. MUTATION PHASE
+        // 3. MUTATION PHASE
         // ==========================================
         for (i, pdu) in batch.iter_mut().enumerate() {
             let new_len = lengths_vector[i];
@@ -161,7 +183,7 @@ impl WasmEngine {
         }
 
         // ==========================================
-        // 3. ROUTING & TELEMETRY PHASE
+        // 4. ROUTING PHASE
         // ==========================================
         let num_routes = self.routing_table.len();
         let mut outputs: Vec<Batch> = std::iter::repeat_with(Batch::new).take(num_routes).collect();
@@ -171,13 +193,17 @@ impl WasmEngine {
             let action = action_vector[pdu_index];
             pdu_index += 1;
 
-            let route_id = (action & 0xFF) as usize;
-            let telemetry_bucket = ((action >> 16) & 0xFF) as usize;
+            // OLD METHOD FALLBACK: Only extract in-band telemetry if the Wasm array was empty
+            if !use_out_of_band {
+                let telemetry_bucket = ((action >> 16) & 0xFF) as usize;
 
-            if telemetry_bucket < self.telemetry_metrics.counters_pkts.len() {
-                self.telemetry_metrics.counters_pkts[telemetry_bucket].fetch_add(1, Ordering::Relaxed);
-                self.telemetry_metrics.counters_bytes[telemetry_bucket].fetch_add(pdu.w.data_len() as u64, Ordering::Relaxed);
+                if telemetry_bucket < self.telemetry_metrics.counters_pkts.len() {
+                    self.telemetry_metrics.counters_pkts[telemetry_bucket].fetch_add(1, Ordering::Relaxed);
+                    self.telemetry_metrics.counters_bytes[telemetry_bucket].fetch_add(pdu.w.data_len() as u64, Ordering::Relaxed);
+                }
             }
+
+            let route_id = (action & 0xFF) as usize;
             if route_id >= num_routes {
                 log::warn!("NODE {}: Invalid Route ID {} for Pkt.", self.id, route_id);
                 usize::MAX
@@ -187,7 +213,7 @@ impl WasmEngine {
         });
 
         // ==========================================
-        // 4. DISPATCH DIRECTIVES
+        // 5. DISPATCH DIRECTIVES
         // ==========================================
         let mut split_branches = Vec::with_capacity(num_routes);
         for (i, output_batch) in outputs.into_iter().enumerate() {
