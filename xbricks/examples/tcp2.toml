@@ -1,12 +1,12 @@
 [xbricks]
 ifaces= [
-    { name = "enp2s0f0np0", rxd = 8096, txd = 8096, irq_core = 8 },
+    { name = "enp2s0f0np0", rxd = 8160, txd = 8160, irq_core = 8 },
     { name = "veth_xbricks", rxd = 1024, txd = 1024, type = "veth", namespace = "ns-xbricks", peer = "tap-veth-0", mac_if = "enp2s0f0np0", ipnet = "10.10.10.222/24", checksum_offload = false },
-    { name = "enp2s0f1np1", rxd = 8096, txd = 8096, irq_core = 8 },
+    { name = "enp2s0f1np1", rxd = 8160, txd = 8160, irq_core = 8 },
     { name = "veth_xbricks_1", rxd = 1024, txd = 1024, type = "veth", namespace = "ns-xbricks_1", peer = "tap-veth-1", mac_if = "enp2s0f1np1", ipnet = "10.10.10.31/24", checksum_offload = false },
 ]
 umem= [
-    { id = 0, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 16384, head_room = 128, partitions = 2, reserved = 30720 },
+    { id = 0, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 2, reserved = 30720 },
     { id = 1, frame_size = 2048, frame_count = 131072, fq_size = 16384, cq_size = 16384, head_room = 128, partitions = 2, reserved = 10240 },
 ]
 xsk= [
@@ -33,7 +33,7 @@ id = "rx_source"
 type = "BatchRxNode"
 routes = ["nd_parser"]
 queues = [0]
-args= { batch_size = "256", interface = "enp2s0f0np0" }
+args= { batch_size = "128", interface = "enp2s0f0np0" }
 hot_args= {}
 
 [[pipelines.nodes]]
@@ -68,11 +68,11 @@ hot_args= {}
 [pipelines.nodes.wasm_data]
 dst_ip = "10.10.10.31"
 dst_mac = "44:49:88:06:63:39"
-syn_limit = "3"
-close_timeout = "5000"
+syn_limit = "4M"
+close_timeout = "60"
 src_ip = "10.10.10.222"
 src_mac = "44:49:88:06:63:38"
-syn_rate = "1"
+syn_rate = "200k"
 
 [[pipelines.nodes]]
 id = "nd_parser_veth"
@@ -125,7 +125,7 @@ id = "rx_source"
 type = "BatchRxNode"
 routes = ["nd_parser"]
 queues = [0]
-args= { batch_size = "256", interface = "enp2s0f1np1" }
+args= { batch_size = "128", interface = "enp2s0f1np1" }
 hot_args= {}
 
 [[pipelines.nodes]]

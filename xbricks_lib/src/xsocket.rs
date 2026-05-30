@@ -918,11 +918,29 @@ impl BatchTx for XSocketTx {
         self.drain_completion_queue()?;
 
         let original_batch_len = batch.len();
+
         if original_batch_len == 0 {
             return Ok(0);
         }
         let mut tx_guard = self.tx_queue.lock();
         let free_slots = tx_guard.nb_free(original_batch_len as u32) as usize;
+
+        if free_slots == 0 {
+            // The ring is completely jammed. Force a kernel wakeup to try and clear it.
+            unsafe {
+                libc::sendto(self.fd, core::ptr::null(), 0, libc::MSG_DONTWAIT, core::ptr::null_mut(), 0);
+            }
+            log::warn!(
+                "🔥 [TX SATURATED] Worker {} Queue {}: TX Ring is 100% full! (Batch size: {}). Wasm engine is outrunning the hardware.",
+                self.config.worker_id, self.config.queue_id, original_batch_len
+            );
+            return Ok(0);
+        } else if free_slots < original_batch_len {
+            log::info!(
+                "⚠️ [TX BACKPRESSURE] Worker {} Queue {}: Batch of {} packets, but only {} TX slots free.",
+                self.config.worker_id, self.config.queue_id, original_batch_len, free_slots
+            );
+        }
 
         // ==========================================================
         //  THE BURST THRESHOLD (Fixes the 21,000-cycle Syscall Storm)
@@ -930,9 +948,11 @@ impl BatchTx for XSocketTx {
         // If the queue has very little room, do not send 1 packet at a time!
         // The overhead of the system call outweighs the benefit.
         // Return instantly, and the Sink node will `bulk_drop` the batch.
-        if free_slots < 16 {
-            return Ok(0);
-        }
+        // we removed this, as this can result in a stalled tx queue at low traffic,
+        // as the kernel may sleep forever, and the TX queue will never be drained.
+        //if free_slots < 16 {
+        //    return Ok(0);
+        //}
 
         let count_to_send = std::cmp::min(original_batch_len, free_slots);
         let mut valid_to_send = 0;
@@ -983,6 +1003,11 @@ impl BatchTx for XSocketTx {
                     } else {
                         // UMEM 1 is exhausted. Stop processing this batch.
                         // The remaining unprocessed packets stay in the batch for bulk_drop!
+                        // 🚨 PROBE 3: UMEM STARVATION 🚨
+                        log::error!(
+                            "🩸 [UMEM STARVATION] Worker {}: Failed to allocate frame in UMEM {} for cross-pool swap! Free frames: {}",
+                            self.config.worker_id, my_umem_id, frame_registry.total_free_frames()
+                        );
                         break;
                     }
                 } else {
@@ -1014,6 +1039,16 @@ impl BatchTx for XSocketTx {
             // only fires if we have a worthwhile batch of packets!
             // Lock the TX queue just for the burst
             sent = unsafe { tx_guard.produce_and_wakeup(&descs[0..valid_to_send])? };
+
+            // THE LOW-TRAFFIC KICKER:
+            // If we are trickling packets in tiny batches (< 16), the driver might
+            // silently go to sleep. We force a syscall to guarantee it transmits.
+            if valid_to_send < 16 {
+                unsafe {
+                    libc::sendto(self.fd, core::ptr::null(), 0, libc::MSG_DONTWAIT, core::ptr::null_mut(), 0);
+                }
+            }
+
             if sent > 0 {
                 self.total_sent_packets += sent;
             }
@@ -1099,6 +1134,19 @@ impl XSocketTx {
                 trace!("drain_completion_queue: Worker {}: Releasing frame_idx={} (local_idx={}, umem_group_id={})",
                     self.config.worker_id, global_idx, local_idx, self.config.umem_config.group_id);
                 self.release_frame(global_idx);
+            }
+        }
+        else {
+            if self.total_sent_packets > self.total_consumed {
+                let pending_in_hardware = self.total_sent_packets - self.total_consumed;
+
+                // Only warn if a massive number of packets are stuck in limbo
+                if pending_in_hardware > 4000 {
+                    log::warn!(
+                        "👻 [CQ GHOST TOWN] Worker {} Queue {}: {} packets sent to TX, but NIC has not completed them! Hardware stall imminent.",
+                        self.config.worker_id, self.config.queue_id, pending_in_hardware
+                    );
+                }
             }
         }
         Ok(consumed)
