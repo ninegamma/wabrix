@@ -187,15 +187,74 @@ impl WasmManager {
         })
     }
 
-    /// Retrieves a compiled component from cache or loads it from disk.
+    /// Retrieves a compiled component from in-memory cache, disk cache, or compiles from source.
+    /// Compiled artifacts are stored in /tmp/xbricks-wasm-cache/ keyed by filename + mtime,
+    /// so repeated dataplane restarts skip the Cranelift compilation step entirely.
     pub fn get_component(&self, path: &str) -> Result<Component> {
+        // Fast path: in-memory cache (hits on second node within the same restart)
         if let Some(c) = self.cache.get(path) {
             return Ok(c.clone());
         }
 
-        let component = Component::from_file(&self.engine, path)?;
+        let component = Self::load_or_compile(&self.engine, path)?;
         self.cache.insert(path.to_string(), component.clone());
         Ok(component)
+    }
+
+    fn load_or_compile(engine: &Engine, wasm_path: &str) -> Result<Component> {
+        if let Some(cache_path) = Self::disk_cache_path(wasm_path) {
+            if cache_path.exists() {
+                // SAFETY: These files are written exclusively by Component::serialize() below,
+                // from WASM files under our own control on the same machine.
+                match unsafe { Component::deserialize_file(engine, &cache_path) } {
+                    Ok(component) => {
+                        log::info!("Loaded WASM from disk cache: {}", wasm_path);
+                        return Ok(component);
+                    }
+                    Err(e) => {
+                        log::warn!("WASM disk cache stale ({}), recompiling: {}", e, wasm_path);
+                        let _ = std::fs::remove_file(&cache_path);
+                    }
+                }
+            }
+
+            log::info!("Compiling WASM component (this may take a few seconds): {}", wasm_path);
+            let component = Component::from_file(engine, wasm_path)?;
+
+            let dir = cache_path.parent().unwrap_or_else(|| std::path::Path::new("/tmp"));
+            let _ = std::fs::create_dir_all(dir);
+            match component.serialize() {
+                Ok(bytes) => {
+                    if let Err(e) = std::fs::write(&cache_path, &bytes) {
+                        log::warn!("Failed to write WASM disk cache: {}", e);
+                    } else {
+                        log::info!("WASM compiled artifact cached at {:?}", cache_path);
+                    }
+                }
+                Err(e) => log::warn!("Failed to serialize WASM component for caching: {}", e),
+            }
+
+            Ok(component)
+        } else {
+            // No cache path derivable (unusual path) — compile directly
+            Component::from_file(engine, wasm_path)
+        }
+    }
+
+    /// Derives a disk cache path for a given .wasm file.
+    /// The modification time of the source file is embedded in the name so that
+    /// rebuilding the WASM automatically invalidates the cache.
+    fn disk_cache_path(wasm_path: &str) -> Option<std::path::PathBuf> {
+        let mtime = std::fs::metadata(wasm_path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let stem = std::path::Path::new(wasm_path).file_stem()?.to_str()?;
+        let cache_dir = std::path::Path::new("/tmp/xbricks-wasm-cache");
+        Some(cache_dir.join(format!("{}-{}.cwasm", stem, mtime)))
     }
 
     pub fn engine(&self) -> &Engine { &self.engine }

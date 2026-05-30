@@ -7,6 +7,7 @@ import dagre from 'dagre';
 import { IfaceNode, UmemNode, XskNode, WorkerNode, PipelineNode, PipelineHeaderNode, pipelineColor } from './components/CustomNodes.tsx';
 import { TerminalWindow } from './TerminalWindow';
 import {FileBrowserDialog} from "./components/FileBrowserDialog.tsx";
+import { useTelemetryStore, useTelemetrySocket } from './store/telemetryStore';
 
 const nodeTypes = {
     iface: IfaceNode,
@@ -145,7 +146,100 @@ const menuSeparatorStyle: React.CSSProperties = {
     margin: '4px 0'
 };
 
+// Renders in the sidebar when a node with telemetry is selected.
+// Shows all labels + rates and exposes ★ pin buttons.
+function LiveMetricsSidebar({ tmStatsKey, rfNodeId }: { tmStatsKey: string; rfNodeId: string }) {
+    const stats = useTelemetryStore(state => state.liveData[tmStatsKey]);
+    const pinned = useTelemetryStore(state => state.pinnedMetrics[rfNodeId]);
+    const togglePin = useTelemetryStore(state => state.togglePin);
+
+    if (!stats || stats.labels.length === 0) return null;
+
+    const hasRates = stats.rates_pkts.length > 0;
+
+    return (
+        <div style={{ borderTop: '1px solid #334155', paddingTop: '14px', marginTop: '8px' }}>
+            <div style={{
+                fontSize: '10px', color: '#60a5fa', textTransform: 'uppercase',
+                letterSpacing: '0.05em', marginBottom: '8px',
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            }}>
+                <span>Live Metrics</span>
+                <span style={{
+                    width: '8px', height: '8px', borderRadius: '50%',
+                    background: stats.is_active_run ? '#10b981' : '#475569',
+                    display: 'inline-block',
+                    boxShadow: stats.is_active_run ? '0 0 6px #10b981' : 'none',
+                }} />
+            </div>
+            {stats.labels.map((label, i) => {
+                const isPinned = pinned?.labelIndex === i;
+                const cntVal = Number(stats.counters_pkts[i] ?? 0);
+                const ppsVal = hasRates ? Number(stats.rates_pkts[i] ?? 0) : null;
+                const bpsVal = hasRates ? Number(stats.rates_bytes[i] ?? 0) : null;
+                const isDropLabel = label.includes('drop');
+
+                return (
+                    <div key={label} style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        padding: '4px 6px',
+                        marginBottom: '2px',
+                        background: isPinned ? '#1e293b' : 'transparent',
+                        border: `1px solid ${isPinned ? '#60a5fa44' : 'transparent'}`,
+                        borderRadius: '4px',
+                        gap: '6px',
+                    }}>
+                        <span style={{ fontSize: '11px', color: '#94a3b8', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
+                        {hasRates ? (
+                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '1px', flexShrink: 0 }}>
+                                <span style={{ fontSize: '11px', fontFamily: 'monospace', color: isDropLabel && ppsVal! > 0 ? '#ef4444' : '#10b981', fontWeight: 'bold' }}>
+                                    {ppsVal!.toLocaleString()} pps
+                                </span>
+                                {bpsVal !== null && bpsVal > 0 && (
+                                    <span style={{ fontSize: '10px', fontFamily: 'monospace', color: '#475569' }}>
+                                        {bpsVal.toLocaleString()} Bps
+                                    </span>
+                                )}
+                            </div>
+                        ) : (
+                            <span style={{ fontSize: '11px', fontFamily: 'monospace', color: isDropLabel && cntVal > 0 ? '#ef4444' : '#64748b', flexShrink: 0 }}>
+                                {cntVal.toLocaleString()}
+                            </span>
+                        )}
+                        {hasRates && (
+                            <button
+                                onClick={() => {
+                                    if (isPinned && pinned?.type === 'pps') {
+                                        togglePin(rfNodeId, i, 'bps');
+                                    } else if (isPinned && pinned?.type === 'bps') {
+                                        togglePin(rfNodeId, i, 'bps'); // unpin (toggle off)
+                                    } else {
+                                        togglePin(rfNodeId, i, 'pps');
+                                    }
+                                }}
+                                title={isPinned ? (pinned?.type === 'pps' ? 'Switch to BPS · click again to unpin' : 'Unpin') : 'Pin PPS to node badge'}
+                                style={{
+                                    background: 'none', border: 'none',
+                                    color: isPinned ? '#f59e0b' : '#334155',
+                                    cursor: 'pointer', fontSize: '14px',
+                                    padding: '0', flexShrink: 0, lineHeight: 1,
+                                }}
+                            >
+                                {isPinned ? '★' : '☆'}
+                            </button>
+                        )}
+                    </div>
+                );
+            })}
+        </div>
+    );
+}
+
 export default function App() {
+    // Single shared WebSocket for all telemetry consumers
+    useTelemetrySocket();
+
     const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
     const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
     // Mirror of nodes kept in a ref so loadTopology can read current positions
@@ -713,8 +807,19 @@ export default function App() {
     if (error) return <div style={{ color: 'red', padding: '20px' }}>Failed to load graph: {error}</div>;
 
 
-    // --- NEW: Find the currently selected node ---
     const selectedNode = nodes.find((n) => n.selected);
+
+    // Derive the tmstats_name key for the selected node so LiveMetricsSidebar
+    // can look up its telemetry slice without knowing node internals.
+    const selectedTmStatsKey = (() => {
+        if (!selectedNode) return null;
+        if (selectedNode.type === 'iface') return (selectedNode.data as any).name as string;
+        if (selectedNode.type === 'pipeline') {
+            const nd = selectedNode.data as any;
+            return nd.pipeline_name ? `${nd.pipeline_name}/${nd.id}` : (nd.id as string);
+        }
+        return null;
+    })();
 
     return (
         <>
@@ -1119,6 +1224,12 @@ export default function App() {
                                     </>
                                 );
                             })()}
+                            {selectedTmStatsKey && (
+                                <LiveMetricsSidebar
+                                    tmStatsKey={selectedTmStatsKey}
+                                    rfNodeId={selectedNode!.id}
+                                />
+                            )}
                         </div>
                     </div>
                 )}

@@ -481,25 +481,31 @@ async fn handle_terminal_socket(mut socket: WebSocket, state: AppState) {
 
 
 async fn handle_telemetry_socket(mut socket: WebSocket, state: AppState) {
-    // 1. Subscribe to the global telemetry broadcast channel
     let mut rx = state.telemetry_tx.subscribe();
+
+    // Per-node throttle: forward at most once every 500 ms per tmstats_name.
+    // Prevents browser layout thrash when the backend publishes at 5–20 Hz.
+    let throttle = std::time::Duration::from_millis(500);
+    let mut last_sent: HashMap<String, std::time::Instant> = HashMap::new();
 
     loop {
         tokio::select! {
-            // EVENT A: The ethtool background worker sent a new stats update
             Ok(stats) = rx.recv() => {
-                // Convert the Rust struct into a clean JSON string
-                if let Ok(json_str) = serde_json::to_string(&stats) {
-                    // Blast it to the React UI
-                    if socket.send(Message::Text(Utf8Bytes::from(json_str))).await.is_err() {
-                        // If sending fails, the user closed the browser tab.
-                        log::debug!("Telemetry UI client disconnected.");
-                        break;
+                let now = std::time::Instant::now();
+                let last = last_sent
+                    .entry(stats.tmstats_name.clone())
+                    .or_insert_with(|| now - throttle);
+                if now.duration_since(*last) >= throttle {
+                    *last = now;
+                    if let Ok(json_str) = serde_json::to_string(&stats) {
+                        if socket.send(Message::Text(Utf8Bytes::from(json_str))).await.is_err() {
+                            log::debug!("Telemetry UI client disconnected.");
+                            break;
+                        }
                     }
                 }
             }
 
-            // EVENT B: Listen for client disconnects
             Some(msg) = socket.next() => {
                 if let Ok(Message::Close(_)) = msg {
                     log::debug!("Telemetry UI client closed connection gracefully.");
@@ -507,7 +513,6 @@ async fn handle_telemetry_socket(mut socket: WebSocket, state: AppState) {
                 }
             }
 
-            // EVENT C: Channel closed or network error
             else => break,
         }
     }

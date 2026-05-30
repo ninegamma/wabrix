@@ -33,7 +33,7 @@ id = "rx_source"
 type = "BatchRxNode"
 routes = ["nd_parser"]
 queues = [0]
-args= { batch_size = "128", interface = "enp2s0f0np0" }
+args= { batch_size = "256", interface = "enp2s0f0np0" }
 hot_args= {}
 
 [[pipelines.nodes]]
@@ -125,7 +125,7 @@ id = "rx_source"
 type = "BatchRxNode"
 routes = ["nd_parser"]
 queues = [0]
-args= { batch_size = "128", interface = "enp2s0f1np1" }
+args= { batch_size = "256", interface = "enp2s0f1np1" }
 hot_args= {}
 
 [[pipelines.nodes]]

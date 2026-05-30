@@ -47,6 +47,9 @@ pub struct WasmEngine {
     partition_start_bytes: u32,
     /// The Umem this node is bound to. Every incoming PDU must carry this id.
     umem_id: u8,
+    /// Set permanently true once call_get_telemetry() returns non-empty stats.
+    /// Disables in-band telemetry extraction which lacks TELEMETRY_FLAG guarding.
+    supports_oob_telemetry: bool,
 }
 
 impl WasmEngine {
@@ -115,6 +118,7 @@ impl WasmEngine {
             telemetry_metrics,
             partition_start_bytes,
             umem_id,
+            supports_oob_telemetry: false,
         }
     }
 
@@ -163,7 +167,6 @@ impl WasmEngine {
 
         // 2. Evaluate the trigger: Mask hit OR Control Plane requested it
         let is_telemetry_tick = (self.batch_count & 0x3FF) == 0 || control_plane_wants_sync;
-        let mut use_out_of_band = false;
 
         if is_telemetry_tick {
             // Acknowledge and reset the flag *only* if we are actually syncing
@@ -177,9 +180,8 @@ impl WasmEngine {
                     vec![]
                 });
 
-            use_out_of_band = !out_of_band_stats.is_empty();
-
-            if use_out_of_band {
+            if !out_of_band_stats.is_empty() {
+                self.supports_oob_telemetry = true;
                 // Wasm maintains the absolute total.
                 // We safely overwrite the host atomics with the absolute values.
                 for (idx, &count) in out_of_band_stats.iter().enumerate() {
@@ -211,8 +213,10 @@ impl WasmEngine {
             let action = action_vector[pdu_index];
             pdu_index += 1;
 
-            // OLD METHOD FALLBACK: Only extract in-band telemetry if the Wasm array was empty
-            if !use_out_of_band {
+            // OLD METHOD FALLBACK: Only extract in-band telemetry if WASM has no OOB support.
+            // supports_oob_telemetry is set permanently once call_get_telemetry() returns data,
+            // preventing spurious counter increments between telemetry ticks.
+            if !self.supports_oob_telemetry {
                 let telemetry_bucket = ((action >> 16) & 0xFF) as usize;
 
                 if telemetry_bucket < self.telemetry_metrics.counters_pkts.len() {
@@ -301,6 +305,29 @@ impl Node for WasmEngine {
                 });
 
             if n_requested_frames == 0 {
+                // Service force_sync_flag even when idle so final WASM state is
+                // captured in host AtomicU64 counters at run end.
+                let control_plane_wants_sync = self.telemetry_metrics.force_sync_flag
+                    .as_ref()
+                    .map(|f| f.load(Ordering::Relaxed))
+                    .unwrap_or(false);
+
+                if control_plane_wants_sync {
+                    if let Some(flag) = &self.telemetry_metrics.force_sync_flag {
+                        flag.store(false, Ordering::Relaxed);
+                    }
+                    let oob = self.bindings.xbricks_plugins_packet_engine()
+                        .call_get_telemetry(&mut self.store)
+                        .unwrap_or_default();
+                    if !oob.is_empty() {
+                        self.supports_oob_telemetry = true;
+                        for (idx, &count) in oob.iter().enumerate() {
+                            if idx < self.telemetry_metrics.counters_pkts.len() {
+                                self.telemetry_metrics.counters_pkts[idx].store(count, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                }
                 Directive::Stop
             } else {
                 // 1. Allocate exact memory from the shared FrameRegistry
