@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use log::debug;
 use serde::{Serialize, Deserialize};
 use tokio::sync::broadcast::Sender;
+use std::time::Instant;
 use ts_rs::TS;
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
@@ -12,6 +14,8 @@ pub struct TMLiveStats {
     pub labels: Vec<String>,
     pub counters_pkts: Vec<u64>,
     pub counters_bytes: Vec<u64>,
+    pub rates_pkts: Vec<u64>,
+    pub rates_bytes: Vec<u64>,
     pub is_active_run: bool,
 }
 
@@ -25,6 +29,7 @@ pub struct TelemetryMetrics {
     pub counters_bytes: Vec<Arc<AtomicU64>>,
     /// When Some, overrides the `is_active_run` heuristic with an explicit flag.
     pub active_flag: Option<Arc<AtomicBool>>,
+    pub force_sync_flag: Option<Arc<AtomicBool>>,
 }
 
 /// Registry to hold references to all telemetry nodes
@@ -45,6 +50,7 @@ impl TelemetryRegistry {
         counters_pkts: Vec<Arc<AtomicU64>>,
         counters_bytes: Vec<Arc<AtomicU64>>,
         active_flag: Option<Arc<AtomicBool>>,
+        force_sync_flag: Option<Arc<AtomicBool>>,
     ) {
         self.metrics.push(TelemetryMetrics {
             node_id,
@@ -52,6 +58,7 @@ impl TelemetryRegistry {
             counters_pkts,
             counters_bytes,
             active_flag,
+            force_sync_flag,
         });
     }
 
@@ -72,7 +79,29 @@ pub fn spawn_pipeline_telemetry(
     shutdown_signal: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     tokio::spawn(async move {
+        // Tracker: node_id -> (Last Timestamp, Last Pkts Array, Last Bytes Array)
+        let mut rate_tracker: HashMap<String, (Instant, Vec<u64>, Vec<u64>)> = HashMap::new();
+
         while !shutdown_signal.load(Ordering::Relaxed) {
+            // ==========================================
+            // BROADCAST PHASE
+            // Tell all Wasm engines to dump their out-of-band stats
+            // ==========================================
+            let all_metrics = registry.get_metrics();
+            for metrics in all_metrics {
+                if let Some(flag) = &metrics.force_sync_flag {
+                    flag.store(true, Ordering::Relaxed);
+                }
+            }
+
+            // ==========================================
+            // WAIT PHASE
+            // Yield the thread for 10ms. At 100 Hz, a batch takes 10ms.
+            // At 1M+ Hz, a batch takes microseconds. This guarantees
+            // all active fast-paths will hit the flag.
+            // ==========================================
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
             // Aggregate counters across all entries that share the same node_id.
             // We rely on insertion order: the first entry for a given id provides
             // the labels and the initial counter values; subsequent entries for
@@ -103,7 +132,38 @@ pub fn spawn_pipeline_telemetry(
                 }
             }
 
+            // RATE CALCULATION & DISPATCH PHASE
+            let now = Instant::now();
+
             for (node_id, counters_pkts, counters_bytes, labels, active_flag) in seen {
+                let is_active_run = active_flag
+                    .unwrap_or_else(|| counters_pkts.iter().any(|&v| v > 0));
+
+                let mut rates_pkts = vec![0; counters_pkts.len()];
+                let mut rates_bytes = vec![0; counters_bytes.len()];
+
+                if let Some((last_time, last_pkts, last_bytes)) = rate_tracker.get(&node_id) {
+                    let elapsed = now.duration_since(*last_time).as_secs_f64();
+
+                    if elapsed > 0.0 {
+                        // Calculate PPS for every label
+                        for i in 0..counters_pkts.len() {
+                            let prev = last_pkts.get(i).copied().unwrap_or(0);
+                            let delta = counters_pkts[i].saturating_sub(prev);
+                            rates_pkts[i] = (delta as f64 / elapsed) as u64;
+                        }
+
+                        // Calculate BPS for every label
+                        for i in 0..counters_bytes.len() {
+                            let prev = last_bytes.get(i).copied().unwrap_or(0);
+                            let delta = counters_bytes[i].saturating_sub(prev);
+                            rates_bytes[i] = (delta as f64 / elapsed) as u64;
+                        }
+                    }
+                }
+
+                // Store current vectors for the next tick's delta calculation
+                rate_tracker.insert(node_id.clone(), (now, counters_pkts.clone(), counters_bytes.clone()));
                 // Use the explicit active flag when available; fall back to the
                 // "any pkt counter > 0" heuristic for nodes that don't register one.
                 let is_active_run = active_flag
@@ -113,12 +173,14 @@ pub fn spawn_pipeline_telemetry(
                     labels,
                     counters_pkts,
                     counters_bytes,
+                    rates_pkts,
+                    rates_bytes,
                     is_active_run,
                 };
                 let _ = telemetry_tx.send(stats);
             }
 
-            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(190)).await;
         }
     });
     Ok(())
@@ -312,6 +374,8 @@ pub fn spawn_telemetry_ice(telemetry_tx: Sender<TMLiveStats>, iface_name: String
                             run_tx_uc, run_tx_mc, run_tx_bc,
                         ],
                         counters_bytes: vec![],
+                        rates_pkts: vec![],
+                        rates_bytes: vec![],
                         is_active_run: in_run,
                     };
                     // Ignore errors (this just means no browsers are currently connected to the WebSocket)

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::mem::MaybeUninit;
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::broadcast::{Receiver, Sender};
 use tokio::sync::broadcast::error::TryRecvError;
 use crate::wasm_manager::{MyHostState, WasmManager}; // Assuming WasmManager is defined here
@@ -32,10 +33,10 @@ pub struct WasmEngine {
     bindings: EnginePlugin,
     /// Index corresponds to the Route ID returned by Wasm
     routing_table: Vec<NodeId>,
-    /// Telemetry dispatch channel
-    telemetry_tx: Option<Sender<u32>>,
     /// Control event receiver channel
     processed_packets: u64,
+    /// helper for reducing telemetry fetching frequency
+    batch_count: u32,
     #[cfg(feature = "profiling")]
     total_cycles: u64,
     telemetry_metrics: TelemetryMetrics,
@@ -54,7 +55,6 @@ impl WasmEngine {
         manager: &WasmManager,
         wasm_file_path: &str,
         routing_table: Vec<NodeId>, // Accept any number of routes
-        telemetry_tx: Option<Sender<u32>>,
         telemetry_metrics: TelemetryMetrics,
         partition_start_bytes: u32,
         umem_id: u8,
@@ -108,8 +108,8 @@ impl WasmEngine {
             store,
             bindings,
             routing_table,
-            telemetry_tx,
             processed_packets: 0,
+            batch_count: 0,
             #[cfg(feature = "profiling")]
             total_cycles: 0,
             telemetry_metrics,
@@ -153,21 +153,39 @@ impl WasmEngine {
         // ==========================================================
         // 2. HYBRID TELEMETRY EXTRACTION
         // ==========================================================
-        let out_of_band_stats = self.bindings.xbricks_plugins_packet_engine()
-            .call_get_telemetry(&mut self.store)
-            .unwrap_or_else(|e| {
-                log::error!("Failed to call get-telemetry on packet-engine: {}", e);
-                vec![]
-            });
+        self.batch_count = self.batch_count.wrapping_add(1);
 
-        let use_out_of_band = !out_of_band_stats.is_empty();
+        // 1. Safely read the atomic flag (evaluates to false if the Option is None)
+        let control_plane_wants_sync = match &self.telemetry_metrics.force_sync_flag {
+            Some(flag) => flag.load(Ordering::Relaxed),
+            None => false,
+        };
 
-        if use_out_of_band {
-            // NEW METHOD: Wasm maintains the absolute total.
-            // We safely overwrite the host atomics with the absolute values.
-            for (idx, &count) in out_of_band_stats.iter().enumerate() {
-                if idx < self.telemetry_metrics.counters_pkts.len() {
-                    self.telemetry_metrics.counters_pkts[idx].store(count, Ordering::Relaxed);
+        // 2. Evaluate the trigger: Mask hit OR Control Plane requested it
+        let is_telemetry_tick = (self.batch_count & 0x3FF) == 0 || control_plane_wants_sync;
+        let mut use_out_of_band = false;
+
+        if is_telemetry_tick {
+            // Acknowledge and reset the flag *only* if we are actually syncing
+            if let Some(flag) = &self.telemetry_metrics.force_sync_flag {
+                flag.store(false, Ordering::Relaxed);
+            }
+            let out_of_band_stats = self.bindings.xbricks_plugins_packet_engine()
+                .call_get_telemetry(&mut self.store)
+                .unwrap_or_else(|e| {
+                    log::error!("Failed to call get-telemetry on packet-engine: {}", e);
+                    vec![]
+                });
+
+            use_out_of_band = !out_of_band_stats.is_empty();
+
+            if use_out_of_band {
+                // Wasm maintains the absolute total.
+                // We safely overwrite the host atomics with the absolute values.
+                for (idx, &count) in out_of_band_stats.iter().enumerate() {
+                    if idx < self.telemetry_metrics.counters_pkts.len() {
+                        self.telemetry_metrics.counters_pkts[idx].store(count, Ordering::Relaxed);
+                    }
                 }
             }
         }

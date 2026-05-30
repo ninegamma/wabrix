@@ -355,6 +355,7 @@ impl PipelineFactory {
                     let tm_avg_cycles = Arc::new(AtomicU64::new(0));
                     let tm_pps = Arc::new(AtomicU64::new(0));
                     let tm_is_running = Arc::new(AtomicBool::new(false));
+                    let tm_force_sync = Arc::new(AtomicBool::new(false));
                     if let Some(ref mut reg) = telemetry_registry {
                         reg.register(
                             format!("{}/{}", pipeline_instance.name, node_instance.node_config.id),
@@ -367,6 +368,7 @@ impl PipelineFactory {
                             vec![tm_total.clone(), tm_this_run.clone(), tm_avg_cycles.clone(), tm_pps.clone()],
                             vec![Arc::new(AtomicU64::new(0))],
                             Some(tm_is_running.clone()),
+                            Some(tm_force_sync.clone()),
                         );
                     }
 
@@ -454,6 +456,7 @@ impl PipelineFactory {
                             vec![dropped_pkts.clone()],
                             vec![Arc::new(AtomicU64::new(0))],
                             None,
+                            None,
                         );
                     }
                     Box::new(DropNode::new(my_id.clone(), Some(dropped_pkts)))
@@ -528,6 +531,7 @@ impl PipelineFactory {
                     let counters_bytes: Vec<Arc<AtomicU64>> = (0..num_buckets)
                         .map(|_| Arc::new(AtomicU64::new(0)))
                         .collect();
+                    let tm_force_sync = Arc::new(AtomicBool::new(false));
 
                     if let Some(registry) = telemetry_registry.as_mut() {
                         registry.register(
@@ -536,6 +540,7 @@ impl PipelineFactory {
                             counters_pkts.clone(),
                             counters_bytes.clone(),
                             None,
+                            Some(tm_force_sync.clone()),
                         );
                     }
 
@@ -545,6 +550,7 @@ impl PipelineFactory {
                         counters_pkts,
                         counters_bytes,
                         active_flag: None,
+                        force_sync_flag: Some(tm_force_sync.clone()),
                     };
 
                     // Compute this instance's reserved-memory partition.
@@ -576,7 +582,6 @@ impl PipelineFactory {
                             manager,
                             wasm_path,
                             routing_table,
-                            None,
                             telemetry_metrics,
                             partition_start_bytes,
                             umem_id as u8,
