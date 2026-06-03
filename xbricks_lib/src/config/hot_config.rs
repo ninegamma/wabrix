@@ -5,7 +5,7 @@ use std::sync::Arc;
 use macaddr::{MacAddr6};
 use serde::{Deserialize, Serialize};
 use xbricks_protocol::helpers::parse_suffixed_number;
-use xbricks_protocol::wbatch::MAX_BATCH_SIZE;
+use xbricks_base::interface::batch::MAX_BATCH_SIZE;
 use xbricks_base::NodeId;
 use crate::generator_node::GenState;
 

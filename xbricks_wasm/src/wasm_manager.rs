@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use dashmap::DashMap;
 use std::sync::{Arc, Mutex};
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
@@ -5,7 +6,12 @@ use wasmtime::{Config, Engine, LinearMemory, MemoryCreator, MemoryType, OptLevel
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use xsk_rs::Umem;
 use crate::wasm_engine;
-use crate::wasm_engine::exports::xbricks;
+
+// A thread-local slot to securely hold the partition handle during instantiation
+thread_local! {
+    static CURRENT_INSTANTIATION_HANDLE: RefCell<Option<Arc<UmemHandle>>> = RefCell::new(None);
+}
+
 // --- 1. Memory Layer (The Zero-Copy Bridge) ---
 
 /// Thread-safe handle to the mmap'd AF_XDP UMEM region.
@@ -76,14 +82,7 @@ unsafe impl LinearMemory for UmemHandle {
 }
 
 /// Per-engine custom memory allocator.
-///
-/// `current_handle` is pre-loaded with the partition-specific `UmemHandle`
-/// just before each `FilterPlugin::instantiate()` call. Wasmtime calls
-/// `new_memory()` exactly once per instantiation (for single-memory modules),
-/// so the mutex hand-off is safe as long as instance creation is sequential.
-pub struct XdpMemoryCreator {
-    pub current_handle: Mutex<Arc<UmemHandle>>,
-}
+pub struct XdpMemoryCreator;
 
 unsafe impl MemoryCreator for XdpMemoryCreator {
     fn new_memory(
@@ -94,8 +93,11 @@ unsafe impl MemoryCreator for XdpMemoryCreator {
         _reserved: Option<usize>,
         _guard_size: usize,
     ) -> std::result::Result<Box<dyn LinearMemory>, String> {
-        // Clone the handle currently loaded for this instantiation.
-        let handle = self.current_handle.lock().unwrap().clone();
+        // Read and instantly consume the handle from THIS specific thread
+        let handle = CURRENT_INSTANTIATION_HANDLE.with(|slot| {
+            slot.borrow_mut().take()
+        }).ok_or_else(|| "XdpMemoryCreator: No UmemHandle was set for this thread prior to instantiation!".to_string())?;
+
         Ok(Box::new((*handle).clone()))
     }
 }
@@ -135,37 +137,28 @@ pub struct WasmManager {
     linker: Linker<MyHostState>,
     cache: DashMap<String, Component>,
     umem: Arc<UmemHandle>,
-    /// Kept so `set_instantiation_handle` can pre-load the correct partition
-    /// handle before each `FilterPlugin::instantiate()` call.
-    memory_creator: Arc<XdpMemoryCreator>,
 }
 
 impl WasmManager {
     pub fn new(frame_size: u32, reserved_frames: u32, frame_count: u32, umem: Arc<Umem>) -> Result<Self> {
         let umem_ptr = umem.as_ptr();
-        let size = frame_count as usize * frame_size as usize;
+        let total_umem_size = frame_count as usize * frame_size as usize;
         let umem_handle = Arc::new(UmemHandle {
             ptr: umem_ptr,
-            size,
+            size: total_umem_size,
             partition_start_bytes: 0,
             reserved_frames,
             frame_size,
-        });
-
-        // The creator is pre-loaded with the base handle; each WasmInspectorNode
-        // will call set_instantiation_handle() before instantiation to replace it.
-        let memory_creator = Arc::new(XdpMemoryCreator {
-            current_handle: Mutex::new(umem_handle.clone()),
         });
 
         let mut config = Config::new();
         config
             .wasm_component_model(true)
             .wasm_memory64(true)
-            .memory_reservation(size as u64)
+            .memory_reservation(total_umem_size as u64)
             .memory_may_move(false) // Critical for AF_XDP stability
             .cranelift_opt_level(OptLevel::Speed)
-            .with_host_memory(memory_creator.clone())
+            .with_host_memory(Arc::new(XdpMemoryCreator))
             // Disable mmap-based image initialization because we are using a custom hardware UMEM creator:
             .memory_init_cow(false);
 
@@ -183,7 +176,6 @@ impl WasmManager {
             linker,
             cache: DashMap::new(),
             umem: umem_handle,
-            memory_creator,
         })
     }
 
@@ -191,14 +183,20 @@ impl WasmManager {
     /// Compiled artifacts are stored in /tmp/xbricks-wasm-cache/ keyed by filename + mtime,
     /// so repeated dataplane restarts skip the Cranelift compilation step entirely.
     pub fn get_component(&self, path: &str) -> Result<Component> {
-        // Fast path: in-memory cache (hits on second node within the same restart)
-        if let Some(c) = self.cache.get(path) {
-            return Ok(c.clone());
-        }
+        use dashmap::mapref::entry::Entry;
 
-        let component = Self::load_or_compile(&self.engine, path)?;
-        self.cache.insert(path.to_string(), component.clone());
-        Ok(component)
+        match self.cache.entry(path.to_string()) {
+            Entry::Occupied(entry) => {
+                // Another thread already compiled it. Return the cached Arc.
+                Ok(entry.get().clone())
+            }
+            Entry::Vacant(entry) => {
+                // We are the first thread! Compile or load from disk.
+                let component = Self::load_or_compile(&self.engine, path)?;
+                entry.insert(component.clone());
+                Ok(component)
+            }
+        }
     }
 
     fn load_or_compile(engine: &Engine, wasm_path: &str) -> Result<Component> {
@@ -267,7 +265,9 @@ impl WasmManager {
     /// Must be called on the same thread as `instantiate()`, and before it.
     /// Instance creation is sequential during startup so this is safe.
     pub fn set_instantiation_handle(&self, handle: Arc<UmemHandle>) {
-        *self.memory_creator.current_handle.lock().unwrap() = handle;
+        CURRENT_INSTANTIATION_HANDLE.with(|slot| {
+            *slot.borrow_mut() = Some(handle);
+        });
     }
 
     /// Create a windowed `UmemHandle` for a specific WASM instance partition.
@@ -286,9 +286,12 @@ impl WasmManager {
             partition_start_bytes,
             self.umem.size
         );
+        //TODO: we need to restrict to the partition size for this Wasm Instance
+        let safe_partition_size = self.umem.size - (partition_start_bytes as usize);
+
         Arc::new(UmemHandle {
             ptr: self.umem.ptr,
-            size: self.umem.size,
+            size: safe_partition_size,
             partition_start_bytes,
             reserved_frames: self.umem.reserved_frames,
             frame_size: self.umem.frame_size,

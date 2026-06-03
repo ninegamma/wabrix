@@ -17,11 +17,11 @@ use tokio::sync::broadcast::{Receiver, Sender};
 use xbricks_protocol::helpers::parse_suffixed_number;
 use xbricks_base::frame_registry::{set_tsc_frequency, set_worker_frame_registry};
 use xbricks_base::{frame_registry, ControlEvent, Directive, Node, NodeId};
+use xbricks_base::interface::batch::MAX_BATCH_SIZE;
 use crate::config::hot_config::{HotNodeData, HotPipelineConfig, NodeDynamicState};
 #[cfg(feature = "wasm")]
 use xbricks_wasm::wasm_manager::WasmManager;
 use xbricks_base::telemetry::TelemetryRegistry;
-use xbricks_protocol::wbatch::MAX_BATCH_SIZE;
 use xbricks_base::node_instance_id::NodeInstanceId;
 use xbricks_wasm::WasmEngine;
 use crate::generator_node::{GenState, GeneratorNode};
@@ -157,7 +157,6 @@ impl PipelineFactory {
                             node_instance.node_config.id, batch_size, MAX_BATCH_SIZE
                         ));
                     }
-
                     // Take ownership of the RX component of the socket
                     let rx_source = xsocket_mgr
                         .take_rx_socket(queue_id, iface)
@@ -1199,6 +1198,8 @@ pub fn spawn_worker_pipelines(
         let mut idle_streaks = vec![0u32; num_pipelines];
         // skip_counters tracks how many loop iterations we should skip this pipeline
         let mut skip_counters = vec![0u32; num_pipelines];
+        // Thread-level idle tracker
+        let mut global_idle_spins = 0u32;
         // The maximum number of consecutive loops to skip a dead pipeline.
         // 32 means we check the veth at least once every 32 physical loops.
         const MAX_SKIP_PENALTY: u32 = 512;
@@ -1239,6 +1240,7 @@ pub fn spawn_worker_pipelines(
             frame_registry.process_returns();
 
             // 3. Adaptive Execution of pipelines
+            let mut work_done_this_tick = false;
 
             for i in 0..num_pipelines {
                 // If this pipeline is being penalized for being empty, skip it
@@ -1251,6 +1253,7 @@ pub fn spawn_worker_pipelines(
                 let mut packets_processed = runners[i].run_iteration().0 as usize;
 
                 if packets_processed > 0 {
+                    work_done_this_tick = true; // Mark that the core did actual work
                     // TRAFFIC DETECTED! Reset all penalties.
                     idle_streaks[i] = 0;
                     skip_counters[i] = 0;
@@ -1273,8 +1276,27 @@ pub fn spawn_worker_pipelines(
                     idle_streaks[i] += 1;
 
                     // Calculate penalty (powers of 2), capped at MAX_SKIP_PENALTY
-                    let penalty = 1 << std::cmp::min(idle_streaks[i], 5); // 1, 2, 4, 8, 16, 32
+                    let penalty = 1 << std::cmp::min(idle_streaks[i], 9); // 1, 2, 4, 8, 16, 32, ...
                     skip_counters[i] = std::cmp::min(penalty, MAX_SKIP_PENALTY);
+                }
+            }
+
+            // =======================================================
+            // GLOBAL CPU BACKOFF
+            // =======================================================
+            if work_done_this_tick {
+                global_idle_spins = 0;
+            } else {
+                global_idle_spins += 1;
+
+                if global_idle_spins < 1000 {
+                    // Phase 1: Pause the CPU pipeline (nanoseconds).
+                    // Drops thermal load without losing thread context.
+                    std::hint::spin_loop();
+                } else {
+                    // Phase 2: Deep idle (microseconds).
+                    // The whole core is dead. Yield to Linux.
+                    std::thread::yield_now();
                 }
             }
 

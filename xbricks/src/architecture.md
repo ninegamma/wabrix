@@ -64,7 +64,7 @@ The `FrameRegistry` acts as the **Inventory Manager**. It is a container that ma
 * **Key Components per Umem Group:**
     * **`free_stash`:** A `Vec<u32>` acting as a LIFO stack. This is the "hot cache" of frame indices ready to be used immediately.
     * **`partition`:** Defines the range of IDs this registry is allowed to own (e.g., "Worker 0 owns frames 0-4095").
-    * **`return_rx`:** A crossbeam channel receiver (mailbox) where *other workers* drop off frames they are returning to this worker.
+    * **`return_queue`:** A lockless `Arc<ArrayQueue<u32>>` (bounded ring buffer) where *other workers* push bit-packed u32 commands for frames they are returning or sharing. The owning worker pops from this queue in `process_returns()`.
 * **Logic:**
     * When a socket needs frames (`alloc`), the Registry pops from `free_stash`.
     * If `free_stash` is empty, it checks the `return_rx` mailbox to reclaim returned frames.
@@ -216,7 +216,7 @@ The architecture is best understood as a hierarchy of constraints:
 * **`XSocketTx`**: TX-only component of a split socket. Returns all frames via SystemBus (no direct registry access).
 * **`WorkerFrameRegistry`**: Contains the worker's `LocalFrameRegistry` along with partition info and worker ID.
 * **`LocalFrameRegistry`**: Represents the **Worker's Partition**. It holds the inventory (`free_stash`) for that specific worker. Accessed via thread-local storage within the worker thread.
-* **`SystemBus`**: The mechanism to satisfy the **Ownership Rule** (returning frames between workers).
+* **`SystemBus`**: The mechanism to satisfy the **Ownership Rule** (returning frames between workers). Holds one `Arc<ArrayQueue<u32>>` per worker. Commands are bit-packed into a single u32: bit 31 = command (0=Release, 1=Retain), bits 30-24 = umem_id (7 bits, max 128 UMEMs), bits 23-0 = local_idx.
 * **`UmemPartition`**: Contains `worker_id`, `umem_group_id`, `start_idx`, and `end_idx` to define frame ownership boundaries.
 
 ---
@@ -298,9 +298,10 @@ fn receive_into_batch(&mut self, batch: &mut Batch) -> Result<usize> {
 ```rust
 fn release_frame(&mut self, frame_idx: u32) {
     // TX NEVER accesses registry directly
-    // Always route through SystemBus to ensure the owning worker receives them
+    // Always route through SystemBus to ensure the owning worker receives them.
+    // Release command: bit 31 = 0 (Release), lower 31 bits = global frame index.
     let owner_worker_id = self.determine_owner(frame_idx);
-    self.bus.bus_senders[owner_worker_id].send(BusCommand::Release(frame_idx));
+    let _ = self.bus.bus_senders[owner_worker_id].push(frame_idx);
 }
 ```
 
@@ -360,8 +361,8 @@ fn release_frame(&mut self, frame_idx: u32) {
 
 2. **Frame Circulation:**
    - Frames flow: RX allocates (from worker registry) → PDU created → TX transmits → TX completes
-   - TX always sends frames back via SystemBus (even same-worker)
-   - RX processes returns to reclaim frames for reuse (calling worker registry's process_returns())
+   - TX always pushes packed u32 commands to the owning worker's `ArrayQueue` (even same-worker)
+   - RX processes returns: `while let Some(cmd) = return_queue.pop()` — no enum branching, no mutex
    - No risk of frame accumulation or starvation
 
 3. **Independent Node Binding:**
@@ -371,9 +372,9 @@ fn release_frame(&mut self, frame_idx: u32) {
    - Enables bidirectional pipelines on same queues
 
 4. **SystemBus Coordination:**
-   - Existing infrastructure handles frame routing between workers
+   - One `Arc<ArrayQueue<u32>>` per worker; both senders and the registry share the same Arc
    - Works transparently for same-worker and cross-worker scenarios
-   - No special cases needed in the code
+   - Packed u32 format: bit 31 = command, bits 30-24 = umem_id, bits 23-0 = local_idx
    - Routes based on worker_id, not core_id
 
 ### Registry Behavior

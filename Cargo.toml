@@ -15,7 +15,7 @@ publish = false
 license-file = "LICENSE.txt"
 
 [workspace.dependencies]
-xbricks_protocol = { path = "../xbricks_public/xbricks_protocol" }
+xbricks_protocol = { path = "../xbricks_public/xbricks_protocol", features=["host"] }
 libbpf-rs = "^0.26.2"
 libbpf-sys = { version = "1.7", default-features = false }
 xsk-rs = { path = "../xsk-rs" }
@@ -35,6 +35,7 @@ serde = { version = "1.0", features = ["derive"] }
 separator = "0.4"
 ts-rs = "12.0"
 crossbeam-channel = "0.5"
+crossbeam-queue = "0.3"
 toml = "1.1"
 arc-swap = "1.9.1"
 spin = "0.10"

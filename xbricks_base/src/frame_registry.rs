@@ -1,11 +1,11 @@
 use std::sync::Arc;
 use core::cell::Cell;
 use core::mem::MaybeUninit;
-use crossbeam_channel::Receiver;
+use crossbeam_queue::ArrayQueue;
 use xsk_rs::Umem;
 use log::{debug, trace};
-use xbricks_protocol::wbatch::MAX_BATCH_SIZE;
-use crate::{BusCommand, RuntimeUmemConfig, SystemBus, UmemPartition};
+use crate::{RuntimeUmemConfig, SystemBus, UmemPartition};
+use crate::interface::batch::MAX_BATCH_SIZE;
 use crate::interface::Pdu;
 
 // Thread-local storage for the worker's frame registry pointer
@@ -47,26 +47,49 @@ pub fn get_worker_frame_registry() -> *mut FrameRegistry {
 
 const LOCAL_IDX_MASK: u32 = 0x00FF_FFFF;
 
+/// Capacity of each worker's return queue.
+/// Must be large enough to absorb cross-worker frame returns without dropping.
+pub const RETURN_QUEUE_CAPACITY: usize = 65536;
+
+/// Command bit packed into the high bit of a return-queue u32.
+/// 0 = Release (decrement refcount, free if zero), 1 = Retain (increment refcount).
+/// Bits 30-24 = umem_id (7 bits, max 128 UMEMs), bits 23-0 = local_idx.
+pub const CMD_BIT: u32 = 0x8000_0000;
+
+/// Returns true if the packed command is a Retain.
+#[inline(always)]
+pub fn is_retain(cmd: u32) -> bool {
+    (cmd & CMD_BIT) != 0
+}
+
+/// Strips the command bit to recover the plain global frame index.
+#[inline(always)]
+pub fn extract_global_idx(cmd: u32) -> u32 {
+    cmd & !CMD_BIT
+}
+
 /// Maximum number of distinct UMEM groups supported.
-/// UMEM IDs occupy the upper 8 bits of the encoded frame index, so at most 256 groups.
-pub const MAX_UMEM: usize = 256;
+/// UMEM IDs occupy bits 24-30 of the encoded frame index (7 bits), so at most 128 groups.
+pub const MAX_UMEM: usize = 128;
 
 /// Packs a UMEM ID and a UMEM-relative local frame index into a single 32-bit global index.
-/// Upper 8 bits = umem_id, lower 24 bits = local_idx (0-based from UMEM mmap start).
+/// Bits 30-24 = umem_id (7 bits), bits 23-0 = local_idx (0-based from UMEM mmap start).
+/// Bit 31 is reserved for the return-queue command bit and is always 0 here.
 /// local_idx maps directly to: frame_addr = local_idx << frame_size_log2
 #[inline(always)]
 pub fn encode_global_frame(umem_id: usize, local_idx: u32) -> u32 {
-    debug_assert!(umem_id < 256, "UMEM ID exceeds 8 bits!");
+    debug_assert!(umem_id < 128, "UMEM ID exceeds 7 bits!");
     debug_assert!(local_idx <= LOCAL_IDX_MASK, "Local index exceeds 24 bits!");
 
     ((umem_id as u32) << 24) | (local_idx & LOCAL_IDX_MASK)
 }
 
 /// Unpacks a 32-bit global index into (umem_id, local_idx).
+/// Masks off bit 31 (the command bit) so this is safe to call on packed queue values too.
 /// local_idx is UMEM-relative: frame_addr = local_idx << frame_size_log2
 #[inline(always)]
 pub fn decode_global_frame(global_idx: u32) -> (usize, u32) {
-    let umem_id = (global_idx >> 24) as usize;
+    let umem_id = ((global_idx & 0x7F00_0000) >> 24) as usize;
     let local_idx = global_idx & LOCAL_IDX_MASK;
 
     (umem_id, local_idx)
@@ -91,7 +114,9 @@ pub struct FrameRegistry {
     pub worker_id: usize,
     /// Indexed by umem_id (0..MAX_UMEM). None = this worker has no partition in that UMEM.
     pub registry_map: Vec<Option<PartitionData>>,
-    return_rx: Receiver<BusCommand>,
+    /// Lockless return queue: other threads push packed u32 commands; this worker pops them.
+    /// Packed format: bit 31 = command (0=Release, 1=Retain), bits 30-24 = umem_id, bits 23-0 = local_idx.
+    return_queue: Arc<ArrayQueue<u32>>,
     /// System bus for frame lifecycle management
     pub bus: Arc<SystemBus>,
     /// Indexed by umem_id (0..MAX_UMEM).
@@ -106,7 +131,7 @@ impl FrameRegistry {
     pub fn new(
         worker_id: usize,
         partitions: Vec<(usize, UmemPartition)>,
-        return_rx: Receiver<BusCommand>,
+        return_queue: Arc<ArrayQueue<u32>>,
         bus: Arc<SystemBus>,
         umem_configs: Vec<Option<Arc<RuntimeUmemConfig>>>,
     ) -> Self {
@@ -156,7 +181,7 @@ impl FrameRegistry {
         Self {
             worker_id,
             registry_map,
-            return_rx,
+            return_queue,
             bus,
             umem_configs,
             active_umems: vec![None; MAX_UMEM],
@@ -165,31 +190,43 @@ impl FrameRegistry {
 
     #[inline]
     pub fn process_returns(&mut self) {
-        let mut returned_count = 0;
-        while let Ok(cmd) = self.return_rx.try_recv() {
-            match cmd {
-                BusCommand::Release(frame_idx) => {
-                    returned_count += 1;
-                    trace!("process_returns: Frame {} returned to registry", frame_idx);
-                    self.release_local(frame_idx);
-                }
-                BusCommand::Retain(frame_idx) => {
-                    // O(1): decode umem_id and local_idx directly from the encoded index.
-                    let (umem_id, local_idx) = decode_global_frame(frame_idx);
-                    if let Some(partition_data) = self.registry_map[umem_id].as_mut() {
-                        partition_data.refcounts[local_idx as usize] += 1;
+        // Track TOTAL processed items (both releases and retains)
+        let mut processed_count = 0;
+
+        // Strictly bound the drain loop to prevent latency spikes
+        const MAX_PROCESS_PER_TICK: usize = 512;
+
+        while processed_count < MAX_PROCESS_PER_TICK {
+            if let Some(packed_cmd) = self.return_queue.pop() {
+                let global_idx = extract_global_idx(packed_cmd);
+
+                if is_retain(packed_cmd) {
+                    // O(1): decode umem_id and local_idx directly
+                    let (umem_id, local_idx) = decode_global_frame(global_idx);
+
+                    if let Some(partition_data) = self.registry_map.get_mut(umem_id).and_then(|p| p.as_mut()) {
+                        unsafe {
+                            // SAFETY: local_idx is bounds-checked by the stash initializer
+                            *partition_data.refcounts.get_unchecked_mut(local_idx as usize) += 1;
+                        }
                     }
+                } else {
+                    // Note: Removed the inner loop `trace!` macro to save cycles.
+                    // String interpolation inside a hot loop is dangerous even if disabled.
+                    self.release_local(global_idx);
                 }
+
+                processed_count += 1;
+
+            } else {
+                // 🚨 CRITICAL: The queue is empty. Break the loop! 🚨
+                break;
             }
         }
-        if returned_count > 0 {
+
+        if processed_count > 0 && log::log_enabled!(log::Level::Trace) {
             let total_free: usize = self.registry_map.iter().filter_map(|e| e.as_ref()).map(|p| p.free_stash.len()).sum();
-            log::trace!(
-                "Worker {}: Processed {} frame returns, total free frames across all UMEMs: {}",
-                self.worker_id,
-                returned_count,
-                total_free
-            );
+            log::trace!("Worker {}: Processed {} frame commands, total free frames: {}", self.worker_id, processed_count, total_free);
         }
     }
 
@@ -207,15 +244,20 @@ impl FrameRegistry {
         if let Some(partition_data) = self.registry_map[umem_id].as_mut() {
             let idx = local_idx as usize;
 
-            // 3. Direct array access — no subtraction from partition.start_idx
-            if partition_data.refcounts[idx] == 0 {
-                log::error!("🔥 CRITICAL: Prevented Double-Free of frame local_idx={} in UMEM {}!", idx, umem_id);
-                return;
-            }
-            partition_data.refcounts[idx] -= 1;
+            unsafe {
+                // SAFETY: local_idx is guaranteed to be within UMEM frame bounds
+                // because it is mapped 1:1 during stash initialization.
+                let refcount = partition_data.refcounts.get_unchecked_mut(idx);
 
-            if partition_data.refcounts[idx] == 0 {
-                partition_data.free_stash.push(global_idx);
+                if *refcount == 0 {
+                    log::error!("🔥 CRITICAL: Prevented Double-Free of frame local_idx={} in UMEM {}!", idx, umem_id);
+                    return;
+                }
+
+                *refcount -= 1;
+                if *refcount == 0 {
+                    partition_data.free_stash.push(global_idx);
+                }
             }
         } else {
             log::error!("Worker {}: partition data not found for UMEM group {}!", self.worker_id, umem_id);
@@ -250,7 +292,9 @@ impl FrameRegistry {
             // decode_global_frame gives local_idx directly — no subtraction.
             for &frame_idx in &dst[..to_take] {
                 let (_umem_id, local_idx) = decode_global_frame(frame_idx);
-                registry.refcounts[local_idx as usize] = 1;
+                unsafe {
+                    *registry.refcounts.get_unchecked_mut(local_idx as usize) = 1;
+                }
             }
 
             stash.truncate(start_idx);
@@ -400,7 +444,11 @@ impl FrameRegistry {
         };
 
         // STACK ALLOCATION: zero overhead, stays in L1 cache
-        let mut global_frame_indices = [0u32; MAX_BATCH_SIZE];
+        #[repr(align(64))]
+        struct AlignedBatch([u32; MAX_BATCH_SIZE]);
+        let mut aligned_buffer = AlignedBatch([0u32; MAX_BATCH_SIZE]);
+        let global_frame_indices = &mut aligned_buffer.0;
+
         let req_len = std::cmp::min(dst.len(), MAX_BATCH_SIZE);
         let allocated = self.allocate_batch_into(umem_id, &mut global_frame_indices[..req_len]);
 

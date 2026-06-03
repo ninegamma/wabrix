@@ -56,9 +56,9 @@ hot_args= {}
 
 [pipelines.nodes.wasm_data]
 dst_mac = "44:49:88:06:63:39"
-syn_rate = "1000"
+syn_rate = "100"
 src_ip = "10.10.10.222"
-syn_limit = "50k"
+syn_limit = "1k"
 close_timeout = "5000"
 src_mac = "44:49:88:06:63:38"
 dst_ip = "10.10.10.31"

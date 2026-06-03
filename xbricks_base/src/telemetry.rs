@@ -180,7 +180,7 @@ pub fn spawn_pipeline_telemetry(
                 let _ = telemetry_tx.send(stats);
             }
 
-            tokio::time::sleep(tokio::time::Duration::from_millis(190)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(990)).await;
         }
     });
     Ok(())

@@ -25,7 +25,6 @@ use xbricks_base::{ControlEvent, NodeId};
 use xbricks_lib::config::hot_config::{NodeDynamicState, SharedSystemState};
 use xbricks_lib::generator_node::GenState;
 use xbricks_base::telemetry::{TMLiveStats};
-use xbricks_protocol::wbatch::MAX_BATCH_SIZE;
 
 // A type alias to make the signatures much cleaner
 pub type SharedConfig = Arc<RwLock<XBricksConfig>>;

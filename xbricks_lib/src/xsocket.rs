@@ -47,7 +47,7 @@ pub struct XSocket {
     pub config: Arc<XdpSocketConfig>,
 }
 
-const MAX_FILL: usize = 4096;
+const MAX_FILL: usize = 8192;
 /// Split components for independent RX and TX access
 /// These DO NOT own the frame registry - it's accessed via thread-local storage
 pub struct XSocketRx {
@@ -343,9 +343,9 @@ use xbricks_base::system::rdtsc_us;
 use rustix::event::{PollFd, PollFlags, poll};
 use rustix::io::Errno;
 use separator::Separatable;
-use xbricks_base::{BusCommand, RuntimeUmemConfig, SystemBus};
+use xbricks_base::{RuntimeUmemConfig, SystemBus};
 use xbricks_base::frame_registry::{get_tsc_frequency, get_worker_frame_registry, encode_global_frame, decode_global_frame};
-use xbricks_protocol::wbatch::MAX_BATCH_SIZE;
+use xbricks_base::interface::batch::MAX_BATCH_SIZE;
 
 impl XSocketRx {
     /// Returns the UMEM group ID for this socket
@@ -431,7 +431,8 @@ impl XSocketRx {
         }
         let frame_registry = unsafe { &mut *registry_ptr };
 
-        let available_count = frame_registry.total_free_frames();
+        let available = requested_count;
+/*        let available_count = frame_registry.total_free_frames();
         let available = std::cmp::min(requested_count, available_count);
         if available == 0 {
             log::trace!(
@@ -442,8 +443,9 @@ impl XSocketRx {
             );
             return 0;
         }
+*/
 
-        //let t0 = unsafe { std::arch::x86_64::_rdtsc() };
+        let t0 = unsafe { std::arch::x86_64::_rdtsc() };
 
         // Acquire Lock on the Fill Queue
         // (Shared because multiple sockets/queues might map to the same UMEM)
@@ -458,6 +460,7 @@ impl XSocketRx {
         // Check Capacity
         // nb_free() tells us how many slots are open in the ring
         let nb_free = fq.nb_free(available as u32);
+        // nb_free() is currently NOT clamping to the requested amount(error), so we need to clamp it ourselves.
         let batch_size = std::cmp::min(nb_free, available as u32);
 
         if batch_size > 0 {
@@ -475,7 +478,7 @@ impl XSocketRx {
         }
 
         // 1. Allocate Frames directly into our pre-allocated struct buffer (NO MEMSET!)
-        //let t1 = unsafe { std::arch::x86_64::_rdtsc() };
+        let t1 = unsafe { std::arch::x86_64::_rdtsc() };
 
         let umem_id = self.umem_group_id();
         let actual_batch = frame_registry.allocate_batch_into(
@@ -483,7 +486,7 @@ impl XSocketRx {
             &mut self.scratch_frames[..batch_size as usize], // Use persistent struct Vec
         );
 
-        //let t2 = unsafe { std::arch::x86_64::_rdtsc() };
+        let t2 = unsafe { std::arch::x86_64::_rdtsc() };
 
         if actual_batch == 0 {
             // No frames left! This implies the worker is processing too slowly
@@ -506,7 +509,7 @@ impl XSocketRx {
             self.scratch_descriptors[i] = xsk_rs::FrameDesc::new(addr as usize);
         }
 
-        //let t3 = unsafe { std::arch::x86_64::_rdtsc() };
+        let t3 = unsafe { std::arch::x86_64::_rdtsc() };
 
         // Produce unconditionally first
         let produced = unsafe { fq.produce(&self.scratch_descriptors[..actual_batch]) };
@@ -518,7 +521,7 @@ impl XSocketRx {
         drop(fq);
 
         // THEN wake the kernel if needed
-        //let t4 = unsafe { std::arch::x86_64::_rdtsc() };
+        let t4 = unsafe { std::arch::x86_64::_rdtsc() };
 
         if needs_wakeup {
             // NOTE: This syscall will still cost ~1,500 cycles when it triggers,
@@ -526,7 +529,7 @@ impl XSocketRx {
             self.wakeup_fill_queue_force().expect("wakeup_fill_queue_force() failed");
         }
 
-        //let t5 = unsafe { std::arch::x86_64::_rdtsc() };
+        let t5 = unsafe { std::arch::x86_64::_rdtsc() };
 
         if produced > 0 {
             // Return any frames that weren't produced back to the registry
@@ -549,7 +552,7 @@ impl XSocketRx {
             self.total_produced += produced;
         }
 
-        //let t6 = unsafe { std::arch::x86_64::_rdtsc() };
+        let t6 = unsafe { std::arch::x86_64::_rdtsc() };
 
         // Log the breakdown (only occasionally to avoid log spam)
         /*if self.prof_replenish_calls % 10000 == 0 {
@@ -564,7 +567,7 @@ impl XSocketRx {
                  t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4, t6 - t5
             );
         }
-        */
+
         let current_block = self.total_produced / threshold;
 
         if current_block > self.last_logged_block {
@@ -587,7 +590,7 @@ impl XSocketRx {
             self.config.queue_id,
             frame_registry.total_free_frames(),
         );
-
+*/
         #[cfg(feature = "profiling")]
         {
             let end_cycles = unsafe { std::arch::x86_64::_rdtsc() };
@@ -603,6 +606,16 @@ impl XSocketRx {
                 // Only print if the spike is absurdly high (e.g., > 50,000 cycles)
                 if duration > 50_000 {
                     log::warn!("MONSTER SPIKE DETECTED: Replenish took {} cycles!", duration);
+                    log::info!(
+                "\n=== Replenish X-Ray (Cycles) ===\n\
+                 Lock      : {}\n\
+                 Allocator : {}\n\
+                 Math Loop : {}\n\
+                 FQ Produce: {}\n\
+                 Syscall   : {}\n\
+                 Release   : {}",
+                 t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4, t6 - t5
+            );
                 }
             }
         }
@@ -1188,7 +1201,9 @@ impl XSocketTx {
             frame_idx,
             owner
         );
-        let _ = self.bus.bus_senders[owner].send(BusCommand::Release(frame_idx));
+        if self.bus.bus_senders[owner].push(frame_idx).is_err() {
+            log::error!("🔥 CRITICAL: return queue full, frame {} leaked!", frame_idx);
+        }
     }
 
     fn determine_owner(&self, frame_idx: u32) -> usize {

@@ -9,12 +9,11 @@ use wasmtime::Store;
 use wasmtime::component::{bindgen, ResourceTable};
 use wasmtime_wasi::WasiCtxBuilder;
 use xbricks_base::{ControlEvent, Directive, Node, NodeId};
-use xbricks_base::interface::batch::Batch;
+use xbricks_base::interface::batch::{Batch, MAX_BATCH_SIZE};
 use xbricks_base::interface::Pdu;
 use xbricks_base::telemetry::TelemetryMetrics;
 use xbricks_base::frame_registry::get_worker_frame_registry;
 use xbricks_protocol::TELEMETRY_FLAG;
-use xbricks_protocol::wbatch::MAX_BATCH_SIZE;
 use xbricks_base::system::PlatformData;
 
 // 1. Generate bindings.
@@ -50,6 +49,9 @@ pub struct WasmEngine {
     /// Set permanently true once call_get_telemetry() returns non-empty stats.
     /// Disables in-band telemetry extraction which lacks TELEMETRY_FLAG guarding.
     supports_oob_telemetry: bool,
+    /// Set permanently true after WASM returns a malformed response.
+    /// All further WASM calls are skipped to prevent SIGSEGV from bad UMEM writes.
+    poisoned: bool,
 }
 
 impl WasmEngine {
@@ -71,7 +73,9 @@ impl WasmEngine {
         // 2. Build the partition-specific UmemHandle for this instance.
         //    WASM address 0 will map to `umem_base + partition_start_bytes`.
         //    The window extends to the end of the full Umem.
+        //TODO check if we should also add an partition_size argument
         let partition_handle = manager.make_partition_handle(partition_start_bytes);
+        log::info!("NODE {}: Partition start bytes: {}", id, partition_start_bytes);
 
         // 3. Pre-load the partition handle into the shared XdpMemoryCreator so
         //    that Wasmtime picks it up when it calls new_memory() during instantiate().
@@ -119,6 +123,7 @@ impl WasmEngine {
             partition_start_bytes,
             umem_id,
             supports_oob_telemetry: false,
+            poisoned: false,
         }
     }
 
@@ -139,6 +144,7 @@ impl WasmEngine {
                 std::slice::from_raw_parts(batch.as_ptr(), active_bytes)
             };
 
+            log::debug!("NODE {}: Executing WASM on {} packets", self.id, batch.len());
             self.bindings
                 .xbricks_plugins_packet_engine()
                 .call_process_batch(&mut self.store, batch_bytes, self.partition_start_bytes)
@@ -147,10 +153,14 @@ impl WasmEngine {
                     (vec![255; len], vec![0; len]) // 255 = DROP fallback
                 })
         };
-
+            log::debug!("NODE {}: WASM execution completed, {}, {} actions and lengths returned", self.id, action_vector.len(), lengths_vector.len());
         if action_vector.len() != len || lengths_vector.len() != len {
-            log::error!("Wasm returned mismatched action or lengths array!");
-            batch.clear(); // Drop all memory safely
+            log::error!(
+                "Wasm {}: mismatched action/lengths (got {}/{}, expected {}). Engine POISONED — all packets dropped until restart.",
+                self.id, action_vector.len(), lengths_vector.len(), len
+            );
+            batch.clear();
+            self.poisoned = true;
             return Directive::Stop;
         }
 
@@ -261,6 +271,11 @@ impl Node for WasmEngine {
     // STANDARD TRAFFIC PROCESSING
     // ----------------------------------------------------
     fn process(&mut self, batch: &mut Batch) -> Directive {
+        if self.poisoned {
+            batch.clear();
+            return Directive::Stop;
+        }
+
         #[cfg(feature = "profiling")]
         let start_cycles = unsafe { std::arch::x86_64::_rdtsc() };
 
@@ -291,6 +306,10 @@ impl Node for WasmEngine {
     // TIMER / RETRANSMISSION PROCESSING
     // ----------------------------------------------------
     fn poll_timers(&mut self, batch: &mut Batch, current_tsc: u64) -> Directive {
+        if self.poisoned {
+            return Directive::Stop;
+        }
+
         #[cfg(feature = "profiling")]
         let start_cycles = unsafe { core::arch::x86_64::_rdtsc() };
 
@@ -384,6 +403,9 @@ impl Node for WasmEngine {
     }
 
     fn handle_control_event(&mut self, event: &ControlEvent) {
+        if self.poisoned {
+            return;
+        }
         // We only get here if the PipelineRunner already verified the wildcard matched us!
         tokio::task::block_in_place(|| {
             let _ = self.bindings

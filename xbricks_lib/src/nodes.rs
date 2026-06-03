@@ -458,7 +458,7 @@ impl Node for FastParserNode {
                 }
             }
 
-            // 2. Parse the current PDU (using your 7-cycle parse_fast!)
+            // 2. Parse the current PDU
             let current_pdu = batch.get_mut(i);
             current_pdu.parse_fast();
 

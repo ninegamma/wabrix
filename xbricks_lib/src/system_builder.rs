@@ -3,7 +3,8 @@
 use std::sync::Arc;
 use std::collections::HashMap;
 use core_affinity::CoreId;
-use crossbeam_channel::unbounded;
+use crossbeam_queue::ArrayQueue;
+use xbricks_base::frame_registry::RETURN_QUEUE_CAPACITY;
 use xsk_rs::{Umem, };
 use log::{warn, debug, info, error};
 use tokio::sync::broadcast::Sender;
@@ -62,15 +63,15 @@ impl SystemBuilder {
             shared_state: SharedSystemState::new(HashMap::new()),
             umems: vec![None; MAX_UMEM],
         });
-        // 1. Initialize Channels for the System Bus
-        // We need one channel per worker to allow them to return frames to each other.
+        // 1. Initialize return queues for the System Bus.
+        // One ArrayQueue<u32> per worker; senders push packed u32 commands, the owning worker pops them.
         let mut bus_senders = Vec::new();
-        let mut bus_receivers = Vec::new();
+        let mut bus_receivers: Vec<Option<Arc<ArrayQueue<u32>>>> = Vec::new();
 
         for _ in 0..self.workers.len() {
-            let (tx, rx) = unbounded();
-            bus_senders.push(tx);
-            bus_receivers.push(Some(rx)); // Wrap in Option to move out later
+            let queue = Arc::new(ArrayQueue::new(RETURN_QUEUE_CAPACITY));
+            bus_senders.push(queue.clone());
+            bus_receivers.push(Some(queue));
         }
 
         // system_bus is created after step 3 once umem_partitions are known
@@ -251,16 +252,16 @@ impl SystemBuilder {
             // Get the partitions for this worker
             let partitions = std::mem::take(&mut worker_partitions[*worker_id]);
 
-            // Get the receiver for this worker
-            let return_rx = bus_receivers[*worker_id]
+            // Get the return queue for this worker
+            let return_queue = bus_receivers[*worker_id]
                 .take()
-                .ok_or_else(|| format!("No bus receiver for worker {}", worker_id))?;
+                .ok_or_else(|| format!("No return queue for worker {}", worker_id))?;
 
             // Create the registry
             let frame_registry = FrameRegistry::new(
                 *worker_id,
                 partitions,
-                return_rx,
+                return_queue,
                 system_bus.clone(),
                 self.runtime_umems.clone(),
             );
@@ -581,8 +582,8 @@ mod tests {
 
     // Helper to create test SystemBus and configs
     fn create_test_bus_and_configs() -> (Arc<SystemBus>, Vec<Option<Arc<RuntimeUmemConfig>>>) {
-        let (tx, _rx) = crossbeam_channel::bounded(10);
-        let bus = Arc::new(SystemBus { bus_senders: vec![tx], umem_partitions: vec![], umem_addr: [None; MAX_UMEM] });
+        let queue = Arc::new(ArrayQueue::new(64));
+        let bus = Arc::new(SystemBus { bus_senders: vec![queue], umem_partitions: vec![], umem_addr: [None; MAX_UMEM] });
 
         let mut configs: Vec<Option<Arc<RuntimeUmemConfig>>> = vec![None; MAX_UMEM];
         configs[0] = Some(Arc::new(RuntimeUmemConfig {
@@ -604,7 +605,7 @@ mod tests {
     /// Test basic frame indexing with a single UMEM and single partition
     #[test]
     fn test_single_umem_single_partition() {
-        let (tx, rx) = crossbeam_channel::bounded(10);
+        let queue = Arc::new(ArrayQueue::new(64));
         let (bus, configs) = create_test_bus_and_configs();
 
         // UMEM 0, group_start=0 → local range == absolute range
@@ -614,7 +615,7 @@ mod tests {
             local_start: 0, local_end: 100,
         };
 
-        let mut registry = FrameRegistry::new(0, vec![(0, partition)], rx, bus, configs);
+        let mut registry = FrameRegistry::new(0, vec![(0, partition)], queue, bus, configs);
 
         assert_eq!(registry.total_free_frames(), 100);
 
@@ -629,7 +630,7 @@ mod tests {
     /// Test frame indexing with multiple UMEM groups
     #[test]
     fn test_multi_umem_frame_indexing() {
-        let (tx, rx) = crossbeam_channel::bounded(10);
+        let queue = Arc::new(ArrayQueue::new(64));
 
         // UMEM 0: 4096 frames, group_start=0
         let partition0 = UmemPartition {
@@ -658,7 +659,7 @@ mod tests {
             group_start_frame_idx: 4096, partitions: 1, reserved_frames: 0,
         }));
 
-        let mut registry = FrameRegistry::new(0, vec![(0, partition0), (1, partition1)], rx, bus, configs);
+        let mut registry = FrameRegistry::new(0, vec![(0, partition0), (1, partition1)], queue, bus, configs);
 
         assert_eq!(registry.total_free_frames(), 6144);
 
@@ -680,7 +681,7 @@ mod tests {
     /// Test frame allocation from specific UMEM group
     #[test]
     fn test_allocate_from_specific_umem() {
-        let (tx, rx) = crossbeam_channel::bounded(10);
+        let queue = Arc::new(ArrayQueue::new(64));
 
         // UMEM 0: 100 frames, group_start=0
         let partition0 = UmemPartition {
@@ -703,7 +704,7 @@ mod tests {
             group_start_frame_idx: 100, partitions: 1, reserved_frames: 0,
         }));
 
-        let mut registry = FrameRegistry::new(0, vec![(0, partition0), (1, partition1)], rx, bus, configs);
+        let mut registry = FrameRegistry::new(0, vec![(0, partition0), (1, partition1)], queue, bus, configs);
 
         // Allocate 10 frames from UMEM 0 — must all decode to umem_id 0
         let frames = registry.allocate_batch(0, 10);
@@ -725,7 +726,7 @@ mod tests {
     /// Test frame release and refcounting
     #[test]
     fn test_frame_release_and_refcount() {
-        let (tx, rx) = crossbeam_channel::bounded(10);
+        let queue = Arc::new(ArrayQueue::new(64));
         let (bus, configs) = create_test_bus_and_configs();
 
         let partition = UmemPartition {
@@ -734,7 +735,7 @@ mod tests {
             local_start: 0, local_end: 100,
         };
 
-        let mut registry = FrameRegistry::new(0, vec![(0, partition)], rx, bus.clone(), configs.clone());
+        let mut registry = FrameRegistry::new(0, vec![(0, partition)], queue, bus.clone(), configs.clone());
 
         let frames = registry.allocate_batch(0, 10);
         assert_eq!(frames.len(), 10);
@@ -756,7 +757,7 @@ mod tests {
     /// Test merged partitions (worker requests multiple consecutive partitions)
     #[test]
     fn test_merged_partitions() {
-        let (tx, rx) = crossbeam_channel::bounded(10);
+        let queue = Arc::new(ArrayQueue::new(64));
         let (bus, configs) = create_test_bus_and_configs();
 
         // 4 consecutive partitions merged into one — UMEM 0, group_start=0
@@ -766,7 +767,7 @@ mod tests {
             local_start: 0, local_end: 1024,
         };
 
-        let mut registry = FrameRegistry::new(0, vec![(0, merged_partition)], rx, bus.clone(), configs.clone());
+        let mut registry = FrameRegistry::new(0, vec![(0, merged_partition)], queue, bus.clone(), configs.clone());
 
         assert_eq!(registry.total_free_frames(), 1024);
 
@@ -781,7 +782,7 @@ mod tests {
     /// Test allocation exhaustion
     #[test]
     fn test_allocation_exhaustion() {
-        let (tx, rx) = crossbeam_channel::bounded(10);
+        let queue = Arc::new(ArrayQueue::new(64));
         let (bus, configs) = create_test_bus_and_configs();
 
         let partition = UmemPartition {
@@ -790,7 +791,7 @@ mod tests {
             local_start: 0, local_end: 10,
         };
 
-        let mut registry = FrameRegistry::new(0, vec![(0, partition)], rx, bus.clone(), configs.clone());
+        let mut registry = FrameRegistry::new(0, vec![(0, partition)], queue, bus.clone(), configs.clone());
 
         let frames = registry.allocate_batch(0, 20); // request more than available
         assert_eq!(frames.len(), 10);
@@ -803,7 +804,7 @@ mod tests {
     /// Test frame indexing with non-zero start indices (worker owns partition [512, 1024) of UMEM 0)
     #[test]
     fn test_non_zero_start_indices() {
-        let (tx, rx) = crossbeam_channel::bounded(10);
+        let queue = Arc::new(ArrayQueue::new(64));
         let (bus, configs) = create_test_bus_and_configs();
 
         // UMEM 0, group_start=0 → local_start=512, local_end=1024
@@ -813,7 +814,7 @@ mod tests {
             local_start: 512, local_end: 1024,
         };
 
-        let mut registry = FrameRegistry::new(1, vec![(0, partition)], rx, bus.clone(), configs.clone());
+        let mut registry = FrameRegistry::new(1, vec![(0, partition)], queue, bus.clone(), configs.clone());
 
         assert_eq!(registry.total_free_frames(), 512);
 

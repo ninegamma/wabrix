@@ -9,7 +9,8 @@ pub mod telemetry;
 pub mod node_instance_id;
 
 use core::fmt::Display;
-use crossbeam_channel::Sender;
+use std::sync::Arc;
+use crossbeam_queue::ArrayQueue;
 use xsk_rs::Umem;
 use crate::frame_registry::MAX_UMEM;
 use crate::interface::batch::Batch;
@@ -69,24 +70,21 @@ impl UmemPartition {
     }
 }
 
-// 1. Define the Command Enum
-#[derive(Debug, Clone, Copy)]
-pub enum BusCommand {
-    Retain(u32),  // Increment RefCount
-    Release(u32), // Decrement RefCount (and free if 0)
-}
-
-// 2. Update SystemBus to carry BusCommand
+/// Per-worker lockless return queue: packed u32 commands.
+/// Bit 31 = command (0 = Release, 1 = Retain); bits 30-24 = umem_id; bits 23-0 = local_idx.
+/// See frame_registry::{CMD_BIT, is_retain, extract_global_idx} for helpers.
 #[derive(Clone)]
 pub struct SystemBus {
-    pub bus_senders: Vec<Sender<BusCommand>>,
+    /// One ArrayQueue<u32> per worker. Senders push packed u32 commands;
+    /// the owning worker pops them in process_returns().
+    pub bus_senders: Vec<Arc<ArrayQueue<u32>>>,
     /// All UMEM partitions across all workers, used by determine_owner to map
     /// a frame index to the worker that owns it.
     pub umem_partitions: Vec<UmemPartition>,
-    pub umem_addr: [Option<usize>; MAX_UMEM] ,
+    pub umem_addr: [Option<usize>; MAX_UMEM],
 }
 
-///This is safe because crossbeam_channel::Sender<u32> is already Send, so a Vec of them is also Send.
+/// SAFETY: Arc<ArrayQueue<u32>> is Send, so Vec<Arc<ArrayQueue<u32>>> is also Send.
 unsafe impl Send for SystemBus {}
 
 

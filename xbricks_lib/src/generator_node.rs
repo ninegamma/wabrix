@@ -12,7 +12,7 @@ use rand::TryRng;
 use xbricks_base::interface::Pdu;
 use xbricks_base::{Directive, Node, NodeId};
 use xbricks_base::frame_registry::get_worker_frame_registry;
-use xbricks_base::interface::batch::Batch;
+use xbricks_base::interface::batch::{Batch, MAX_BATCH_SIZE};
 use xbricks_protocol::headers::{EndOffset, Header, IpHeader, MacHeader, TcpHeader};
 use crate::config::hot_config::{NodeDynamicState, SharedSystemState};
 // WASM Imports
@@ -23,7 +23,6 @@ use wasmtime::component::{bindgen, ResourceTable};
 #[cfg(feature = "wasm")]
 use wasmtime_wasi::WasiCtxBuilder;
 use xbricks_base::system::PlatformData;
-use xbricks_protocol::wbatch::MAX_BATCH_SIZE;
 #[cfg(feature = "wasm")]
 use xbricks_wasm::wasm_manager::{MyHostState, WasmManager};
 

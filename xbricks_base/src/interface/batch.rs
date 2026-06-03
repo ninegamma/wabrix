@@ -2,11 +2,11 @@ use core::mem::MaybeUninit;
 use core::ops::{Bound, RangeBounds};
 use core::ptr;
 use log::{debug, trace};
-use xbricks_protocol::wbatch::MAX_BATCH_SIZE;
 use crate::frame_registry::get_worker_frame_registry;
 use crate::interface::Pdu;
 
 /// The maximum number of packets in a single batch.
+pub const MAX_BATCH_SIZE: usize = 512;
 
 pub struct Batch {
     /// A dense array of uninitialized memory.

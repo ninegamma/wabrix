@@ -8,10 +8,10 @@ use xbricks_protocol::headers::{
     TcpHeader,
 };
 
-use crate::BusCommand;
 use crate::SystemBus;
-use xbricks_protocol::headers::check::ipv4_checksum;
-use xbricks_protocol::wpdu::WPdu;
+use crate::frame_registry::CMD_BIT;
+use xbricks_protocol::exports::WPdu;
+
 
 #[repr(C, align(64))]
 #[derive(Debug)]
@@ -73,12 +73,13 @@ impl Drop for Pdu {
             }
             // 1. FAST PATH: Thread-Local Return
             // Check if we are currently executing on the worker thread that owns this frame.
+            // If so, bypass the return queue entirely and return directly to the local stash.
             let registry_ptr = crate::frame_registry::get_worker_frame_registry();
             if !registry_ptr.is_null() {
                 let registry = &mut *registry_ptr;
 
                 if registry.worker_id == (self.owner_id() as usize) {
-                    // We are on the owning thread! Bypass the crossbeam_channel entirely.
+                    // We are on the owning thread! Bypass the return queue entirely.
                     // Return the memory instantly to the local stash.
                     trace!("Drop for Pdu: Returning frame {} to local stash", self.global_frame_idx());
                     registry.release_local(self.global_frame_idx());
@@ -100,7 +101,9 @@ impl Drop for Pdu {
                 // If this Pdu is on the same core as owner_id, this is a local SPSC send.
                 // If on a different core, this is a cross-core SPSC send.
                 // We ignore SendError (e.g., if the channel is full or disconnected on shutdown).
-                let _ = bus.bus_senders[self.owner_id() as usize].send(BusCommand::Release(self.global_frame_idx()));
+                if bus.bus_senders[self.owner_id() as usize].push(self.global_frame_idx()).is_err() {
+                    log::error!("🔥 CRITICAL: return queue full, frame {} leaked!", self.global_frame_idx());
+                }
             }
         }
     }
@@ -238,7 +241,9 @@ impl Pdu {
             // 1. Notify the central logic that this frame has a new reference
             if !self.system_bus.is_null() {
                 let bus = &*self.system_bus;
-                let _ = bus.bus_senders[self.owner_id() as usize].send(BusCommand::Retain(self.global_frame_idx()));
+                if bus.bus_senders[self.owner_id() as usize].push(CMD_BIT | self.global_frame_idx()).is_err() {
+                    log::error!("🔥 CRITICAL: return queue full, retain for frame {} dropped!", self.global_frame_idx());
+                }
             }
         }
 
@@ -401,96 +406,97 @@ mod tests {
     use alloc::vec::Vec;
     use super::*;
     use core::ptr;
-
+    use xbricks_protocol::exports::Pdu0;
+    use xbricks_protocol::packet::Packet;
     /*
-        // A dummy header to simulate an Ethernet header or similar
-        #[repr(C, packed)]
-        #[derive(Clone, Copy, Debug, PartialEq)]
-        struct TestHeader {
-            src: u32,
-            dst: u32,
-            etype: u16,
-        }
-
-        #[test]
-        fn test_push_header_success() {
-            // 1. Setup Mock UMEM
-            // Allocate a buffer representing a 2KB frame
-            let mut umem_buffer: Vec<u8> = vec![0; 2048];
-            let buffer_base = umem_buffer.as_mut_ptr();
-
-            // 2. Define Initial State
-            // Simulate a packet that starts at offset 256 (leaving 256 bytes of headroom)
-            const HEADROOM: usize = 256;
-            const INITIAL_PAYLOAD_LEN: usize = 100;
-
-            let initial_start_ptr = unsafe { buffer_base.add(HEADROOM) };
-
-            // Fill the payload area with some known data (0xAA)
-            unsafe {
-                ptr::write_bytes(initial_start_ptr, 0xAA, INITIAL_PAYLOAD_LEN);
+            // A dummy header to simulate an Ethernet header or similar
+            #[repr(C, packed)]
+            #[derive(Clone, Copy, Debug, PartialEq)]
+            struct TestHeader {
+                src: u32,
+                dst: u32,
+                etype: u16,
             }
 
-            // 3. Construct the PDU
-            // (Assuming Pdu struct structure based on your files)
-            let mut pdu = Pdu {
-                header_stack: HeaderStack::new(initial_start_ptr),
-                desc_addr: HEADROOM,
-                desc_len: INITIAL_PAYLOAD_LEN as u32,
-                desc_options: 0u32,
-                frame_idx: 0u32,
-                frame_size_log2: 11,
-                owner_id: 0u8,
-                flags: 0u8,
-                _padding: 0u8,
-                system_bus: 0u64 as *const SystemBus,
-                timestamp: 0u64,
-            };
+            #[test]
+            fn test_push_header_success() {
+                // 1. Setup Mock UMEM
+                // Allocate a buffer representing a 2KB frame
+                let mut umem_buffer: Vec<u8> = vec![0; 2048];
+                let buffer_base = umem_buffer.as_mut_ptr();
 
-            // Simulate that we have parsed something (hc > 0) to ensure clear() works
-            // (We are manually tweaking internal state for the test)
-            pdu.header_stack.hc = 1;
+                // 2. Define Initial State
+                // Simulate a packet that starts at offset 256 (leaving 256 bytes of headroom)
+                const HEADROOM: usize = 256;
+                const INITIAL_PAYLOAD_LEN: usize = 100;
 
-            // 4. Define the Header to Push
-            let new_header = TestHeader {
-                src: 0xAABBCCDD,
-                dst: 0x11223344,
-                etype: 0x0800,
-            };
-            let header_size = std::mem::size_of::<TestHeader>(); // 10 bytes
+                let initial_start_ptr = unsafe { buffer_base.add(HEADROOM) };
 
-            // 5. Perform the Push
-            let result = pdu.prepend_header(&new_header);
+                // Fill the payload area with some known data (0xAA)
+                unsafe {
+                    ptr::write_bytes(initial_start_ptr, 0xAA, INITIAL_PAYLOAD_LEN);
+                }
 
-            // 6. Assertions
-            assert!(result.is_ok(), "push_header should succeed");
+                // 3. Construct the PDU
+                // (Assuming Pdu struct structure based on your files)
+                let mut pdu = Pdu {
+                    header_stack: HeaderStack::new(initial_start_ptr),
+                    desc_addr: HEADROOM,
+                    desc_len: INITIAL_PAYLOAD_LEN as u32,
+                    desc_options: 0u32,
+                    frame_idx: 0u32,
+                    frame_size_log2: 11,
+                    owner_id: 0u8,
+                    flags: 0u8,
+                    _padding: 0u8,
+                    system_bus: 0u64 as *const SystemBus,
+                    timestamp: 0u64,
+                };
 
-            unsafe {
-                // A. Check Pointer Movement
-                // The new pointer should be (initial - header_size)
-                let expected_ptr = initial_start_ptr.sub(header_size);
-                assert_eq!(pdu.header_stack.base_ptr(), expected_ptr, "Base pointer did not move backwards correctly");
+                // Simulate that we have parsed something (hc > 0) to ensure clear() works
+                // (We are manually tweaking internal state for the test)
+                pdu.header_stack.hc = 1;
 
-                // B. Check Length Update
-                assert_eq!(pdu.desc_len as usize, INITIAL_PAYLOAD_LEN + header_size, "PDU length did not increase by header size");
+                // 4. Define the Header to Push
+                let new_header = TestHeader {
+                    src: 0xAABBCCDD,
+                    dst: 0x11223344,
+                    etype: 0x0800,
+                };
+                let header_size = std::mem::size_of::<TestHeader>(); // 10 bytes
 
-                // C. Check Header Data Integrity
-                // Cast the new pointer location back to a TestHeader to verify contents
-                let written_header = *(expected_ptr as *const TestHeader);
-                assert_eq!(written_header, new_header, "Header data written to memory does not match");
+                // 5. Perform the Push
+                let result = pdu.prepend_header(&new_header);
 
-                // D. Check Payload Integrity
-                // The byte immediately after the header should still be our payload (0xAA)
-                let payload_start = expected_ptr.add(header_size);
-                assert_eq!(*payload_start, 0xAA, "Original payload was corrupted");
+                // 6. Assertions
+                assert!(result.is_ok(), "push_header should succeed");
 
-                // E. Check Stack Invalidated
-                assert_eq!(pdu.header_stack.hc, 0, "Header stack count should be reset to 0");
+                unsafe {
+                    // A. Check Pointer Movement
+                    // The new pointer should be (initial - header_size)
+                    let expected_ptr = initial_start_ptr.sub(header_size);
+                    assert_eq!(pdu.header_stack.base_ptr(), expected_ptr, "Base pointer did not move backwards correctly");
+
+                    // B. Check Length Update
+                    assert_eq!(pdu.desc_len as usize, INITIAL_PAYLOAD_LEN + header_size, "PDU length did not increase by header size");
+
+                    // C. Check Header Data Integrity
+                    // Cast the new pointer location back to a TestHeader to verify contents
+                    let written_header = *(expected_ptr as *const TestHeader);
+                    assert_eq!(written_header, new_header, "Header data written to memory does not match");
+
+                    // D. Check Payload Integrity
+                    // The byte immediately after the header should still be our payload (0xAA)
+                    let payload_start = expected_ptr.add(header_size);
+                    assert_eq!(*payload_start, 0xAA, "Original payload was corrupted");
+
+                    // E. Check Stack Invalidated
+                    assert_eq!(pdu.header_stack.hc, 0, "Header stack count should be reset to 0");
+                }
             }
         }
-    }
 
-    */
+        */
 
     // A dummy header struct for testing purposes
     #[repr(C, packed)]
@@ -535,34 +541,40 @@ mod tests {
             frame_size_log2,
         );
 
-        // 4. Fill Payload with known pattern (0xAA) to verify it stays intact
-        unsafe {
-            // Use the public API to get the data pointer
-            let payload_ptr = pdu.w.data_ptr(umem_base as usize);
-            ptr::write_bytes(payload_ptr, 0xAA, initial_payload_len);
+        let mut header_size;
+        let mut header;
+        {
+            // SAFETY: Pdu and Pdu0 are both repr(C, align(64)) with identical layouts (WPdu + 8-byte pad).
+            let mut packet = Packet::new(unsafe { &mut *(&mut pdu as *mut Pdu as *mut Pdu0) }, umem_base as usize);
+
+            // 4. Fill Payload with known pattern (0xAA) to verify it stays intact
+            unsafe {
+                // Use the public API to get the data pointer
+                let payload_ptr = packet.data_ptr_mut();
+                ptr::write_bytes(payload_ptr, 0xAA, initial_payload_len);
+            }
+
+            // 5. Create Header to Push
+            header = TestHeader {
+                id: 0xDEADBEEF,
+                flags: 0xCAFE,
+            };
+            header_size = core::mem::size_of::<TestHeader>(); // 6 bytes
+
+            // 6. Perform Push
+            // (Assuming the method is named push_header as requested)
+            packet.push_header(&header).expect("push_header failed");
+
+            // 7. ASSERTIONS
+
+            // A. Verify Length and Headroom updates via Public API
+            assert_eq!(
+                packet.data_len() as usize,
+                initial_payload_len + header_size,
+                "Data length should increase"
+            );
+            assert_eq!(packet.headroom(), initial_headroom - header_size, "Headroom should decrease");
         }
-
-        // 5. Create Header to Push
-        let header = TestHeader {
-            id: 0xDEADBEEF,
-            flags: 0xCAFE,
-        };
-        let header_size = core::mem::size_of::<TestHeader>(); // 6 bytes
-
-        // 6. Perform Push
-        // (Assuming the method is named push_header as requested)
-        pdu.w.push_header(umem_base as usize, &header).expect("push_header failed");
-
-        // 7. ASSERTIONS
-
-        // A. Verify Length and Headroom updates via Public API
-        assert_eq!(
-            pdu.w.data_len() as usize,
-            initial_payload_len + header_size,
-            "Data length should increase"
-        );
-        assert_eq!(pdu.w.headroom(), initial_headroom - header_size, "Headroom should decrease");
-
         // B. Verify Address update
         // The new descriptor address should be 256 - 6 = 250
         let new_desc = pdu.to_frame_desc();
@@ -571,10 +583,12 @@ mod tests {
             initial_desc_addr - header_size,
             "Descriptor address did not move backwards"
         );
-
+        
+        // SAFETY: same layout as above.
+        let mut packet = Packet::new(unsafe { &mut *(&mut pdu as *mut Pdu as *mut Pdu0) }, umem_base as usize);
         // C. Verify Memory Content
         unsafe {
-            let current_data_ptr = pdu.w.data_ptr(umem_base as usize);
+            let current_data_ptr = packet.data_ptr();
 
             // 1. Check if Header is written at the new start
             let written_header = *(current_data_ptr as *const TestHeader);
