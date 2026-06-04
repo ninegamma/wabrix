@@ -756,6 +756,7 @@ impl PipelineRunner {
                         log::error!("Pipeline '{}': Invalid NodeId {}", self.name, next_idx);
                         break; // Abort this branch
                     }
+                    log::trace!("Pipeline '{}': Executing Next Node {}", self.name, next_idx);
                     directive = self.nodes[next_idx].process(&mut self.working_batch);
                 }
                 Directive::Split(branches) => {
@@ -763,6 +764,7 @@ impl PipelineRunner {
                         let next_idx = usize::from(next_id);
                         if next_idx >= self.nodes.len() { continue; }
 
+                        log::trace!("Pipeline '{}': Executing Split Branch to Node {}", self.name, next_idx);
                         let mut current_directive = self.nodes[next_idx].process(&mut sub_batch);
 
                         loop {
@@ -770,12 +772,14 @@ impl PipelineRunner {
                                 Directive::Next(branch_next_id) => {
                                     let branch_idx = usize::from(branch_next_id);
                                     if branch_idx >= self.nodes.len() { break; }
+                                    log::trace!("Pipeline '{}': Executing Next Node in split branch {}", self.name, branch_idx);
                                     current_directive = self.nodes[branch_idx].process(&mut sub_batch);
                                 }
                                 Directive::Split(nested_branches) => {
                                     for (nested_id, mut nested_batch) in nested_branches {
                                         let nested_idx = usize::from(nested_id);
                                         if nested_idx < self.nodes.len() {
+                                            log::trace!("Pipeline '{}': Executing nested Split Branch to Node {}", self.name, nested_idx);
                                             let _ = self.nodes[nested_idx].process(&mut nested_batch);
                                         }
                                     }
@@ -814,6 +818,7 @@ impl PipelineRunner {
             let source_idx = self.source_indices[i];
 
             self.working_batch.clear();
+            log::trace!("Pipeline '{}': Processing batch from source {}", self.name, source_idx);
             let directive = self.nodes[source_idx].process(&mut self.working_batch);
 
             let initial_packet_count = self.working_batch.len() as u32;
@@ -1280,7 +1285,7 @@ pub fn spawn_worker_pipelines(
                     skip_counters[i] = std::cmp::min(penalty, MAX_SKIP_PENALTY);
                 }
             }
-
+/*
             // =======================================================
             // GLOBAL CPU BACKOFF
             // =======================================================
@@ -1299,7 +1304,7 @@ pub fn spawn_worker_pipelines(
                     std::thread::yield_now();
                 }
             }
-
+*/
             iteration_count += 1;
         }
 

@@ -286,12 +286,10 @@ impl WasmManager {
             partition_start_bytes,
             self.umem.size
         );
-        //TODO: we need to restrict to the partition size for this Wasm Instance
-        let safe_partition_size = self.umem.size - (partition_start_bytes as usize);
 
         Arc::new(UmemHandle {
             ptr: self.umem.ptr,
-            size: safe_partition_size,
+            size: self.umem.size,
             partition_start_bytes,
             reserved_frames: self.umem.reserved_frames,
             frame_size: self.umem.frame_size,

@@ -196,6 +196,7 @@ impl Node for BatchTxNode {
     }
 
     fn process(&mut self, batch: &mut Batch) -> Directive {
+        log::trace!("TX Node: Received batch of len {}", batch.len());
         #[cfg(feature = "profiling")]
         let start_cycles = unsafe { _rdtsc() };
 
@@ -212,7 +213,7 @@ impl Node for BatchTxNode {
             Ok(sent_count) => {
                 self.sent_packets += sent_count as u64;
                 // Telemetry (optional)
-                if sent_count >0 { log::trace!("Node {}: Sent {} packets", self.id, sent_count); }
+                log::trace!("Node {}: Sent {} packets", self.id, sent_count);
 
                 // 3. Handle Partial Sends / Congestion
                 // If sent_count < original batch.len(), the remaining packets
@@ -378,6 +379,7 @@ impl Node for DropNode {
             if let Some(counter) = &self.telemetry_counter {
                 counter.fetch_add(count as u64, Ordering::Relaxed);
             }
+            log::trace!("DropNode {}: Dropped {} packets", self.id, count);
             // 🚀 BOOM: 1-Call Amortized Bulk Drop!
             batch.bulk_drop();
         }

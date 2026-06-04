@@ -73,7 +73,6 @@ impl WasmEngine {
         // 2. Build the partition-specific UmemHandle for this instance.
         //    WASM address 0 will map to `umem_base + partition_start_bytes`.
         //    The window extends to the end of the full Umem.
-        //TODO check if we should also add an partition_size argument
         let partition_handle = manager.make_partition_handle(partition_start_bytes);
         log::info!("NODE {}: Partition start bytes: {}", id, partition_start_bytes);
 
@@ -144,7 +143,6 @@ impl WasmEngine {
                 std::slice::from_raw_parts(batch.as_ptr(), active_bytes)
             };
 
-            log::debug!("NODE {}: Executing WASM on {} packets", self.id, batch.len());
             self.bindings
                 .xbricks_plugins_packet_engine()
                 .call_process_batch(&mut self.store, batch_bytes, self.partition_start_bytes)
@@ -153,7 +151,6 @@ impl WasmEngine {
                     (vec![255; len], vec![0; len]) // 255 = DROP fallback
                 })
         };
-            log::debug!("NODE {}: WASM execution completed, {}, {} actions and lengths returned", self.id, action_vector.len(), lengths_vector.len());
         if action_vector.len() != len || lengths_vector.len() != len {
             log::error!(
                 "Wasm {}: mismatched action/lengths (got {}/{}, expected {}). Engine POISONED — all packets dropped until restart.",
@@ -176,8 +173,8 @@ impl WasmEngine {
         };
 
         // 2. Evaluate the trigger: Mask hit OR Control Plane requested it
-        let is_telemetry_tick = (self.batch_count & 0x3FF) == 0 || control_plane_wants_sync;
-
+        let is_telemetry_tick = /* (self.batch_count & 0x3FF) == 0 || */ control_plane_wants_sync;
+        if control_plane_wants_sync { log::debug!("NODE {}: TELEMETRY SYNC REQUESTED", self.id); }
         if is_telemetry_tick {
             // Acknowledge and reset the flag *only* if we are actually syncing
             if let Some(flag) = &self.telemetry_metrics.force_sync_flag {
@@ -194,6 +191,7 @@ impl WasmEngine {
                 self.supports_oob_telemetry = true;
                 // Wasm maintains the absolute total.
                 // We safely overwrite the host atomics with the absolute values.
+                log::debug!("NODE {}: Extracted {} OOB telemetry packets", self.id, out_of_band_stats.len());
                 for (idx, &count) in out_of_band_stats.iter().enumerate() {
                     if idx < self.telemetry_metrics.counters_pkts.len() {
                         self.telemetry_metrics.counters_pkts[idx].store(count, Ordering::Relaxed);
