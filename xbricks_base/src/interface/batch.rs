@@ -1,7 +1,7 @@
 use core::mem::MaybeUninit;
 use core::ops::{Bound, RangeBounds};
 use core::ptr;
-use log::{debug, trace};
+use log::trace;
 use crate::frame_registry::get_worker_frame_registry;
 use crate::interface::Pdu;
 
@@ -15,6 +15,12 @@ pub struct Batch {
     packets: [MaybeUninit<Pdu>; MAX_BATCH_SIZE],
     /// Number of packets currently in the batch
     count: usize,
+}
+
+impl Default for Batch {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Batch {
@@ -272,13 +278,7 @@ impl Batch {
 
                 // 2. TRY MOVE: Attempt to push to the designated output.
                 let pdu_to_keep = if class_idx < outputs.len() {
-                    match outputs[class_idx].push(pdu) {
-                        Ok(_) => None, // Success: Ownership moved to output
-                        Err(returned_pdu) => {
-                            // FAILURE: Output full!
-                            Some(returned_pdu) // We must keep this Pdu
-                        }
-                    }
+                    outputs[class_idx].push(pdu).err()
                 } else {
                     Some(pdu) // Invalid class (or default route logic), keep it.
                 };
@@ -375,7 +375,7 @@ impl<'a> Iterator for Drain<'a> {
 impl<'a> Drop for Drain<'a> {
     fn drop(&mut self) {
         // 1. Drop any un-consumed elements in the drained range
-        while let Some(pdu) = self.next() {
+        for pdu in self.by_ref() {
             drop(pdu);
         }
 
@@ -598,9 +598,9 @@ mod tests {
         assert_eq!(batch.len(), 0);
 
         // Check distribution (should be roughly equal)
-        assert!(outputs[0].len() > 0);
-        assert!(outputs[1].len() > 0);
-        assert!(outputs[2].len() > 0);
+        assert!(!outputs[0].is_empty());
+        assert!(!outputs[1].is_empty());
+        assert!(!outputs[2].is_empty());
 
         // Total should be 10
         let total = outputs[0].len() + outputs[1].len() + outputs[2].len();

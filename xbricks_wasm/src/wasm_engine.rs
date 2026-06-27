@@ -1,9 +1,6 @@
 use std::collections::HashMap;
 use std::mem::MaybeUninit;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::broadcast::{Receiver, Sender};
-use tokio::sync::broadcast::error::TryRecvError;
+use std::sync::atomic::Ordering;
 use crate::wasm_manager::{MyHostState, WasmManager}; // Assuming WasmManager is defined here
 use wasmtime::Store;
 use wasmtime::component::{bindgen, ResourceTable};
@@ -13,7 +10,6 @@ use xbricks_base::interface::batch::{Batch, MAX_BATCH_SIZE};
 use xbricks_base::interface::Pdu;
 use xbricks_base::telemetry::TelemetryMetrics;
 use xbricks_base::frame_registry::get_worker_frame_registry;
-use xbricks_protocol::TELEMETRY_FLAG;
 use xbricks_base::system::PlatformData;
 
 // 1. Generate bindings.
@@ -55,6 +51,7 @@ pub struct WasmEngine {
 }
 
 impl WasmEngine {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: NodeId,
         manager: &WasmManager,
@@ -363,10 +360,10 @@ impl Node for WasmEngine {
                 } else {
                     // 2. Load and initialize the freshly allocated PDUs into the Batch
                     batch.clear();
-                    for i in 0..allocated {
-                        let mut pdu = unsafe { scratch[i].assume_init_read() };
+                    for slot in scratch[..allocated].iter() {
+                        let mut pdu = unsafe { slot.assume_init_read() };
                         let umem_addr = pdu.umem_addr();
-                        let data_ptr = pdu.data_ptr(umem_addr) as *mut u8;
+                        let data_ptr = pdu.data_ptr(umem_addr);
 
                         unsafe {
                             core::ptr::write_bytes(data_ptr, 0, 12);

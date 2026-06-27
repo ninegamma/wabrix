@@ -103,6 +103,7 @@ pub enum GenState {
 
 
 impl GeneratorNode {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: NodeId,
         next_node: NodeId,
@@ -285,11 +286,7 @@ impl GeneratorNode {
 
     /// Get the duration of actual packet burst generation in TSC cycles
     pub fn get_burst_duration_cycles(&self) -> u64 {
-        if self.last_burst_timestamp > self.first_burst_timestamp {
-            self.last_burst_timestamp - self.first_burst_timestamp
-        } else {
-            0
-        }
+        self.last_burst_timestamp.saturating_sub(self.first_burst_timestamp)
     }
 
     /// Get the duration of actual packet burst generation using std::time
@@ -457,7 +454,7 @@ impl Node for GeneratorNode {
             if b_dst_changed {
                 let [i0, i1, i2, i3] = self.dst_ip.octets();
                 let [m0, m1, m2, m3, m4, m5] = self.dst_mac.into_array();
-                let _ = bindings
+                bindings
                     .xbricks_plugins_generator()
                     .call_set_dst(
                         &mut *store, //REBORROW as we still need store later on
@@ -493,6 +490,7 @@ impl Node for GeneratorNode {
             vec![]
         };
 
+        #[allow(clippy::needless_range_loop)]
         for i in 0..allocated {
             let mut pdu = unsafe { self.scratch_pdus[i].assume_init_read() };
 
@@ -537,8 +535,8 @@ impl Node for GeneratorNode {
             // Increment both counters!
             self.total_generated += generated;
             self.packets_generated_this_run += generated;
-            self.tm_total.store(self.total_generated as u64, Ordering::Relaxed);
-            self.tm_this_run.store(self.packets_generated_this_run as u64, Ordering::Relaxed);
+            self.tm_total.store(self.total_generated, Ordering::Relaxed);
+            self.tm_this_run.store(self.packets_generated_this_run, Ordering::Relaxed);
             if let Some(first) = self.first_burst_instant {
                 let elapsed = first.elapsed().as_secs_f64();
                 if elapsed > 0.001 {

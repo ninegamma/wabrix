@@ -13,6 +13,7 @@ use crate::xscrubber_skel::{XscrubberSkel, XscrubberSkelBuilder};
 
 /// Set up BPF programs for the specified interfaces
 /// Returns a map of interface names to their BPF skeletons and the XDP links
+#[allow(clippy::type_complexity)]
 pub fn setup_bpf(unique_ifaces: Vec<String>) -> Result<(HashMap<String, Arc<XscrubberSkel<'static>>>, Vec<Link>)> {
     // Instead of one global skeleton, we store one per interface.
     // Key: Interface Name -> Value: Arc<Skeleton>

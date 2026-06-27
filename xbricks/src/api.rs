@@ -6,24 +6,22 @@ use axum::{routing::get, Router, Json};
 use axum::extract::{State, Query};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::RwLock;
 // Add this to your imports
 use xbricks_lib::toml_parser::XBricksConfig;
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
 };
 use axum::extract::ws::Utf8Bytes;
-use futures_util::{sink::SinkExt, stream::StreamExt};
+use futures_util::stream::StreamExt;
 use axum::response::IntoResponse;
 use tokio::sync::broadcast::Sender;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-use toml_edit::{ser, DocumentMut, Item};
+use toml_edit::{DocumentMut, Item};
 use tower_http::services::ServeDir;
-use xbricks_protocol::helpers::parse_suffixed_number;
 use xbricks_base::{ControlEvent, NodeId};
-use xbricks_lib::config::hot_config::{NodeDynamicState, SharedSystemState};
-use xbricks_lib::generator_node::GenState;
+use xbricks_lib::config::hot_config::SharedSystemState;
 use xbricks_base::telemetry::{TMLiveStats};
 
 // A type alias to make the signatures much cleaner

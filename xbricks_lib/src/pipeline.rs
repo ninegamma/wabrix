@@ -1,11 +1,10 @@
-use std::arch::x86_64::_rdtsc;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use arc_swap::ArcSwap;
 use core_affinity::CoreId;
 use log::{debug, info};
-use crate::toml_parser::{NodeInstance, PipelineInstance};
+use crate::toml_parser::PipelineInstance;
 pub(crate) use crate::nodes::{
     BatchRxNode, BatchTxNode, DropNode, FastParserNode,
 };
@@ -16,14 +15,13 @@ use separator::Separatable;
 use tokio::sync::broadcast::{Receiver, Sender};
 use xbricks_protocol::helpers::parse_suffixed_number;
 use xbricks_base::frame_registry::{set_tsc_frequency, set_worker_frame_registry};
-use xbricks_base::{frame_registry, ControlEvent, Directive, Node, NodeId};
+use xbricks_base::{ControlEvent, Directive, Node, NodeId};
 use xbricks_base::interface::batch::MAX_BATCH_SIZE;
 use crate::config::hot_config::{HotNodeData, HotPipelineConfig, NodeDynamicState};
 #[cfg(feature = "wasm")]
 use xbricks_wasm::wasm_manager::WasmManager;
 use xbricks_base::telemetry::TelemetryRegistry;
 use xbricks_base::node_instance_id::NodeInstanceId;
-use xbricks_wasm::WasmEngine;
 use crate::generator_node::{GenState, GeneratorNode};
 
 /// Trait for managing XDP socket access
@@ -43,6 +41,7 @@ pub struct PipelineFactory;
 
 impl PipelineFactory {
     /// returns a vector of nodes, and a vector of the indices of the source nodes in the pipeline
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn build(
         pipeline_instance: &PipelineInstance,
         worker_id: usize,
@@ -51,12 +50,12 @@ impl PipelineFactory {
         ctrl_tx: Option<Sender<Arc<ControlEvent>>>,
         platform_data: &PlatformData,
         #[cfg(feature = "wasm")]
-        wasm_managers: &Vec<Option<Arc<WasmManager>>>,
+        wasm_managers: &[Option<Arc<WasmManager>>],
         shared_state: Arc<crate::config::hot_config::SharedSystemState>,
         #[cfg(feature = "wasm")]
         wasm_instance_totals: &[usize],
         #[cfg(feature = "wasm")]
-        wasm_instance_counters: &mut Vec<u32>,
+        wasm_instance_counters: &mut [u32],
     ) -> Result<(Vec<Box<dyn Node>>, Vec<usize>), String> {
         // --- PASS 1: ID Resolution ---
         // Map "string_id" -> NodeId
@@ -209,12 +208,12 @@ impl PipelineFactory {
                     // "no-packets" (human-readable like ipblower's --no-packets, e.g. "100K")
                     let packets_to_generate = node_instance
                         .node_config.effective_arg("packet_count")
-                        .and_then(|s| parse_suffixed_number(s).ok().map(|v| v ))
+                        .and_then(|s| parse_suffixed_number(s).ok())
                         .or_else(|| {
                             node_instance
                                 .node_config.args
                                 .get("no-packets")
-                                .and_then(|s| parse_suffixed_number(s).ok().map(|v| v ))
+                                .and_then(|s| parse_suffixed_number(s).ok())
                         })
                         .unwrap_or(0);
 
@@ -575,7 +574,7 @@ impl PipelineFactory {
                         ))
                     } else {
                         use xbricks_wasm::WasmEngine;
-                        let worker_rx = ctrl_tx.as_ref().map(|tx| tx.subscribe());
+                        let _worker_rx = ctrl_tx.as_ref().map(|tx| tx.subscribe());
                         Box::new(WasmEngine::new(
                             my_id.clone(),
                             manager,
@@ -673,6 +672,7 @@ pub struct PipelineRunner {
     /// Cache the indices of nodes that need timers
     timer_indices: Vec<usize>,
     /// Cache the indices of nodes that need control events
+    #[allow(dead_code)]
     control_indices: Vec<usize>,
     last_timer_poll: u64,
     tsc_freq: u64,
@@ -690,6 +690,7 @@ impl PipelineRunner {
     /// * `source_indices` - Vector of source node indices (0-based)
     /// # Returns
     /// Result containing the PipelineRunner or an error if nodes is empty
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: String,
         worker_id: usize,
@@ -1071,8 +1072,7 @@ impl NodeStats {
     pub fn print_stats(&self) {
         #[cfg(feature = "profiling")]
         {
-            if self.packets_processed > 0 {
-                let cycles_per_packet = self.profiling_cycles / self.packets_processed as u64;
+            if let Some(cycles_per_packet) = self.profiling_cycles.checked_div(self.packets_processed) {
                 info!(
                     "    Node {:20}: {} cycles/packet ({} total cycles, {} packets)",
                     self.node_id,
@@ -1086,8 +1086,7 @@ impl NodeStats {
 
             // For BatchRxNode, also display loaded vs empty cycles
             if let (Some(loaded), Some(empty)) = (self.rx_loaded_cycles, self.rx_empty_cycles) {
-                if self.packets_processed > 0 {
-                    let loaded_per_packet = loaded / self.packets_processed as u64;
+                if let Some(loaded_per_packet) = loaded.checked_div(self.packets_processed) {
                     info!(
                         "      RX loaded runs: {} cycles/packet ({} total cycles)",
                         loaded_per_packet.separated_string(),
@@ -1204,7 +1203,7 @@ pub fn spawn_worker_pipelines(
         // skip_counters tracks how many loop iterations we should skip this pipeline
         let mut skip_counters = vec![0u32; num_pipelines];
         // Thread-level idle tracker
-        let mut global_idle_spins = 0u32;
+        let _global_idle_spins = 0u32;
         // The maximum number of consecutive loops to skip a dead pipeline.
         // 32 means we check the veth at least once every 32 physical loops.
         const MAX_SKIP_PENALTY: u32 = 512;
@@ -1245,7 +1244,7 @@ pub fn spawn_worker_pipelines(
             frame_registry.process_returns();
 
             // 3. Adaptive Execution of pipelines
-            let mut work_done_this_tick = false;
+            let mut _work_done_this_tick = false;
 
             for i in 0..num_pipelines {
                 // If this pipeline is being penalized for being empty, skip it
@@ -1258,7 +1257,7 @@ pub fn spawn_worker_pipelines(
                 let mut packets_processed = runners[i].run_iteration().0 as usize;
 
                 if packets_processed > 0 {
-                    work_done_this_tick = true; // Mark that the core did actual work
+                    _work_done_this_tick = true; // Mark that the core did actual work
                     // TRAFFIC DETECTED! Reset all penalties.
                     idle_streaks[i] = 0;
                     skip_counters[i] = 0;

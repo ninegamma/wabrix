@@ -1,5 +1,5 @@
 use std::env;
-use log::{Level, Log, Metadata, Record};
+use log::{Log, Metadata, Record};
 use env_filter::{Builder, Filter};
 use tokio::sync::broadcast;
 

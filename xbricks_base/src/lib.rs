@@ -11,7 +11,6 @@ pub mod node_instance_id;
 use core::fmt::Display;
 use std::sync::Arc;
 use crossbeam_queue::ArrayQueue;
-use xsk_rs::Umem;
 use crate::frame_registry::MAX_UMEM;
 use crate::interface::batch::Batch;
 
@@ -111,7 +110,7 @@ pub trait Node: Send + std::any::Any {
 
     /// Control-path for timers (defaults to doing nothing)
     fn requires_timers(&self) -> bool { false }
-    fn poll_timers(&mut self, batch: &mut Batch, current_tsc: u64) -> Directive {
+    fn poll_timers(&mut self, _batch: &mut Batch, _current_tsc: u64) -> Directive {
         Directive::Stop // Default implementation does nothing
     }
 
@@ -119,7 +118,7 @@ pub trait Node: Send + std::any::Any {
     fn requires_control_events(&self) -> bool { false }
 
     /// called by the scheduler when a control event is received for this node (defaults to doing nothing)
-    fn handle_control_event(&mut self, event: &ControlEvent) {}
+    fn handle_control_event(&mut self, _event: &ControlEvent) {}
 
     /// called before startup, e.g., rx nodes can replenish the fill queue
     fn prepare(&mut self) -> anyhow::Result<()> {

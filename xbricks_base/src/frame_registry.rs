@@ -3,7 +3,7 @@ use core::cell::Cell;
 use core::mem::MaybeUninit;
 use crossbeam_queue::ArrayQueue;
 use xsk_rs::Umem;
-use log::{debug, trace};
+use log::debug;
 use crate::{RuntimeUmemConfig, SystemBus, UmemPartition};
 use crate::interface::batch::MAX_BATCH_SIZE;
 use crate::interface::Pdu;
@@ -11,9 +11,9 @@ use crate::interface::Pdu;
 // Thread-local storage for the worker's frame registry pointer
 // This allows XSocketRx/Tx to access the worker's registry without storing it in each socket
 thread_local! {
-    static WORKER_FRAME_REGISTRY: Cell<*mut FrameRegistry> = Cell::new(std::ptr::null_mut());
-    static TSC_FREQUENCY: Cell<u64> = Cell::new(0);
-    static TSC_START: Cell<u64> = Cell::new(0);
+    static WORKER_FRAME_REGISTRY: Cell<*mut FrameRegistry> = const { Cell::new(std::ptr::null_mut()) };
+    static TSC_FREQUENCY: Cell<u64> = const { Cell::new(0) };
+    static TSC_START: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Set the TSC frequency and start timestamp for the current thread
@@ -381,7 +381,7 @@ impl FrameRegistry {
             }
         };
 
-        let umem_base_ptr = active_umem.as_ptr();
+        let _umem_base_ptr = active_umem.as_ptr();
         let system_bus = &*self.bus as *const SystemBus;
         let frame_size_log2 = umem_config.frame_size_log2;
         let headroom = umem_config.head_room as usize;
@@ -416,7 +416,7 @@ impl FrameRegistry {
         use crate::interface::Pdu;
 
         // Extract values before the mutable borrow in allocate_batch_into
-        let (umem_base_ptr, frame_size_log2, headroom) = {
+        let (_umem_base_ptr, frame_size_log2, headroom) = {
             let umem_config = if let Some(config) = self.umem_configs[umem_id].as_ref() {
                 config
             } else {

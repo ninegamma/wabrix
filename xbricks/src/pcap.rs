@@ -3,6 +3,7 @@ use std::io::BufReader;
 use log::{warn, info, debug};
 use pcap_file::pcap::PcapReader;
 
+#[allow(dead_code)]
 pub struct PcapRxNode {
     id: NodeId,
     next_node: NodeId,
@@ -13,6 +14,7 @@ pub struct PcapRxNode {
     processed_packets: u64,
 }
 
+#[allow(dead_code)]
 impl PcapRxNode {
     pub fn new(id: NodeId, next: NodeId, filepath: &str, umem_id: usize, loop_file: bool) -> Self {
         let file = File::open(filepath).expect("Could not open PCAP file");
@@ -140,6 +142,7 @@ use xbricks_base::interface::batch::{Batch, MAX_BATCH_SIZE};
 use xbricks_base::{Directive, Node, NodeId};
 use xbricks_base::frame_registry::get_worker_frame_registry;
 
+#[allow(dead_code)]
 pub struct PcapTxNode {
     id: NodeId,
     writer: PcapWriter<BufWriter<File>>,
@@ -147,6 +150,7 @@ pub struct PcapTxNode {
     written_packets: u64,
 }
 
+#[allow(dead_code)]
 impl PcapTxNode {
     pub fn new(id: NodeId, filepath: &str, umem_id: usize) -> Self {
         let file = File::create(filepath).expect("Could not create PCAP file");

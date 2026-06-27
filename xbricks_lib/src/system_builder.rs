@@ -135,7 +135,7 @@ impl SystemBuilder {
         let mut umem_partition_counters: Vec<usize> = vec![0; MAX_UMEM];
 
         // Process workers in order of their IDs for deterministic allocation
-        let mut sorted_worker_ids: Vec<usize> = (0..num_workers)
+        let sorted_worker_ids: Vec<usize> = (0..num_workers)
             .filter(|&id| self.worker_partitions[id].is_some())
             .collect();
 
@@ -269,12 +269,10 @@ impl SystemBuilder {
         }
 
         // Give every worker registry the physical UMEM handle (cheap Arc clone).
-        for frame_registry_opt in xbricks_system.frame_registries.iter_mut() {
-            if let Some(frame_registry) = frame_registry_opt {
-                for (group_id, entry) in initialized_umems.iter().enumerate() {
-                    if let Some((umem, _)) = entry {
-                        frame_registry.active_umems[group_id] = Some(umem.clone());
-                    }
+        for frame_registry in xbricks_system.frame_registries.iter_mut().flatten() {
+            for (group_id, entry) in initialized_umems.iter().enumerate() {
+                if let Some((umem, _)) = entry {
+                    frame_registry.active_umems[group_id] = Some(umem.clone());
                 }
             }
         }
@@ -299,8 +297,8 @@ impl SystemBuilder {
                         let mut global_frames = vec![0u32; umem_conf.fq_size as usize];
                         let allocated = registry.allocate_batch_into(group_id, &mut global_frames);
 
-                        for i in 0..allocated {
-                            let (_umem_id, local_idx) = xbricks_base::frame_registry::decode_global_frame(global_frames[i]);
+                        for &frame in &global_frames[..allocated] {
+                            let (_umem_id, local_idx) = xbricks_base::frame_registry::decode_global_frame(frame);
                             initial_descs.push(umem_descs[local_idx as usize]);
                         }
                     }
@@ -349,13 +347,11 @@ impl SystemBuilder {
                         }
                         log::error!("========================================================");
 
-                        return Err(e.into());
+                        return Err(e);
                     }
                 };
 
-                if !queue_ring_map.contains_key(&ring_key) {
-                    queue_ring_map.insert(ring_key, (fq, cq));
-                }
+                queue_ring_map.entry(ring_key).or_insert((fq, cq));
                 xsockets.push(xs);
             }
         }
@@ -375,8 +371,8 @@ impl SystemBuilder {
         }
 
         // Register all sockets in the BPF maps
-        if interface_skels.is_some() {
-            crate::config::configure_bpf::register_sockets_in_bpf(&xsockets, interface_skels.unwrap())?;
+        if let Some(skels) = interface_skels {
+            crate::config::configure_bpf::register_sockets_in_bpf(&xsockets, skels)?;
         } else {
             error!("🔥 No interface skels provided. Cannot register sockets in BPF.");
         }
@@ -824,7 +820,7 @@ mod tests {
         for &f in &frames {
             let (uid, lidx) = decode_global_frame(f);
             assert_eq!(uid, 0, "frame {f:#010x} must be from UMEM 0");
-            assert!(lidx >= 512 && lidx < 1024, "local_idx {lidx} must be in [512, 1024)");
+            assert!((512..1024).contains(&lidx), "local_idx {lidx} must be in [512, 1024)");
         }
     }
 }

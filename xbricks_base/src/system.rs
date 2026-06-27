@@ -10,7 +10,7 @@ const PROC_CPUINFO_PATH: &str = "/proc/cpuinfo";
 
 pub fn try_get_tsc_frequency() -> Option<u64> {
     // Step 1: Ask the CPU for the highest basic leaf it supports
-    let max_leaf = unsafe { __cpuid(0x00).eax };  // keep the unsafe!
+    let max_leaf = __cpuid(0x00).eax;
 
     // Step 2: If it's too old to know what 0x15 is, abort and use the fallback
     if max_leaf < 0x15 {
@@ -18,7 +18,7 @@ pub fn try_get_tsc_frequency() -> Option<u64> {
     }
 
     // Step 3: It is safe to query Leaf 0x15
-    let result = unsafe {__cpuid(0x15) }; // keep the unsafe!
+    let result = __cpuid(0x15);
 
     if result.ebx == 0 || result.eax == 0 {
         return None;
@@ -95,7 +95,7 @@ pub fn get_mac_string_from_ifname(ifname: &str) -> Result<String, ParseError> {
     let iface = Path::new("/sys/class/net").join(ifname).join("address");
     let mut macaddr = String::new();
     File::open(iface)
-        .and_then(|mut f| f.read_to_string(&mut macaddr).map_err(|e| e.into()))
+        .and_then(|mut f| f.read_to_string(&mut macaddr))
         .unwrap();
     Ok(macaddr.lines().next().unwrap_or("").to_string())
 }

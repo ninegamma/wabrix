@@ -65,6 +65,7 @@ pub struct XSocketRx {
     total_produced: usize,
     total_received: usize,
     empty_spins: usize,
+    #[allow(dead_code)]
     last_logged_block: usize, // helper for logging
     fill_deficit: usize,      // for more targeted replenishing
     fd: RawFd,                  // file descriptor of the AF_XDP socket
@@ -93,12 +94,14 @@ pub struct XSocketTx {
     bus: Arc<SystemBus>,
     config: Arc<XdpSocketConfig>,
     total_consumed: usize,
+    #[allow(dead_code)]
     last_logged_block: usize,  // helper for logging
     total_sent_packets: usize, // helper for logging
     fd: RawFd,                   // file descriptor of the AF_XDP socket
 }
 
 impl XSocket {
+    #[allow(clippy::type_complexity)]
     pub(crate) fn new(
         config: XdpSocketConfig,
         bus: Arc<SystemBus>,
@@ -356,11 +359,7 @@ impl XSocketRx {
 
     #[cfg(feature = "profiling")]
     pub fn get_replenish_avg_cycles(&self) -> u64 {
-        if self.prof_replenish_calls > 0 {
-            self.prof_replenish_cycles / self.prof_replenish_calls
-        } else {
-            0
-        }
+        self.prof_replenish_cycles.checked_div(self.prof_replenish_calls).unwrap_or(0)
     }
 
     #[cfg(feature = "profiling")]
@@ -421,7 +420,7 @@ impl XSocketRx {
         // Idiomatic way to clamp an upper bound in Rust
         let requested_count = requested_count.min(MAX_FILL);
 
-        let threshold = LOG_INTERVAL_C_F_QUEUE_PACKETS;
+        let _threshold = LOG_INTERVAL_C_F_QUEUE_PACKETS;
 
         // Access Thread-Local Registry
         let registry_ptr = get_worker_frame_registry();
@@ -648,7 +647,7 @@ impl BatchRx for XSocketRx {
         // THROTTLED RECLAIM
         // Cross-thread communication is expensive. Only check for returned frames
         // every 32 loops, OR if we are getting dangerously low on free frames.
-        if self.empty_spins % 32 == 0 || frame_registry.total_free_frames() < 8192 {
+        if self.empty_spins.is_multiple_of(32) || frame_registry.total_free_frames() < 8192 {
             if frame_registry.total_free_frames() < 8192 {
                 log::warn!("total_free_frames is too low: {}", frame_registry.total_free_frames());
             }
@@ -716,8 +715,8 @@ impl BatchRx for XSocketRx {
 
         if rcvd == 0 {
             self.empty_spins += 1;
-            if self.prof_started {
-                if self.empty_spins >= 51200 {
+            if self.prof_started
+                && self.empty_spins >= 51200 {
                     self.prof_started = false;
                     let now = unsafe { core::arch::x86_64::_rdtsc() };
                     log::debug!(
@@ -727,12 +726,11 @@ impl BatchRx for XSocketRx {
                             .separated_string()
                     );
                 }
-            }
 
             // LOCKLESS/FAST-PATH WAKEUP CHECK
             // We only attempt to lock and check the Fill Queue if we've been spinning empty for a while.
             // This prevents atomic Mutex contention on every single microscopic loop.
-            if self.empty_spins % 128 == 0 {
+            if self.empty_spins.is_multiple_of(128) {
                 // Use try_lock! If another thread holds the lock, we just move on.
                 // Never block the hot path.
                 if let Some(fq) = self.fill_queue.try_lock() {
@@ -824,7 +822,7 @@ impl BatchRx for XSocketRx {
 
         // 6. Process the received packets
         let frame_size_log2 = self.config.umem_config.frame_size_log2;
-        let umem_ptr = self.umem.as_ptr();
+        let _umem_ptr = self.umem.as_ptr();
         let bus_ptr = &*self.bus as *const _;
         let worker_id = self.config.worker_id as u8;
 
@@ -1002,7 +1000,7 @@ impl BatchTx for XSocketTx {
                                 len as usize
                             );
                         }
-                        new_pdu.w.set_data_length(len as u32);
+                        new_pdu.w.set_data_length(len);
                         
                         descs[valid_to_send] = new_pdu.to_frame_desc();
                         // MAGIC SWAP: Put the UMEM 1 packet into the batch,

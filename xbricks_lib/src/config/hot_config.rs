@@ -56,7 +56,7 @@ impl NodeDynamicState {
                 if let Some(bs_str) = updates.get("batch_size") {
                     match bs_str.parse::<u32>() {
                         Ok(v) if v > 0 && v <= MAX_BATCH_SIZE as u32 => { *batch_size = v; }
-                        Ok(v) if v == 0 => { log::warn!("hot_args batch_size must be > 0"); }
+                        Ok(0) => { log::warn!("hot_args batch_size must be > 0"); }
                         Ok(v) => { log::warn!("hot_args batch_size {} exceeds MAX_BATCH_SIZE {}", v, MAX_BATCH_SIZE); }
                         Err(e) => { log::warn!("hot_args batch_size parse error: {}", e); }
                     }

@@ -27,7 +27,8 @@ pub struct WasmInspectorNode {
     bindings: FilterPlugin,
     // Index corresponds to the Route ID returned by Wasm
     routing_table: Vec<NodeId>,
-    // Telemetry dispatch channel
+    // Telemetry dispatch channel (reserved for future use)
+    #[allow(dead_code)]
     telemetry_tx: Option<Sender<u32>>,
     processed_packets: u64,
     #[cfg(feature = "profiling")]
@@ -43,6 +44,7 @@ pub struct WasmInspectorNode {
 }
 
 impl WasmInspectorNode {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: NodeId,
         manager: &WasmManager,
@@ -189,7 +191,7 @@ impl Node for WasmInspectorNode {
 
             let route_id = (action & 0xFF) as usize;
             let telemetry_bucket = ((action >> 16) & 0xFF) as usize; // Get the port bucket (0-10)
-            let send_sample = (action & TELEMETRY_FLAG) != 0;
+            let _send_sample = (action & TELEMETRY_FLAG) != 0;
             // TRACE LOG: Inspect the exact bitfield returned by WASM for this packet
             log::trace!("  -> Pkt [{}]: Action Bits = {:#010X} | Extracted Route ID = {} | Tel Bucket = {}", pdu_index, action, route_id, telemetry_bucket);
             // 1. HIGH VOLUME (Atomics) -> Cost: ~10 cycles
@@ -218,7 +220,7 @@ impl Node for WasmInspectorNode {
 
         // 4. DISPATCH DIRECTIVES
         let mut split_branches = Vec::with_capacity(num_routes);
-        for (i, mut output_batch) in outputs.into_iter().enumerate() {
+        for (i, output_batch) in outputs.into_iter().enumerate() {
             if !output_batch.is_empty() {
                 log::trace!("NODE {}: Branching {} packets to Target Node ID: {}", self.id, output_batch.len(), self.routing_table[i]);
                 // Route ID matches the index in our dynamic routing table

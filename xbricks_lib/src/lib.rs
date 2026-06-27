@@ -27,7 +27,7 @@ pub trait BatchRx {
     ///
     /// # Arguments
     /// * `batch` - A mutable reference to a Batch to be filled.
-    ///             The batch should be cleared before calling this if you want a fresh burst.
+    ///   The batch should be cleared before calling this if you want a fresh burst.
     /// * `max_count` - Maximum number of packets to receive in this batch.
     ///
     /// # Returns
@@ -62,8 +62,8 @@ pub trait BatchTx {
     ///
     /// # Arguments
     /// * `batch` - The batch containing packets to send.
-    ///             Successfully sent packets are REMOVED from the batch.
-    ///             Unsent packets (e.g. if TX ring is full) REMAIN in the batch.
+    ///   Successfully sent packets are REMOVED from the batch.
+    ///   Unsent packets (e.g. if TX ring is full) REMAIN in the batch.
     ///
     /// # Returns
     /// * `usize` - The number of packets successfully transmitted.

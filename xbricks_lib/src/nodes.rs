@@ -1,5 +1,4 @@
 use std::arch::x86_64::_rdtsc;
-use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use xbricks_base::interface::batch::Batch;
@@ -258,17 +257,14 @@ impl Node for BatchTxNode {
 
 use crate::{BatchRx, BatchTx};
 use crossbeam_channel::Sender;
-use log::{debug, info, warn};
-use macaddr::MacAddr6;
-use network_types::eth::EtherType;
-use xbricks_base::interface::Pdu;
-use xbricks_protocol::headers::{EndOffset, Header, HeaderKind, IpHeader, MacHeader, TcpHeader};
+use log::warn;
 
 pub struct QueueNode {
     id: NodeId,
     /// The sender side of a channel leading to another Scheduler/Core
     tx: Sender<Batch>,
     /// The ID of the node that should process this batch on the destination side
+    #[allow(dead_code)]
     next_node_id: NodeId,
     processed_packets: u64,
     #[cfg(feature = "profiling")]
@@ -404,12 +400,7 @@ impl Node for DropNode {
     }
 }
 
-use crate::config::hot_config::SharedSystemState;
 use core::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
-use rand::rngs::SmallRng;
-use rand::TryRng;
-use std::mem::MaybeUninit;
-use xbricks_base::frame_registry::get_worker_frame_registry;
 use xbricks_base::{Directive, Node, NodeId};
 
 /// Fast parser node with prefetching optimization.

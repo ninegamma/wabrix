@@ -29,7 +29,7 @@ impl NodeInstanceId {
         let parts: Vec<&str> = pattern.split('/').collect();
 
         // 1. Match Worker (handles both "0" and "w0" syntax, and "*")
-        if let Some(&w_pat) = parts.get(0) {
+        if let Some(&w_pat) = parts.first() {
             if w_pat != "*" {
                 let w_target = w_pat.trim_start_matches('w');
                 if w_target != self.worker_id.to_string() {

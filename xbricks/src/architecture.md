@@ -1,6 +1,8 @@
 # Data Model and Architecture Summary
 
-This document summarizes the data model, architectural roles, and frame lifecycle implemented in `frame_manager.rs` for the high-performance AF_XDP application.
+**Scope:** This document describes the data model, architectural roles, and frame lifecycle of the **XBRIX** Rust workspace — specifically the `xbricks_base` crate (core types: `FrameRegistry`, `SystemBus`, `UmemPartition`, `Pdu`, `RuntimeUmemConfig`) and the `xbricks_lib` crate (socket layer: `XSocket`, `XSocketRx`, `XSocketTx`, `XSocketRegistry`, system builder). The `xbricks_wasm` crate (plugin/WASM runtime) and the `xbricks` binary (CLI entry point) are not covered in detail here.
+
+**Platform context:** Linux-only, kernel-bypass packet I/O via **AF_XDP**. The application maps shared memory (UMEM) directly with the NIC driver, bypassing the kernel network stack on the fast path. All types described below assume a Linux host with XDP-capable NICs.
 
 ## 1. High-Level Data Model: Multi Umem Static Partitioning Per Worker
 
@@ -30,15 +32,15 @@ The system implements a **Multi Umem Static Partitioning** model over multiple *
 
 To enforce consistency across the shared memory region while allowing hardware flexibility, the configuration is split into two distinct structures.
 
-### A. `UmemGroupConfig` (The Physical Layer)
-Defines the physical properties of the memory region.
-* **Fields:** `frame_size`, `headroom`, `frame_count`, `group_id`.
-* **Constraint:** Every socket/manager in the same UMEM group **must** share an identical instance of this configuration. This prevents memory corruption (e.g., one socket thinking frames are 2KB while another thinks they are 4KB).
+### A. `RuntimeUmemConfig` (The Physical Layer)
+Defines the physical properties of the memory region (runtime-resolved; created from TOML config during system initialization).
+* **Key Fields:** `frame_size`, `frame_size_log2`, `head_room`, `frame_count`, `group_id`, `group_start_frame_idx`, `partitions`, `fq_size`, `cq_size`.
+* **Constraint:** Every socket/manager in the same UMEM group **must** share an identical `Arc<RuntimeUmemConfig>` instance. This prevents memory corruption (e.g., one socket thinking frames are 2KB while another thinks they are 4KB).
 
 ### B. `XdpSocketConfig` (The Hardware Layer)
 Defines the specific connection to the network hardware.
-* **Fields:** `interface` (e.g., "eth0"), `queue_id` (e.g., 0), `core_id`, `worker_id`.
-* **Relationship:** Contains the `UmemGroupConfig` inside it, linking the hardware queue to the memory region it serves.
+* **Key Fields:** `interface` (e.g., "eth0"), `queue_id`, `core_id`, `worker_id`, `rx_queue_size`, `tx_queue_size`, `zerocopy`, `xdp_mode`, `umem_config: Arc<RuntimeUmemConfig>`.
+* **Relationship:** Holds an `Arc<RuntimeUmemConfig>` as `umem_config`, linking the hardware queue to the shared memory region it serves.
 * **Note:** `core_id` specifies CPU affinity, while `worker_id` identifies the logical worker thread that owns the frame partition.
 
 ## 3. Role: `XSocket` (The Operator)
@@ -61,18 +63,23 @@ The `FrameRegistry` acts as the **Inventory Manager**. It is a container that ma
 
 * **Primary Responsibility:** High-speed, lock-free management of free frames within a worker's partitions.
 * **Ownership:** Each worker thread has exactly one `FrameRegistry`. Multiple sockets in the same worker access this shared registry via thread-local storage.
-* **Key Components per Umem Group:**
-    * **`free_stash`:** A `Vec<u32>` acting as a LIFO stack. This is the "hot cache" of frame indices ready to be used immediately.
-    * **`partition`:** Defines the range of IDs this registry is allowed to own (e.g., "Worker 0 owns frames 0-4095").
-    * **`return_queue`:** A lockless `Arc<ArrayQueue<u32>>` (bounded ring buffer) where *other workers* push bit-packed u32 commands for frames they are returning or sharing. The owning worker pops from this queue in `process_returns()`.
+* **Top-level fields:**
+    * **`worker_id`:** The owning worker's ID.
+    * **`return_queue`:** A lockless `Arc<ArrayQueue<u32>>` (bounded ring buffer) where *other workers* push bit-packed u32 commands for frames they are returning or sharing. The owning worker drains this queue in `process_returns()`.
+    * **`bus`:** Reference to the `SystemBus`, used for routing returned frames and looking up partition ownership via `bus.umem_partitions`.
+    * **`registry_map`:** A `Vec<Option<PartitionData>>` indexed by `umem_group_id`. Each present entry is the per-UMEM allocation context.
+* **`PartitionData` (per UMEM group, inside `registry_map`):**
+    * **`free_stash`:** A `Vec<u32>` acting as a LIFO stack. This is the "hot cache" of encoded frame indices ready to be used immediately.
+    * **`refcounts`:** A `Vec<u16>` tracking per-frame reference counts (for retain/release semantics).
+* **Partition range info** is stored on the `SystemBus` (`bus.umem_partitions: Vec<UmemPartition>`), not inside `PartitionData`. The registry uses the bus to determine which frames it owns.
 * **Logic:**
-    * When a socket needs frames (`alloc`), the Registry pops from `free_stash`.
-    * If `free_stash` is empty, it checks the `return_rx` mailbox to reclaim returned frames.
+    * When a socket needs frames (`alloc`), the Registry pops from `free_stash` in the relevant `PartitionData`.
+    * If `free_stash` is empty, it drains the `return_queue` via `process_returns()` to reclaim returned frames.
 * **Thread Safety:** The registry itself is NOT wrapped in a Mutex. Instead, it's stored in thread-local storage, ensuring only one thread (the worker) ever accesses it.
 
 ## 5. The Frame Lifecycle Loop
 
-1.  **Initialization:** Each worker's `LocalFrameRegistry` starts with all its owned frames (e.g., Worker 0 owns 0-4095) in the `free_stash`.
+1.  **Initialization:** Each worker's `FrameRegistry` starts with all its owned frames (e.g., Worker 0 owns 0-4095) in the `free_stash` of each `PartitionData`.
 2.  **Fill (Replenish):** `XSocketRx` accesses the worker's registry via thread-local storage, pops frames from `free_stash`, and writes their descriptors to the **Fill Ring**.
 3.  **Receive:** The NIC receives a packet, writes data to the frame in UMEM, and the driver moves the descriptor to the **RX Ring**.
 4.  **Process:** The worker's application code polls the **RX Ring**, gets the descriptor, and processes the packet data.
@@ -80,7 +87,7 @@ The `FrameRegistry` acts as the **Inventory Manager**. It is a container that ma
     * **Path A (TX):** The frame is put onto the **TX Ring**. Once sent, the kernel moves it to the **Completion Ring**. `XSocketTx` drains this ring and sends frames back via `SystemBus`.
     * **Path B (Drop):** The worker checks the frame's ID against its partition.
         * *If Owned by This Worker:* Returns to this worker's registry via `SystemBus` (for consistency).
-        * *If Owned by Different Worker:* Sent via `SystemBus` to the owning worker's `return_rx`.
+        * *If Owned by Different Worker:* Sent via `SystemBus` to the owning worker's `return_queue`.
 
 ## 6. The Three Layers of Addressing
 
@@ -90,7 +97,7 @@ The `FrameRegistry` acts as the **Inventory Manager**. It is a container that ma
 
         Values: 0, 1, 2, ... N
 
-        Purpose: Resource tracking. You use this to know which buffers are free vs. busy. This is what lives in your LocalFrameRegistry.
+        Purpose: Resource tracking. You use this to know which buffers are free vs. busy. This is what lives in the FrameRegistry's free_stash.
 
 2. **The Transport Layer (The Rings)**
 
@@ -210,14 +217,14 @@ The architecture is best understood as a hierarchy of constraints:
 
 ## 5. Summary of Your Rust Structs
 
-* **`UmemGroupConfig`**: Defines the singular "Warehouse" (Umem).
+* **`RuntimeUmemConfig`**: Defines the physical properties of a UMEM group ("the Warehouse"). Created at startup from TOML config; shared via `Arc` among all sockets in the group.
 * **`XSocket`**: Represents a socket bound to a hardware queue. It is split into RX and TX halves for independent pipeline access.
 * **`XSocketRx`**: RX-only component of a split socket. Accesses the worker's frame registry via thread-local storage.
 * **`XSocketTx`**: TX-only component of a split socket. Returns all frames via SystemBus (no direct registry access).
-* **`WorkerFrameRegistry`**: Contains the worker's `LocalFrameRegistry` along with partition info and worker ID.
-* **`LocalFrameRegistry`**: Represents the **Worker's Partition**. It holds the inventory (`free_stash`) for that specific worker. Accessed via thread-local storage within the worker thread.
-* **`SystemBus`**: The mechanism to satisfy the **Ownership Rule** (returning frames between workers). Holds one `Arc<ArrayQueue<u32>>` per worker. Commands are bit-packed into a single u32: bit 31 = command (0=Release, 1=Retain), bits 30-24 = umem_id (7 bits, max 128 UMEMs), bits 23-0 = local_idx.
-* **`UmemPartition`**: Contains `worker_id`, `umem_group_id`, `start_idx`, and `end_idx` to define frame ownership boundaries.
+* **`FrameRegistry`**: The worker's combined frame inventory. Holds `worker_id`, a `return_queue` (`Arc<ArrayQueue<u32>>`), a `bus` reference, and `registry_map: Vec<Option<PartitionData>>` indexed by UMEM group. Stored in thread-local storage — only the owning worker thread accesses it directly.
+* **`PartitionData`** *(inside `FrameRegistry.registry_map`)*: Per-UMEM allocation context for one worker. Holds `free_stash: Vec<u32>` (LIFO stack of available encoded frame indices) and `refcounts: Vec<u16>` (per-frame reference tracking).
+* **`SystemBus`**: The mechanism to satisfy the **Ownership Rule** (returning frames between workers). Holds one `Arc<ArrayQueue<u32>>` per worker (`bus_senders`), plus `umem_partitions: Vec<UmemPartition>` for ownership lookup. Commands are bit-packed into a single u32: bit 31 = command (0=Release, 1=Retain), bits 30-24 = umem_id (7 bits, max 128 UMEMs), bits 23-0 = local_idx.
+* **`UmemPartition`**: Contains `worker_id`, `umem_group_id`, `start_idx`, `end_idx` (global frame index range), plus `local_start` and `local_end` (UMEM-relative index range) to define frame ownership boundaries.
 
 ---
 
@@ -248,7 +255,7 @@ When an `XSocket` is added to the `XSocketRegistry`, it is immediately split int
 * Partition info (to identify owned frames)
 
 **Accesses via Thread-Local Storage:**
-* Worker's `LocalFrameRegistry` (for frame allocation and return processing)
+* Worker's `FrameRegistry` (for frame allocation and return processing)
 
 **Responsibilities:**
 * Poll RX ring for incoming packets
@@ -334,12 +341,13 @@ fn release_frame(&mut self, frame_idx: u32) {
 │         │ (thread-local access)                    │        │
 │         │                                          │        │
 │  ┌──────┴──────────────┐                          │        │
-│  │ LocalFrameRegistry  │◄─────────────────────────┘        │
+│  │ FrameRegistry       │◄─────────────────────────┘        │
 │  │  (via TLS)          │         SystemBus                 │
 │  │                     │         (returns)                 │
-│  │ • free_stash        │                                   │
-│  │ • return_rx         │                                   │
-│  │ • partition         │                                   │
+│  │ • return_queue      │                                   │
+│  │ • registry_map[]    │                                   │
+│  │   (PartitionData)   │                                   │
+│  │   • free_stash      │                                   │
 │  └─────────────────────┘                                   │
 │         ▲                                                   │
 │         │ process_returns()                                │
@@ -356,7 +364,7 @@ fn release_frame(&mut self, frame_idx: u32) {
 1. **No Mutex on Hot Path:**
    - RX has exclusive access to RX ring and fill queue
    - TX has exclusive access to TX ring and completion queue
-   - Worker's LocalFrameRegistry accessed via thread-local storage (lock-free)
+   - Worker's `FrameRegistry` accessed via thread-local storage (lock-free)
    - RX accesses registry for allocation, TX never touches it directly
 
 2. **Frame Circulation:**

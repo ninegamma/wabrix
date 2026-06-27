@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use log::debug;
 use serde::{Serialize, Deserialize};
 use tokio::sync::broadcast::Sender;
 use std::time::Instant;
@@ -68,6 +67,9 @@ impl TelemetryRegistry {
 }
 
 
+/// (node_id, pkt_counters, byte_counters, labels, active_flag) aggregated across workers.
+type AggregatedMetric = (String, Vec<u64>, Vec<u64>, Vec<String>, Option<bool>);
+
 /// Periodically reads pipeline node counters from the TelemetryRegistry and
 /// broadcasts them over the same WebSocket channel as NIC telemetry.
 /// Multiple entries with the same node_id (e.g. from different workers running
@@ -107,7 +109,7 @@ pub fn spawn_pipeline_telemetry(
             // the labels and the initial counter values; subsequent entries for
             // the same id are summed in.
             // active_flag is OR-aggregated: true if ANY worker reports active.
-            let mut seen: Vec<(String, Vec<u64>, Vec<u64>, Vec<String>, Option<bool>)> = Vec::new();
+            let mut seen: Vec<AggregatedMetric> = Vec::new();
 
             for metrics in registry.get_metrics() {
                 let pkts: Vec<u64> = metrics.counters_pkts.iter()
@@ -136,9 +138,6 @@ pub fn spawn_pipeline_telemetry(
             let now = Instant::now();
 
             for (node_id, counters_pkts, counters_bytes, labels, active_flag) in seen {
-                let is_active_run = active_flag
-                    .unwrap_or_else(|| counters_pkts.iter().any(|&v| v > 0));
-
                 let mut rates_pkts = vec![0; counters_pkts.len()];
                 let mut rates_bytes = vec![0; counters_bytes.len()];
 
@@ -389,6 +388,7 @@ pub fn spawn_telemetry_ice(telemetry_tx: Sender<TMLiveStats>, iface_name: String
     Ok(())
 }
 
+#[cfg(test)]
 mod tests {
     use std::path::PathBuf;
     use ts_rs::Config;

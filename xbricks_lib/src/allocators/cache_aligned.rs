@@ -93,6 +93,6 @@ where
     T: fmt::Display,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        T::fmt(&*self, f)
+        T::fmt(self, f)
     }
 }

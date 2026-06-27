@@ -2,11 +2,9 @@ pub mod api;
 mod pcap;
 pub mod logger;
 use std::collections::HashMap;
-use std::env;
-use std::str::FromStr;
 use anyhow::Context;
 use clap::Parser;
-use log::{debug, error, info, LevelFilter};
+use log::{debug, error, info};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use separator::Separatable;
@@ -91,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
     let mut dataplane_active = true;
 
     loop {
-        let mut next_cmd = SystemCommand::Shutdown; // Default failsafe
+        let next_cmd;
 
         if dataplane_active {
             info!("--- Initializing Data Plane ---");

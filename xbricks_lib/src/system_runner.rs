@@ -4,7 +4,7 @@ use core_affinity::CoreId;
 use log::{info};
 use tokio::task::JoinHandle;
 use xsk_rs::Umem;
-use xbricks_base::frame_registry::{FrameRegistry, MAX_UMEM};
+use xbricks_base::frame_registry::FrameRegistry;
 use crate::{PipelineStats, XSocketRegistry};
 use xbricks_base::system::PlatformData;
 use xbricks_base::telemetry::TelemetryRegistry;
@@ -25,6 +25,7 @@ pub struct XBricksSystem {
 impl XBricksSystem {
     /// returns handles of all spawned worker threads, telemetry logger thread, and dst port stats
     /// consumes itself (XBricksSystem)
+    #[allow(clippy::type_complexity)]
     pub fn spawn_workers(
         mut self,
         shutdown: Arc<AtomicBool>,
@@ -50,7 +51,7 @@ impl XBricksSystem {
             let frame_registry = self
                 .frame_registries[worker_id]
                 .take()
-                .expect(&format!("Frame registry for worker {} not found", worker_id));
+                .unwrap_or_else(|| panic!("Frame registry for worker {} not found", worker_id));
 
             // Spawn the worker with all its pipelines and frame registry
             let handle = crate::pipeline::spawn_worker_pipelines(

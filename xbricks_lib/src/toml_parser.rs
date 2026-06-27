@@ -362,6 +362,7 @@ impl XBricksConfig {
         self.xbricks.workers[0].core = core;
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_generator_pipeline(
         &mut self,
         num_workers: usize,
@@ -386,7 +387,7 @@ impl XBricksConfig {
         let packets_per_worker_vec: Vec<u64> = if total_packets == 0 {
             vec![0; num_workers]
         } else {
-            let total_batches = (total_packets + batch_sz as u64 - 1) / batch_sz as u64;
+            let total_batches = total_packets.div_ceil(batch_sz as u64);
             let base_batches_per_worker = total_batches / num_workers as u64;
             let extra_batches = total_batches % num_workers as u64;
 
@@ -434,8 +435,7 @@ impl XBricksConfig {
         }
 
         // Create a separate pipeline for each worker
-        for worker_id in 0..num_workers {
-            let packets_for_this_worker = packets_per_worker_vec[worker_id];
+        for (worker_id, &packets_for_this_worker) in packets_per_worker_vec.iter().enumerate() {
 
             // Naming standard: Even for a single worker, it becomes "generator_0"
             let pipeline = PipelineConfig {
@@ -664,7 +664,7 @@ impl XBricksConfig {
 
             if !is_veth {
                 let output = std::process::Command::new("ip")
-                    .args(&["link", "show", &iface_cfg.name])
+                    .args(["link", "show", &iface_cfg.name])
                     .output()
                     .map_err(|e| anyhow!("Failed to check interface existence: {}", e))?;
 
@@ -899,14 +899,16 @@ impl XBricksConfig {
 
                 // Validate Rx/Tx nodes have queues array matching workers array length
                 if node.node_type == "BatchRxNode" || node.node_type == "BatchTxNode" {
-                    if node.queues.is_some() && node.queues.as_ref().unwrap().len() != pipeline.workers.len() {
-                        return Err(anyhow!(
-                            "Pipeline '{}': node '{}' queues array length ({}) must match workers array length ({})",
-                            pipeline.name,
-                            node.id,
-                            node.queues.as_ref().unwrap().len(),
-                            pipeline.workers.len()
-                        ));
+                    if let Some(queues) = &node.queues {
+                        if queues.len() != pipeline.workers.len() {
+                            return Err(anyhow!(
+                                "Pipeline '{}': node '{}' queues array length ({}) must match workers array length ({})",
+                                pipeline.name,
+                                node.id,
+                                queues.len(),
+                                pipeline.workers.len()
+                            ));
+                        }
                     }
 
                     // Validate referenced interface is defined in ifaces array
@@ -922,25 +924,27 @@ impl XBricksConfig {
                         }
 
                         // Validate that each queue referenced has a corresponding XSK socket
-                        if node.queues.is_some() { for &queue_id in node.queues.as_ref().unwrap() {
-                            let has_xsk_socket = section
-                                .xsk
-                                .iter()
-                                .any(|xsk| xsk.iface == *iface && xsk.queues.contains(&queue_id));
+                        if let Some(queues) = &node.queues {
+                            for &queue_id in queues {
+                                let has_xsk_socket = section
+                                    .xsk
+                                    .iter()
+                                    .any(|xsk| xsk.iface == *iface && xsk.queues.contains(&queue_id));
 
-                            if !has_xsk_socket {
-                                return Err(anyhow!(
-                                    "Pipeline '{}': node '{}' references queue {} on interface '{}', but no XSK socket is configured for this queue.\n\
-                                     Add the queue to xsk config like: {{ iface = \"{}\", queues = [{}], umem = 0, ... }}",
-                                    pipeline.name,
-                                    node.id,
-                                    queue_id,
-                                    iface,
-                                    iface,
-                                    queue_id
-                                ));
+                                if !has_xsk_socket {
+                                    return Err(anyhow!(
+                                        "Pipeline '{}': node '{}' references queue {} on interface '{}', but no XSK socket is configured for this queue.\n\
+                                         Add the queue to xsk config like: {{ iface = \"{}\", queues = [{}], umem = 0, ... }}",
+                                        pipeline.name,
+                                        node.id,
+                                        queue_id,
+                                        iface,
+                                        iface,
+                                        queue_id
+                                    ));
+                                }
                             }
-                        }}
+                        }
                     }
                 }
             }
@@ -1046,6 +1050,7 @@ impl XBricksConfig {
         // Build a map of (interface, queue) -> (pipeline_name, node_id, worker_id)
         // to detect conflicts where two different pipeline instances try to use the same queue
         use std::collections::HashMap;
+        #[allow(clippy::type_complexity)]
         let mut queue_assignments: HashMap<(String, u32), Vec<(String, String, usize)>> = HashMap::new();
 
         for pipeline in &self.pipelines {
@@ -1054,18 +1059,20 @@ impl XBricksConfig {
                 if node.node_type == "BatchRxNode" || node.node_type == "BatchTxNode" {
                     if let Some(interface) = node.args.get("interface") {
                         // Each queue in the node's queues array is assigned to a corresponding worker
-                        if node.queues.is_some() { for (idx, &queue_id) in node.queues.as_ref().unwrap().iter().enumerate() {
-                            if idx < pipeline.workers.len() {
-                                let worker_id = pipeline.workers[idx];
-                                let key = (interface.clone(), queue_id);
+                        if let Some(queues) = &node.queues {
+                            for (idx, &queue_id) in queues.iter().enumerate() {
+                                if idx < pipeline.workers.len() {
+                                    let worker_id = pipeline.workers[idx];
+                                    let key = (interface.clone(), queue_id);
 
-                                queue_assignments.entry(key).or_insert_with(Vec::new).push((
-                                    pipeline.name.clone(),
-                                    node.id.clone(),
-                                    worker_id,
-                                ));
+                                    queue_assignments.entry(key).or_default().push((
+                                        pipeline.name.clone(),
+                                        node.id.clone(),
+                                        worker_id,
+                                    ));
+                                }
                             }
-                        }}
+                        }
                     }
                 }
             }
@@ -1110,44 +1117,46 @@ impl XBricksConfig {
                 if node.node_type == "BatchRxNode" || node.node_type == "BatchTxNode" {
                     if let Some(interface) = node.args.get("interface") {
                         // Each queue maps to a worker (queues[i] -> workers[i])
-                        if node.queues.is_some() { for (idx, &queue_id) in node.queues.as_ref().unwrap().iter().enumerate() {
-                            if idx < pipeline.workers.len() {
-                                let worker_id = pipeline.workers[idx];
+                        if let Some(queues) = &node.queues {
+                            for (idx, &queue_id) in queues.iter().enumerate() {
+                                if idx < pipeline.workers.len() {
+                                    let worker_id = pipeline.workers[idx];
 
-                                // Get the UMEM assigned to this queue via XSK config
-                                if let Some(&xsk_umem_id) = queue_umem_map.get(&(interface.clone(), queue_id)) {
-                                    // Get the worker config to check its UMEM partition allocations
-                                    if let Some(worker_cfg) = section.workers.iter().find(|w| w.id == worker_id) {
-                                        // Check if worker has a partition from the same UMEM as the queue
-                                        let has_matching_umem = worker_cfg.partitions.iter().any(|p| p.umem == xsk_umem_id);
+                                    // Get the UMEM assigned to this queue via XSK config
+                                    if let Some(&xsk_umem_id) = queue_umem_map.get(&(interface.clone(), queue_id)) {
+                                        // Get the worker config to check its UMEM partition allocations
+                                        if let Some(worker_cfg) = section.workers.iter().find(|w| w.id == worker_id) {
+                                            // Check if worker has a partition from the same UMEM as the queue
+                                            let has_matching_umem = worker_cfg.partitions.iter().any(|p| p.umem == xsk_umem_id);
 
-                                        if !has_matching_umem {
-                                            let worker_umems: Vec<usize> =
-                                                worker_cfg.partitions.iter().map(|p| p.umem).collect();
+                                            if !has_matching_umem {
+                                                let worker_umems: Vec<usize> =
+                                                    worker_cfg.partitions.iter().map(|p| p.umem).collect();
 
-                                            return Err(anyhow!(
-                                                "UMEM mismatch: Pipeline '{}', node '{}' assigns queue {} (interface '{}') to worker {}.\n\
-                                                 Queue {} is bound to UMEM {} (via xsk config), but worker {} only has partitions from UMEM(s): {:?}.\n\
-                                                 Worker must have a partition from UMEM {} to use this queue.\n\
-                                                 Fix: Either change worker {} to request a partition from UMEM {} or change the xsk config to use a different UMEM.",
-                                                pipeline.name,
-                                                node.id,
-                                                queue_id,
-                                                interface,
-                                                worker_id,
-                                                queue_id,
-                                                xsk_umem_id,
-                                                worker_id,
-                                                worker_umems,
-                                                xsk_umem_id,
-                                                worker_id,
-                                                xsk_umem_id
-                                            ));
+                                                return Err(anyhow!(
+                                                    "UMEM mismatch: Pipeline '{}', node '{}' assigns queue {} (interface '{}') to worker {}.\n\
+                                                     Queue {} is bound to UMEM {} (via xsk config), but worker {} only has partitions from UMEM(s): {:?}.\n\
+                                                     Worker must have a partition from UMEM {} to use this queue.\n\
+                                                     Fix: Either change worker {} to request a partition from UMEM {} or change the xsk config to use a different UMEM.",
+                                                    pipeline.name,
+                                                    node.id,
+                                                    queue_id,
+                                                    interface,
+                                                    worker_id,
+                                                    queue_id,
+                                                    xsk_umem_id,
+                                                    worker_id,
+                                                    worker_umems,
+                                                    xsk_umem_id,
+                                                    worker_id,
+                                                    xsk_umem_id
+                                                ));
+                                            }
                                         }
                                     }
                                 }
                             }
-                        }}
+                        }
                     }
                 }
             }
@@ -1175,14 +1184,14 @@ impl XBricksConfig {
         for pipeline in &self.pipelines {
             for node in &pipeline.nodes {
                 // If a node has explicit queues assigned (e.g. Rx/Tx nodes)
-                if node.queues.is_some() {
+                if let Some(queues) = &node.queues {
                     // Validation: Ensure queues match workers 1:1
-                    if node.queues.as_ref().unwrap().len() != pipeline.workers.len() {
+                    if queues.len() != pipeline.workers.len() {
                         return Err(anyhow!(
                             "Pipeline '{}': Node '{}' has {} queues but {} workers. Must be equal.",
                             pipeline.name,
                             node.id,
-                            node.queues.as_ref().unwrap().len(),
+                            queues.len(),
                             pipeline.workers.len()
                         ));
                     }
@@ -1190,7 +1199,7 @@ impl XBricksConfig {
                     // Try to identify the interface. Usually passed in 'args'.
                     // If 'interface' is missing, we skip mapping (assuming it's not a hardware-bound node).
                     if let Some(iface) = node.args.get("interface") {
-                        if node.queues.is_some() { for (i, &queue_id) in node.queues.as_ref().unwrap().iter().enumerate() {
+                        for (i, &queue_id) in queues.iter().enumerate() {
                             let worker_id = pipeline.workers[i];
 
                             // Detect conflicts: Two workers cannot own the same queue
@@ -1206,7 +1215,7 @@ impl XBricksConfig {
                                 }
                             }
                             queue_owner_map.insert((iface.clone(), queue_id), worker_id);
-                        }}
+                        }
                     }
                 }
             }
@@ -1340,21 +1349,21 @@ impl XBricksConfig {
                     // 2nd iteration (Worker 2) gets '3'.
                     // The architecture dictates a 1:1 map: queues[i] -> workers[i]
                     let mut assigned_queue = Vec::new();
-                    if node_conf.queues.is_some() {
+                    if let Some(queues) = &node_conf.queues {
                         // Safety check: Ensure the node has enough queues for the assigned workers.
                         // (This should be caught by validate(), but good to check here).
-                        if worker_idx_in_pipeline >= node_conf.queues.as_ref().unwrap().len() {
+                        if worker_idx_in_pipeline >= queues.len() {
                             return Err(anyhow!(
                                 "Configuration Error: Pipeline '{}', Node '{}' has fewer queues ({}) than workers ({})",
                                 pipeline_conf.name,
                                 node_conf.id,
-                                node_conf.queues.as_ref().unwrap().len(),
+                                queues.len(),
                                 pipeline_conf.workers.len()
                             ));
                         }
 
                         // Get the specific queue ID for this worker
-                        assigned_queue = Vec::from([node_conf.queues.as_ref().unwrap()[worker_idx_in_pipeline]]);
+                        assigned_queue = Vec::from([queues[worker_idx_in_pipeline]]);
                     }
 
                     // Create the node instance for the builder
@@ -1394,10 +1403,11 @@ impl XBricksConfig {
 }
 
 
+#[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use ts_rs::Config;
-    use super::*;
+    use ts_rs::{Config, TS};
+    use super::XBricksConfig;
 
     #[test]
     fn check_env() {

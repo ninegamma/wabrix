@@ -1,12 +1,9 @@
 use core::{cmp, fmt, slice};
 use core::ptr;
 use std::ops::Add;
-use log::{debug, trace};
+use log::trace;
 use xsk_rs::FrameDesc;
 use xsk_rs::umem::frame::SegmentLengths;
-use xbricks_protocol::headers::{
-    TcpHeader,
-};
 
 use crate::SystemBus;
 use crate::frame_registry::CMD_BIT;
@@ -140,11 +137,10 @@ impl Pdu {
             frame_size_log2,
             owner_id,
         );
-        let pdu = Pdu {
+        Pdu {
             w,
             system_bus,
-        };
-        pdu
+        }
     }
 
     /// Reconstruct the FrameDesc for transmission
@@ -189,8 +185,12 @@ impl Pdu {
     }
 
     /// try get Umem pointer from SystemBus
+    ///
+    /// # Safety
+    /// Caller must ensure `system_bus` is either null or points to a valid `SystemBus`
+    /// that lives at least as long as this `Pdu`.
     #[inline(always)]
-     pub unsafe fn try_umem_addr(&self) -> Option<usize> {
+    pub unsafe fn try_umem_addr(&self) -> Option<usize> {
         // 1. Safe Null Check (Prevents Segfaults)
         if self.system_bus.is_null() {
             return None;
@@ -266,7 +266,7 @@ impl Pdu {
             x if x == headers - 1 => {
                 let mut h = self.headers().get(self.base_addr(), x);
                 // Assume Header has .offset() returning length
-                Some(unsafe { h.as_ptr_u8_mut().unwrap().offset(h.offset().unwrap() as isize) })
+                Some(unsafe { h.as_ptr_u8_mut().unwrap().add(h.offset().unwrap()) })
             }
             _ => None,
         }
@@ -283,7 +283,7 @@ impl Pdu {
                         .get(self.base_addr(), x)
                         .as_ptr_u8()
                         .unwrap()
-                        .offset(self.headers().get(self.base_addr(), x).offset().unwrap() as isize)
+                        .add(self.headers().get(self.base_addr(), x).offset().unwrap())
                 }),
             _ => None,
         }
@@ -394,13 +394,12 @@ impl Pdu {
 
     pub fn ipv4_src(&self) -> Option<u32> {
         if let Some(umem_addr) = unsafe { self.try_umem_addr() } {
-            self.w.ipv4_src(umem_addr as usize)
+            self.w.ipv4_src(umem_addr)
         } else { None }
     }
 }
 
 #[cfg(test)]
-
 mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
@@ -541,8 +540,8 @@ mod tests {
             frame_size_log2,
         );
 
-        let mut header_size;
-        let mut header;
+        let header_size;
+        let header;
         {
             // SAFETY: Pdu and Pdu0 are both repr(C, align(64)) with identical layouts (WPdu + 8-byte pad).
             let mut packet = Packet::new(unsafe { &mut *(&mut pdu as *mut Pdu as *mut Pdu0) }, umem_base as usize);
@@ -585,7 +584,7 @@ mod tests {
         );
         
         // SAFETY: same layout as above.
-        let mut packet = Packet::new(unsafe { &mut *(&mut pdu as *mut Pdu as *mut Pdu0) }, umem_base as usize);
+        let packet = Packet::new(unsafe { &mut *(&mut pdu as *mut Pdu as *mut Pdu0) }, umem_base as usize);
         // C. Verify Memory Content
         unsafe {
             let current_data_ptr = packet.data_ptr();

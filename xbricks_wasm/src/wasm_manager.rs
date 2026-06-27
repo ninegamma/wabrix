@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use dashmap::DashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, LinearMemory, MemoryCreator, MemoryType, OptLevel, Result};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
@@ -9,7 +9,7 @@ use crate::wasm_engine;
 
 // A thread-local slot to securely hold the partition handle during instantiation
 thread_local! {
-    static CURRENT_INSTANTIATION_HANDLE: RefCell<Option<Arc<UmemHandle>>> = RefCell::new(None);
+    static CURRENT_INSTANTIATION_HANDLE: RefCell<Option<Arc<UmemHandle>>> = const { RefCell::new(None) };
 }
 
 // --- 1. Memory Layer (The Zero-Copy Bridge) ---
