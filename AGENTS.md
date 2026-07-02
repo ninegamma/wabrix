@@ -14,6 +14,8 @@ These repositories implement a high-performance, software-based networking engin
 2. **Predictable Latency:** Favor deterministic execution paths over peak theoretical throughput.
 3. **Strict Memory Safety:** Leverage Rust's type system to guarantee safety across the Native ↔ Wasm boundary.
 
+***This file is for the xbrix repository, only.***
+
 ---
 
 ## 2. Workspace Structure & Module Boundaries

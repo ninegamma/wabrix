@@ -346,9 +346,9 @@ use xbricks_base::system::rdtsc_us;
 use rustix::event::{PollFd, PollFlags, poll};
 use rustix::io::Errno;
 use separator::Separatable;
+use xbricks_protocol::MAX_BATCH_SIZE;
 use xbricks_base::{RuntimeUmemConfig, SystemBus};
 use xbricks_base::frame_registry::{get_tsc_frequency, get_worker_frame_registry, encode_global_frame, decode_global_frame};
-use xbricks_base::interface::batch::MAX_BATCH_SIZE;
 
 impl XSocketRx {
     /// Returns the UMEM group ID for this socket

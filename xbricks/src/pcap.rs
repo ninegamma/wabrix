@@ -138,7 +138,8 @@ impl Node for PcapRxNode {
 use std::io::BufWriter;
 use std::time::{SystemTime, UNIX_EPOCH};
 use pcap_file::pcap::{PcapWriter, PcapPacket};
-use xbricks_base::interface::batch::{Batch, MAX_BATCH_SIZE};
+use xbricks_protocol::MAX_BATCH_SIZE;
+use xbricks_base::interface::batch::{Batch};
 use xbricks_base::{Directive, Node, NodeId};
 use xbricks_base::frame_registry::get_worker_frame_registry;
 

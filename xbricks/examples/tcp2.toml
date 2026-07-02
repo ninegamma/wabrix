@@ -6,18 +6,19 @@ ifaces= [
     { name = "veth_xbricks_1", rxd = 1024, txd = 1024, type = "veth", namespace = "ns-xbricks_1", peer = "tap-veth-1", mac_if = "enp2s0f1np1", ipnet = "10.10.10.31/24", checksum_offload = false },
 ]
 umem= [
-    { id = 0, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 2, reserved = 32768 },
-    { id = 1, frame_size = 2048, frame_count = 131072, fq_size = 16384, cq_size = 16384, head_room = 128, partitions = 2, reserved = 10240 },
+    { id = 0, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 2, reserved = 131072 },
+    { id = 1, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 2, reserved = 131072 },
+    { id = 2, frame_size = 2048, frame_count = 131072, fq_size = 16384, cq_size = 16384, head_room = 128, partitions = 2, reserved = 10240 },
 ]
 xsk= [
     { iface = "enp2s0f0np0", queues = [0], umem = 0, rxq_size = 16384, txq_size = 16384, zerocopy = true, xdp_mode = "auto" },
-    { iface = "veth_xbricks", queues = [0], umem = 1, rxq_size = 4096, txq_size = 4096, zerocopy = false, xdp_mode = "auto" },
-    { iface = "enp2s0f1np1", queues = [0], umem = 0, rxq_size = 16384, txq_size = 16384, zerocopy = true, xdp_mode = "auto" },
-    { iface = "veth_xbricks_1", queues = [0], umem = 1, rxq_size = 4096, txq_size = 4096, zerocopy = false, xdp_mode = "auto" },
+    { iface = "veth_xbricks", queues = [0], umem = 2, rxq_size = 4096, txq_size = 4096, zerocopy = false, xdp_mode = "auto" },
+    { iface = "enp2s0f1np1", queues = [0], umem = 1, rxq_size = 16384, txq_size = 16384, zerocopy = true, xdp_mode = "auto" },
+    { iface = "veth_xbricks_1", queues = [0], umem = 2, rxq_size = 4096, txq_size = 4096, zerocopy = false, xdp_mode = "auto" },
 ]
 workers= [
-    { id = 0, core = 7, partitions = [{ umem = 0, count = 1 }, { umem = 1, count = 1 }] },
-    { id = 1, core = 9, partitions = [{ umem = 0, count = 1 }, { umem = 1, count = 1 }] },
+    { id = 0, core = 7, partitions = [{ umem = 0, count = 1 }, { umem = 2, count = 1 }] },
+    { id = 1, core = 9, partitions = [{ umem = 1, count = 1 }, { umem = 2, count = 1 }] },
 ]
 
 # ===================================================================
@@ -26,7 +27,7 @@ workers= [
 [[pipelines]]
 name = "unified_nic0"
 workers = [0]
-poll_frequency = 5000
+poll_frequency = 10000
 
 [[pipelines.nodes]]
 id = "rx_source"
@@ -55,7 +56,7 @@ hot_args= {}
 id = "tcp_engine"
 type = "WasmEngine"
 routes = ["shared_tx_sink", "veth_sink", "drop"]
-labels = ["SentSyn", "SentSynAck", "SentSynAck2", "SentFin", "SentFinPssv", "SentAck4Fin", "SentAck", "SentRst", "RecvSyn", "RecvSynAck", "RecvSynAck2", "RecvFin", "RecvFinPssv", "RecvAck4Fin", "RecvAck", "RecvRst", "Unexpected", "RecvPayload", "SentPayload", "TickDrop", "ToLinux", "Drop"]
+labels = ["SentSyn", "SentSynAck", "SentSynAck2", "SentFin", "SentFinPssv", "SentAck4Fin", "SentAck", "SentRst", "RecvSyn", "RecvSynAck", "RecvSynAck2", "RecvFin", "RecvFinPssv", "RecvAck4Fin", "RecvAck", "RecvRst", "Unexpected", "RecvPayload", "SentPayload", "TickDrop", "ToLinux", "Drop", "Watermark"]
 args= { umem = "0", wasm_file_path = "/home/rainer1956/rust/xbricks_public/target/wasm32-wasip2/release/tcp_engine.wasm" }
 hot_args= {}
 
@@ -66,7 +67,7 @@ close_timeout = "100"
 syn_limit = "100M"
 dst_ip = "10.10.10.31"
 src_ip = "10.10.10.222"
-syn_rate = "1500k"
+syn_rate = "2000k"
 
 [[pipelines.nodes]]
 id = "nd_parser_veth"
@@ -80,7 +81,7 @@ id = "nd_icmp_filter"
 type = "WasmInspectorNode"
 routes = ["shared_tx_sink", "drop"]
 labels = ["icmp ping", "icmp reply", "icmp other", "any other"]
-args= { wasm_file_path = "/home/rainer1956/rust/xbricks_public/target/wasm32-wasip2/release/icmp_filter.wasm", umem = "1" }
+args= { wasm_file_path = "/home/rainer1956/rust/xbricks_public/target/wasm32-wasip2/release/icmp_filter.wasm", umem = "2" }
 hot_args= {}
 
 [[pipelines.nodes]]
@@ -112,7 +113,7 @@ hot_args= {}
 [[pipelines]]
 name = "unified_nic1"
 workers = [1]
-poll_frequency = 5000
+poll_frequency = 10000
 
 [[pipelines.nodes]]
 id = "rx_source"
@@ -141,8 +142,8 @@ hot_args= {}
 id = "tcp_engine"
 type = "WasmEngine"
 routes = ["shared_tx_sink", "veth_sink", "drop"]
-labels = ["SentSyn", "SentSynAck", "SentSynAck2", "SentFin", "SentFinPssv", "SentAck4Fin", "SentAck", "SentRst", "RecvSyn", "RecvSynAck", "RecvSynAck2", "RecvFin", "RecvFinPssv", "RecvAck4Fin", "RecvAck", "RecvRst", "Unexpected", "RecvPayload", "SentPayload", "TickDrop", "ToLinux", "Drop"]
-args= { umem = "0", wasm_file_path = "/home/rainer1956/rust/xbricks_public/target/wasm32-wasip2/release/tcp_engine.wasm" }
+labels = ["SentSyn", "SentSynAck", "SentSynAck2", "SentFin", "SentFinPssv", "SentAck4Fin", "SentAck", "SentRst", "RecvSyn", "RecvSynAck", "RecvSynAck2", "RecvFin", "RecvFinPssv", "RecvAck4Fin", "RecvAck", "RecvRst", "Unexpected", "RecvPayload", "SentPayload", "TickDrop", "ToLinux", "Drop", "Watermerk"]
+args= { umem = "1", wasm_file_path = "/home/rainer1956/rust/xbricks_public/target/wasm32-wasip2/release/tcp_engine.wasm" }
 hot_args= {}
 
 [pipelines.nodes.wasm_data]
@@ -162,7 +163,7 @@ id = "nd_icmp_filter"
 type = "WasmInspectorNode"
 routes = ["shared_tx_sink", "drop"]
 labels = ["icmp ping", "icmp reply", "icmp other", "any other"]
-args= { umem = "1", wasm_file_path = "/home/rainer1956/rust/xbricks_public/target/wasm32-wasip2/release/icmp_filter.wasm" }
+args= { umem = "2", wasm_file_path = "/home/rainer1956/rust/xbricks_public/target/wasm32-wasip2/release/icmp_filter.wasm" }
 hot_args= {}
 
 [[pipelines.nodes]]

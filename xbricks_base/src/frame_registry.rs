@@ -4,8 +4,8 @@ use core::mem::MaybeUninit;
 use crossbeam_queue::ArrayQueue;
 use xsk_rs::Umem;
 use log::debug;
+use xbricks_protocol::MAX_BATCH_SIZE;
 use crate::{RuntimeUmemConfig, SystemBus, UmemPartition};
-use crate::interface::batch::MAX_BATCH_SIZE;
 use crate::interface::Pdu;
 
 // Thread-local storage for the worker's frame registry pointer

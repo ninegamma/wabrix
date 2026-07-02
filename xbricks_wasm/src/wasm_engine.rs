@@ -5,8 +5,9 @@ use crate::wasm_manager::{MyHostState, WasmManager}; // Assuming WasmManager is 
 use wasmtime::Store;
 use wasmtime::component::{bindgen, ResourceTable};
 use wasmtime_wasi::WasiCtxBuilder;
+use xbricks_protocol::MAX_BATCH_SIZE;
 use xbricks_base::{ControlEvent, Directive, Node, NodeId};
-use xbricks_base::interface::batch::{Batch, MAX_BATCH_SIZE};
+use xbricks_base::interface::batch::{Batch};
 use xbricks_base::interface::Pdu;
 use xbricks_base::telemetry::TelemetryMetrics;
 use xbricks_base::frame_registry::get_worker_frame_registry;
@@ -103,7 +104,9 @@ impl WasmEngine {
             let data: Vec<(String, String)> = wasm_data.into_iter().collect();
             bindings.xbricks_plugins_packet_engine()
                 .call_init_data(&mut store, &data, platform_data.tsc_frequency)
-                .expect("Failed to call init-data on packet-engine");
+                .unwrap_or_else(|e| {
+                    log::error!("Failed to call init-data on packet-engine: {}", e);
+                });
         }
 
         Self {
@@ -145,7 +148,7 @@ impl WasmEngine {
                 .call_process_batch(&mut self.store, batch_bytes, self.partition_start_bytes)
                 .unwrap_or_else(|e| {
                     log::error!("Wasm execution failed: {}", e);
-                    (vec![255; len], vec![0; len]) // 255 = DROP fallback
+                    0 // 255 = DROP fallback
                 })
         };
         if action_vector.len() != len || lengths_vector.len() != len {

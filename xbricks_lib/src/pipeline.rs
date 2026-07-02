@@ -14,9 +14,9 @@ use xbricks_base::system::PlatformData;
 use separator::Separatable;
 use tokio::sync::broadcast::{Receiver, Sender};
 use xbricks_protocol::helpers::parse_suffixed_number;
+use xbricks_protocol::MAX_BATCH_SIZE;
 use xbricks_base::frame_registry::{set_tsc_frequency, set_worker_frame_registry};
 use xbricks_base::{ControlEvent, Directive, Node, NodeId};
-use xbricks_base::interface::batch::MAX_BATCH_SIZE;
 use crate::config::hot_config::{HotNodeData, HotPipelineConfig, NodeDynamicState};
 #[cfg(feature = "wasm")]
 use xbricks_wasm::wasm_manager::WasmManager;
