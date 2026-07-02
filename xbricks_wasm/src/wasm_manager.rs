@@ -5,6 +5,7 @@ use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, LinearMemory, MemoryCreator, MemoryType, OptLevel, Result};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use xsk_rs::Umem;
+use xbricks_base::mailbox::{BatchMetadata, control_block_frames, MAILBOX_STRIDE};
 use crate::wasm_engine;
 
 // A thread-local slot to securely hold the partition handle during instantiation
@@ -16,38 +17,59 @@ thread_local! {
 
 /// Thread-safe handle to the mmap'd AF_XDP UMEM region.
 ///
-/// Each `WasmInspectorNode` instance gets its own handle with a distinct
-/// `partition_start_bytes` so that WASM address 0 maps to the start of
-/// that instance's reserved scratchpad. The window then extends to the
-/// end of the full Umem, giving the plugin access to all packet frames
-/// above the reserved region.
-///
 /// Memory layout (host-side byte offsets from Umem base):
 /// ```
-/// [0 .. reserved_bytes)         reserved region, split into equal partitions
-/// [reserved_bytes .. total_size) packet-frame region, accessible to all instances
+/// [0 .. control_block_bytes)              Control Block: per-instance BatchMetadata mailboxes
+/// [control_block_bytes .. reserved_bytes) Per-instance WASM heap/stack partitions
+/// [reserved_bytes .. total_size)          AF_XDP payload frames (accessible to all instances)
 /// ```
-/// For instance N with `partition_start_bytes = N * partition_size`:
-/// ```
-/// WASM addr 0                   == host offset partition_start_bytes
-/// WASM addr partition_size      == host offset reserved_bytes (packet frames begin)
-/// WASM addr (total - start - 1) == last byte of Umem
-/// ```
+/// For instance N, WASM address 0 maps to `control_block_bytes + N * scratchpad_size`.
 #[derive(Clone)]
 pub struct UmemHandle {
     pub ptr: *mut u8,
     /// Total Umem size in bytes (`frame_count * frame_size`).
     pub size: usize,
     /// Byte offset from `ptr` where this instance's WASM address 0 begins.
-    /// Zero for non-partitioned or first-instance use.
     pub partition_start_bytes: u32,
     /// Number of frames at the start of the UMEM exclusively reserved for WASM plugins.
     /// Byte range: [0, reserved_frames * frame_size).
     pub reserved_frames: u32,
     pub frame_size: u32,
+    /// Number of WASM plugin instances sharing this UMEM. Determines Control Block size.
+    pub instance_count: u32,
 }
 
 impl UmemHandle {
+    /// Number of UMEM frames occupied by the Control Block (all per-instance mailboxes).
+    #[inline]
+    pub fn control_block_frame_count(&self) -> u32 {
+        control_block_frames(self.instance_count, self.frame_size)
+    }
+
+    /// Byte size of the Control Block at UMEM offset 0.
+    #[inline]
+    pub fn control_block_bytes(&self) -> usize {
+        self.control_block_frame_count() as usize * self.frame_size as usize
+    }
+
+    /// UMEM-relative byte offset to instance N's `BatchMetadata` mailbox.
+    #[inline]
+    pub fn mailbox_offset(&self, instance_idx: u32) -> u32 {
+        instance_idx * MAILBOX_STRIDE as u32
+    }
+
+    /// Raw pointer to instance N's `BatchMetadata` within the shared UMEM.
+    ///
+    /// # Safety
+    /// Caller must ensure exclusive access to this instance's mailbox slice and that
+    /// `instance_idx < instance_count`. Control Block frames are excluded from the
+    /// AF_XDP Fill Queue so the NIC never DMAs here.
+    #[inline]
+    pub unsafe fn mailbox_ptr(&self, instance_idx: u32) -> *mut BatchMetadata {
+        // SAFETY: caller guarantees the slice is exclusively owned.
+        unsafe { self.ptr.add(self.mailbox_offset(instance_idx) as usize) as *mut BatchMetadata }
+    }
+
     /// Byte size of the region reserved exclusively for WASM plugins: [0, reserved_bytes()).
     #[inline]
     pub fn reserved_bytes(&self) -> usize {
@@ -55,7 +77,6 @@ impl UmemHandle {
     }
 
     /// Size of the WASM linear memory window: from `partition_start_bytes` to end of Umem.
-    /// This covers both the instance's own scratchpad partition and all packet frames above.
     #[inline]
     pub fn window_size_bytes(&self) -> usize {
         self.size - (self.partition_start_bytes as usize)
@@ -140,7 +161,16 @@ pub struct WasmManager {
 }
 
 impl WasmManager {
-    pub fn new(frame_size: u32, reserved_frames: u32, frame_count: u32, umem: Arc<Umem>) -> Result<Self> {
+    pub fn new(frame_size: u32, reserved_frames: u32, frame_count: u32, umem: Arc<Umem>, instance_count: u32) -> Result<Self> {
+        let min_ctrl = control_block_frames(instance_count, frame_size);
+        if reserved_frames < min_ctrl {
+            return Err(wasmtime::Error::msg(format!(
+                "WasmManager: reserved_frames ({}) is too small to hold the Control Block \
+                 ({} frames needed for {} instances × {} B mailbox)",
+                reserved_frames, min_ctrl, instance_count, MAILBOX_STRIDE
+            )));
+        }
+
         let umem_ptr = umem.as_ptr();
         let total_umem_size = frame_count as usize * frame_size as usize;
         let umem_handle = Arc::new(UmemHandle {
@@ -149,6 +179,7 @@ impl WasmManager {
             partition_start_bytes: 0,
             reserved_frames,
             frame_size,
+            instance_count,
         });
 
         let mut config = Config::new();
@@ -293,6 +324,7 @@ impl WasmManager {
             partition_start_bytes,
             reserved_frames: self.umem.reserved_frames,
             frame_size: self.umem.frame_size,
+            instance_count: self.umem.instance_count,
         })
     }
 }

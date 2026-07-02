@@ -82,11 +82,11 @@ impl SystemBuilder {
             umem_groups[config.umem_config.group_id].get_or_insert_with(Vec::new).push(config);
         }
 
-        // Pre-scan: count WASM instances per umem_id and adjust reserved_frames to be
-        // evenly divisible before partition layout and WasmManager creation.
+        // Pre-scan: count WASM instances per umem_id and adjust reserved_frames so that
+        // the Control Block fits and the remaining scratchpad is evenly divisible by instance count.
         #[cfg(feature = "wasm")]
-        {
-            let mut wasm_counts = vec![0usize; MAX_UMEM];
+        let wasm_counts: Vec<usize> = {
+            let mut counts = vec![0usize; MAX_UMEM];
             for worker in &self.workers {
                 for pipeline in &worker.pipelines {
                     for node in &pipeline.node_instances {
@@ -94,7 +94,7 @@ impl SystemBuilder {
                             if let Some(id_str) = node.node_config.args.get("umem") {
                                 if let Ok(uid) = id_str.parse::<usize>() {
                                     if uid < MAX_UMEM {
-                                        wasm_counts[uid] += 1;
+                                        counts[uid] += 1;
                                     }
                                 }
                             }
@@ -102,30 +102,33 @@ impl SystemBuilder {
                     }
                 }
             }
-            for (uid, &count) in wasm_counts.iter().enumerate() {
+            for (uid, &count) in counts.iter().enumerate() {
                 if count == 0 { continue; }
                 if let Some(umem_conf_arc) = self.runtime_umems[uid].as_ref() {
                     let orig = umem_conf_arc.reserved_frames;
                     let frame_size = umem_conf_arc.frame_size;
-                    let adjusted = (orig / count as u32) * count as u32;
+                    let cb_frames = xbricks_base::mailbox::control_block_frames(count as u32, frame_size);
+                    let scratchpad = orig.saturating_sub(cb_frames);
+                    let per_instance = if count > 0 { scratchpad / count as u32 } else { 0 };
+                    let adjusted = cb_frames + per_instance * count as u32;
                     if adjusted != orig {
                         let mut new_conf = (**umem_conf_arc).clone();
                         new_conf.reserved_frames = adjusted;
                         self.runtime_umems[uid] = Some(Arc::new(new_conf));
                         log::info!(
-                            "UMEM {}: reserved_frames reduced from {} to {} to be evenly divisible by {} WASM instance(s)",
-                            uid, orig, adjusted, count
+                            "UMEM {}: reserved_frames adjusted from {} to {} \
+                             (control_block={} + {}×{} scratchpad frames)",
+                            uid, orig, adjusted, cb_frames, count, per_instance
                         );
                     }
-                    let frames_per_instance = adjusted / count as u32;
-                    let mb_per_instance = frames_per_instance as f64 * frame_size as f64 / (1024.0 * 1024.0);
                     log::info!(
-                        "UMEM {}: each of {} WASM node(s) gets {} reserved frame(s) ({:.2} MB)",
-                        uid, count, frames_per_instance, mb_per_instance
+                        "UMEM {}: {} WASM instance(s): control_block={} frames, {} scratchpad frames each",
+                        uid, count, cb_frames, per_instance
                     );
                 }
             }
-        }
+            counts
+        };
 
         // 3. Calculate partition allocation for each worker
         // Indexed by worker_id (0..num_workers).
@@ -361,7 +364,7 @@ impl SystemBuilder {
                 if umem_conf.reserved_frames > 0 {
                     if let Some((umem, _)) = &initialized_umems[umem_id] {
                         self.wasm_managers[umem_id] = Some(Arc::new(
-                            WasmManager::new(umem_conf.frame_size, umem_conf.reserved_frames, umem_conf.frame_count, umem.clone())?
+                            WasmManager::new(umem_conf.frame_size, umem_conf.reserved_frames, umem_conf.frame_count, umem.clone(), wasm_counts[umem_id] as u32)?
                         ));
                     } else {
                         log::error!("🔥 Failed to initialize WASM Manager for UMEM {}. Umem not found.", umem_id);
@@ -417,38 +420,9 @@ impl SystemBuilder {
         xbricks_system.shared_state = shared_state.clone();
         // ==========================================================
 
-        // Pre-scan: count WASM instances per umem_id so we can
-        // divide the reserved region into equal partitions.
+        // Reuse the wasm_counts computed in the pre-scan above.
         #[cfg(feature = "wasm")]
-        let wasm_instance_totals: Vec<usize> = {
-            let mut totals = vec![0usize; MAX_UMEM];
-            for worker in &self.workers {
-                for pipeline in &worker.pipelines {
-                    for node in &pipeline.node_instances {
-
-                        // GENERIC WASM DETECTOR: Does this node load a WASM plugin?
-                        if node.node_config.args.contains_key("wasm_file_path") {
-
-                            // If it uses WASM, it MUST be bound to a UMEM
-                            if let Some(id_str) = node.node_config.args.get("umem") {
-                                if let Ok(uid) = id_str.parse::<usize>() {
-                                    if uid < MAX_UMEM {
-                                        totals[uid] += 1;
-                                    }
-                                }
-                            } else {
-                                log::warn!(
-                                    "Node '{}' has a 'wasm_file_path' but no 'umem' argument!",
-                                    node.node_instance_id
-                                );
-                            }
-                        }
-
-                    }
-                }
-            }
-            totals
-        };
+        let wasm_instance_totals: Vec<usize> = wasm_counts.clone();
         #[cfg(feature = "wasm")]
         let mut wasm_instance_counters= vec![0u32; MAX_UMEM];
 

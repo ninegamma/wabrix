@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::mem::MaybeUninit;
 use std::sync::atomic::Ordering;
-use crate::wasm_manager::{MyHostState, WasmManager}; // Assuming WasmManager is defined here
+use crate::wasm_manager::{MyHostState, WasmManager};
 use wasmtime::Store;
 use wasmtime::component::{bindgen, ResourceTable};
 use wasmtime_wasi::WasiCtxBuilder;
@@ -9,6 +9,7 @@ use xbricks_protocol::MAX_BATCH_SIZE;
 use xbricks_base::{ControlEvent, Directive, Node, NodeId};
 use xbricks_base::interface::batch::{Batch};
 use xbricks_base::interface::Pdu;
+use xbricks_base::mailbox::BatchMetadata;
 use xbricks_base::telemetry::TelemetryMetrics;
 use xbricks_base::frame_registry::get_worker_frame_registry;
 use xbricks_base::system::PlatformData;
@@ -37,10 +38,9 @@ pub struct WasmEngine {
     total_cycles: u64,
     telemetry_metrics: TelemetryMetrics,
     /// Byte offset from Umem base where WASM address 0 begins for this instance.
-    /// Used to translate `desc_addr` values to partition-relative WASM addresses
-    /// before calling the plugin, and back to absolute offsets after.
-    /// Zero for the first (or only) instance.
     partition_start_bytes: u32,
+    /// UMEM-relative byte offset of this instance's BatchMetadata mailbox.
+    mailbox_offset: u32,
     /// The Umem this node is bound to. Every incoming PDU must carry this id.
     umem_id: u8,
     /// Set permanently true once call_get_telemetry() returns non-empty stats.
@@ -63,6 +63,7 @@ impl WasmEngine {
         umem_id: u8,
         wasm_data: HashMap<String, String>,
         platform_data: &PlatformData,
+        mailbox_offset: u32,
     ) -> Self {
         // 1. Fetch the Component from the Manager's DashMap cache
         // This takes nanoseconds if already loaded, avoiding disk I/O.
@@ -120,6 +121,7 @@ impl WasmEngine {
             total_cycles: 0,
             telemetry_metrics,
             partition_start_bytes,
+            mailbox_offset,
             umem_id,
             supports_oob_telemetry: false,
             poisoned: false,
@@ -135,27 +137,37 @@ impl WasmEngine {
         }
 
         // ==========================================================
-        // 1. WASM EXECUTION
+        // 1. POPULATE MAILBOX & CALL PLUGIN
         // ==========================================================
-        let active_bytes = len * size_of::<Pdu>();
-        let (action_vector, lengths_vector): (Vec<u32>, Vec<u32>) = {
-            let batch_bytes: &[u8] = unsafe {
-                std::slice::from_raw_parts(batch.as_ptr(), active_bytes)
-            };
 
-            self.bindings
-                .xbricks_plugins_packet_engine()
-                .call_process_batch(&mut self.store, batch_bytes, self.partition_start_bytes)
-                .unwrap_or_else(|e| {
-                    log::error!("Wasm execution failed: {}", e);
-                    0 // 255 = DROP fallback
-                })
+        // Capture the raw mailbox pointer before mutably borrowing self.store.
+        // SAFETY: Control Block frames are excluded from the AF_XDP Fill Queue;
+        // this instance's mailbox slice is exclusively owned by this thread
+        // during the entire call window (write before call, read after return).
+        let mailbox_ptr: *mut BatchMetadata = {
+            let base = self.store.data().umem.ptr;
+            // SAFETY: mailbox_offset is within the Control Block, which the host
+            // guarantees is backed by allocated UMEM memory.
+            unsafe { base.add(self.mailbox_offset as usize) as *mut BatchMetadata }
         };
-        if action_vector.len() != len || lengths_vector.len() != len {
-            log::error!(
-                "Wasm {}: mismatched action/lengths (got {}/{}, expected {}). Engine POISONED — all packets dropped until restart.",
-                self.id, action_vector.len(), lengths_vector.len(), len
-            );
+
+        unsafe {
+            let m = &mut *mailbox_ptr;
+            for (i, pdu) in batch.iter().enumerate() {
+                m.desc_addrs[i] = pdu.w.desc_addr as u32;
+                m.lengths[i]    = pdu.w.data_len();
+            }
+        }
+
+        let status = self.bindings
+            .xbricks_plugins_packet_engine()
+            .call_process_batch(&mut self.store, len as u32, self.partition_start_bytes, self.mailbox_offset)
+            .unwrap_or_else(|e| {
+                log::error!("NODE {}: Wasm execution failed: {}", self.id, e);
+                u32::MAX
+            });
+
+        if status == u32::MAX {
             batch.clear();
             self.poisoned = true;
             return Directive::Stop;
@@ -166,17 +178,14 @@ impl WasmEngine {
         // ==========================================================
         self.batch_count = self.batch_count.wrapping_add(1);
 
-        // 1. Safely read the atomic flag (evaluates to false if the Option is None)
         let control_plane_wants_sync = match &self.telemetry_metrics.force_sync_flag {
             Some(flag) => flag.load(Ordering::Relaxed),
             None => false,
         };
 
-        // 2. Evaluate the trigger: Mask hit OR Control Plane requested it
-        let is_telemetry_tick = /* (self.batch_count & 0x3FF) == 0 || */ control_plane_wants_sync;
+        let is_telemetry_tick = control_plane_wants_sync;
         if control_plane_wants_sync { log::debug!("NODE {}: TELEMETRY SYNC REQUESTED", self.id); }
         if is_telemetry_tick {
-            // Acknowledge and reset the flag *only* if we are actually syncing
             if let Some(flag) = &self.telemetry_metrics.force_sync_flag {
                 flag.store(false, Ordering::Relaxed);
             }
@@ -189,8 +198,6 @@ impl WasmEngine {
 
             if !out_of_band_stats.is_empty() {
                 self.supports_oob_telemetry = true;
-                // Wasm maintains the absolute total.
-                // We safely overwrite the host atomics with the absolute values.
                 log::debug!("NODE {}: Extracted {} OOB telemetry packets", self.id, out_of_band_stats.len());
                 for (idx, &count) in out_of_band_stats.iter().enumerate() {
                     if idx < self.telemetry_metrics.counters_pkts.len() {
@@ -201,32 +208,33 @@ impl WasmEngine {
         }
 
         // ==========================================
-        // 3. MUTATION PHASE
+        // 3. MUTATION PHASE — read new_lengths from mailbox
         // ==========================================
-        for (i, pdu) in batch.iter_mut().enumerate() {
-            let new_len = lengths_vector[i];
-            if new_len > 0 {
-                pdu.w.set_data_length(new_len);
+        // SAFETY: WASM call returned; we have exclusive access again.
+        unsafe {
+            let m = &*mailbox_ptr;
+            for (i, pdu) in batch.iter_mut().enumerate() {
+                let new_len = m.new_lengths[i];
+                if new_len > 0 {
+                    pdu.w.set_data_length(new_len);
+                }
             }
         }
 
         // ==========================================
-        // 4. ROUTING PHASE
+        // 4. ROUTING PHASE — read actions from mailbox
         // ==========================================
         let num_routes = self.routing_table.len();
         let mut outputs: Vec<Batch> = std::iter::repeat_with(Batch::new).take(num_routes).collect();
         let mut pdu_index = 0;
 
         batch.distribute(&mut outputs, |pdu| {
-            let action = action_vector[pdu_index];
+            // SAFETY: exclusive access restored after WASM returned.
+            let action = unsafe { (*mailbox_ptr).actions[pdu_index] };
             pdu_index += 1;
 
-            // OLD METHOD FALLBACK: Only extract in-band telemetry if WASM has no OOB support.
-            // supports_oob_telemetry is set permanently once call_get_telemetry() returns data,
-            // preventing spurious counter increments between telemetry ticks.
             if !self.supports_oob_telemetry {
                 let telemetry_bucket = ((action >> 16) & 0xFF) as usize;
-
                 if telemetry_bucket < self.telemetry_metrics.counters_pkts.len() {
                     self.telemetry_metrics.counters_pkts[telemetry_bucket].fetch_add(1, Ordering::Relaxed);
                     self.telemetry_metrics.counters_bytes[telemetry_bucket].fetch_add(pdu.w.data_len() as u64, Ordering::Relaxed);

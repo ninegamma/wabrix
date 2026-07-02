@@ -379,11 +379,15 @@ impl PipelineFactory {
                             .as_ref()
                             .ok_or(format!("PacketGenerator {}: no WasmManager for umem {}", node_instance.node_config.id, umem_group_id))?;
 
-                        // Compute this instance's reserved-memory partition
+                        // Compute this instance's reserved-memory partition (after Control Block).
                         let instance_idx = wasm_instance_counters[umem_group_id];
                         let total_instances = wasm_instance_totals[umem_group_id].max(1);
-                        let frames_per_instance = manager.umem().reserved_frames / total_instances as u32;
-                        let p_start = instance_idx * frames_per_instance * manager.umem().frame_size;
+                        let umem_info = manager.umem();
+                        let cb_frames = xbricks_base::mailbox::control_block_frames(total_instances as u32, umem_info.frame_size);
+                        let scratchpad_frames = umem_info.reserved_frames.saturating_sub(cb_frames);
+                        let frames_per_instance = if total_instances > 0 { scratchpad_frames / total_instances as u32 } else { 0 };
+                        let ctrl_bytes = umem_info.control_block_bytes() as u32;
+                        let p_start = ctrl_bytes + instance_idx * frames_per_instance * umem_info.frame_size;
 
                         // Increment the counter so the next plugin gets the next memory slice
                         wasm_instance_counters[umem_group_id] += 1;
@@ -551,12 +555,16 @@ impl PipelineFactory {
                         force_sync_flag: Some(tm_force_sync.clone()),
                     };
 
-                    // Compute this instance's reserved-memory partition.
+                    // Compute this instance's reserved-memory partition (after Control Block).
                     let instance_idx = wasm_instance_counters[umem_id];
                     let total_instances = wasm_instance_totals[umem_id].max(1);
-                    let frames_per_instance = manager.umem().reserved_frames / total_instances as u32;
-                    let partition_start_bytes =
-                        instance_idx * frames_per_instance * manager.umem().frame_size;
+                    let umem_info = manager.umem();
+                    let cb_frames = xbricks_base::mailbox::control_block_frames(total_instances as u32, umem_info.frame_size);
+                    let scratchpad_frames = umem_info.reserved_frames.saturating_sub(cb_frames);
+                    let frames_per_instance = if total_instances > 0 { scratchpad_frames / total_instances as u32 } else { 0 };
+                    let ctrl_bytes = umem_info.control_block_bytes() as u32;
+                    let mailbox_offset = umem_info.mailbox_offset(instance_idx);
+                    let partition_start_bytes = ctrl_bytes + instance_idx * frames_per_instance * umem_info.frame_size;
                     wasm_instance_counters[umem_id] += 1;
 
                     if node_type == "WasmInspectorNode" {
@@ -584,7 +592,8 @@ impl PipelineFactory {
                             partition_start_bytes,
                             umem_id as u8,
                             node_instance.node_config.wasm_data.clone().unwrap_or_default(),
-                            platform_data
+                            platform_data,
+                            mailbox_offset,
                         ))
                     }
                 }

@@ -115,6 +115,10 @@ Standard Rust ergonomics apply. Heap allocations, `anyhow`/`thiserror` for error
 * `unsafe` blocks are restricted to: hardware ring-buffer access, raw pointer dereferencing for UMEM frames, Wasm linear-memory mapping, and platform-specific CPU intrinsics (e.g., TSC reads).
 * **MANDATORY:** Every `unsafe` block must be preceded by a `// SAFETY:` comment explicitly proving why the operation cannot violate memory boundaries or cause data races.
 
+### D. Unrequested Code Changes
+
+* **NEVER** change fundamental structs like `Packet`, except if explicitely requested. In case the change is needed from your view, write a change request with the exact reasoning.
+
 ---
 
 ## 5. Architecture Quick Reference

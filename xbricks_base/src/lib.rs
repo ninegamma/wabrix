@@ -3,6 +3,7 @@ extern crate core;
 
 pub mod interface;
 pub mod frame_registry;
+pub mod mailbox;
 pub mod system;
 pub mod common;
 pub mod telemetry;
