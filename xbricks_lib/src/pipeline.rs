@@ -379,15 +379,17 @@ impl PipelineFactory {
                             .as_ref()
                             .ok_or(format!("PacketGenerator {}: no WasmManager for umem {}", node_instance.node_config.id, umem_group_id))?;
 
-                        // Compute this instance's reserved-memory partition (after Control Block).
+                        // Compute this instance's scratchpad partition.
+                        // Scratchpads occupy [0, reserved_bytes - control_block_bytes); the
+                        // Control Block is at the end of the reserved region, so partition_start
+                        // starts at UMEM offset 0 for instance 0.
                         let instance_idx = wasm_instance_counters[umem_group_id];
                         let total_instances = wasm_instance_totals[umem_group_id].max(1);
                         let umem_info = manager.umem();
                         let cb_frames = xbricks_base::mailbox::control_block_frames(total_instances as u32, umem_info.frame_size);
                         let scratchpad_frames = umem_info.reserved_frames.saturating_sub(cb_frames);
                         let frames_per_instance = if total_instances > 0 { scratchpad_frames / total_instances as u32 } else { 0 };
-                        let ctrl_bytes = umem_info.control_block_bytes() as u32;
-                        let p_start = ctrl_bytes + instance_idx * frames_per_instance * umem_info.frame_size;
+                        let p_start = instance_idx * frames_per_instance * umem_info.frame_size;
 
                         // Increment the counter so the next plugin gets the next memory slice
                         wasm_instance_counters[umem_group_id] += 1;
@@ -555,16 +557,18 @@ impl PipelineFactory {
                         force_sync_flag: Some(tm_force_sync.clone()),
                     };
 
-                    // Compute this instance's reserved-memory partition (after Control Block).
+                    // Compute this instance's scratchpad partition.
+                    // Scratchpads occupy [0, reserved_bytes - control_block_bytes); the
+                    // Control Block is at the end of the reserved region, so partition_start
+                    // starts at UMEM offset 0 for instance 0.
                     let instance_idx = wasm_instance_counters[umem_id];
                     let total_instances = wasm_instance_totals[umem_id].max(1);
                     let umem_info = manager.umem();
                     let cb_frames = xbricks_base::mailbox::control_block_frames(total_instances as u32, umem_info.frame_size);
                     let scratchpad_frames = umem_info.reserved_frames.saturating_sub(cb_frames);
                     let frames_per_instance = if total_instances > 0 { scratchpad_frames / total_instances as u32 } else { 0 };
-                    let ctrl_bytes = umem_info.control_block_bytes() as u32;
                     let mailbox_offset = umem_info.mailbox_offset(instance_idx);
-                    let partition_start_bytes = ctrl_bytes + instance_idx * frames_per_instance * umem_info.frame_size;
+                    let partition_start_bytes = instance_idx * frames_per_instance * umem_info.frame_size;
                     wasm_instance_counters[umem_id] += 1;
 
                     if node_type == "WasmInspectorNode" {

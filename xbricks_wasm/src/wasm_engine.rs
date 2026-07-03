@@ -160,23 +160,22 @@ impl WasmEngine {
         // ==========================================================
         //    THE FAST METADATA COPY (Host Batch -> UMEM Mailbox)
         // ==========================================================
-        // ptr::copy_nonoverlapping is heavily optimized by LLVM into SIMD instructions.
-        // It moves the 16KB of Pdu structs in a handful of CPU cycles.
+        // Only the WPdu core (56 bytes) is written into each mailbox slot.
+        // The last 8 bytes of each Pdu (system_bus: *const SystemBus) must NOT reach
+        // WASM-accessible memory: the low 32 bits of a native Linux pointer (~1.5 GB)
+        // look like a packet address to the plugin and cause a linear-memory bounds trap.
         //
         // SAFETY: `batch.as_ptr()` points to a `[MaybeUninit<Pdu>; MAX_BATCH_SIZE]` array
         // whose first `len` slots are fully initialized (guaranteed by `Batch::push`).
-        // Casting to `*const Pdu` is sound because `MaybeUninit<Pdu>` and `Pdu` have
-        // identical layout. `(*mailbox_ptr).pdus` is inside the Control Block, which is
-        // backed by allocated UMEM and never touched by the NIC (withheld from Fill Queue).
-        // Source (native Batch) and destination (UMEM mailbox) are non-overlapping distinct
-        // memory regions. `mailbox_ptr` is exclusively owned by this thread for the entire
-        // call window (write → WASM call → read).
+        // Casting to `*const Pdu` is sound because `MaybeUninit<Pdu>` and `Pdu` share layout.
+        // `(*mailbox_ptr).pdus` is inside the Control Block, exclusively owned by this thread
+        // for the entire call window (write → WASM call → read).
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                batch.as_ptr() as *const Pdu,          // Source: Host's native Batch array
-                (*mailbox_ptr).pdus.as_mut_ptr(),      // Dest: The UMEM Mailbox
-                len                                    // Number of Pdu structs
-            );
+            let m = &mut *mailbox_ptr;
+            let src = batch.as_ptr() as *const Pdu;
+            for i in 0..len {
+                m.pdus[i].w = (*src.add(i)).w.clone();
+            }
         }
 
 
@@ -230,18 +229,19 @@ impl WasmEngine {
         }
 
         // ==========================================
-        // 3. MUTATION PHASE — copy plugin-modified PDUs back into the host Batch
+        // 3. MUTATION PHASE — copy plugin-modified WPdu fields back into the host Batch
         // ==========================================
+        // Only the WPdu core (56 bytes) is read back from each mailbox slot.
+        // This preserves the original system_bus pointer in each batch Pdu — copying the
+        // full slot would overwrite it with whatever the plugin left in _do_not_touch_padding.
+        //
         // SAFETY: WASM call returned; we have exclusive access to the mailbox again.
-        // The plugin may have mutated WPdu fields (e.g. desc_len, desc_addr). Copying
-        // the full Pdu slots back preserves those changes. The last 8 bytes of each slot
-        // (system_bus pointer) are never touched by the plugin, so they are round-trip intact.
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                (*mailbox_ptr).pdus.as_ptr(),           // Source: UMEM Mailbox
-                batch.as_mut_ptr() as *mut Pdu,  // Dest: Host's native Batch array
-                len,                                    // Number of Pdu structs
-            );
+            let m = &*mailbox_ptr;
+            let dst = batch.as_mut_ptr() as *mut Pdu;
+            for i in 0..len {
+                (*dst.add(i)).w = m.pdus[i].w.clone();
+            }
         }
 
         // ==========================================

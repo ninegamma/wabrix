@@ -10,42 +10,72 @@ Instead of keeping the packet buffer (UMEM) on the host and copying packets into
 
 ### 2. The Unified Memory Map
 
-The UMEM is divided into three physical regions, each visible from every plugin's WASM linear memory window at computed offsets. Multiple plugin instances execute concurrently and each owns an exclusive slice of every region.
+#### Host-Side Physical UMEM Layout
+
+The host maps the entire AF_XDP UMEM as one contiguous physical region divided into three zones:
 
 ```text
-UMEM Physical Layout (host-side byte offsets from UMEM base)
-┌──────────────────────────────────────────┐  0x0000_0000
-│                                          │
-│  Control Block — Per-Instance Mailboxes  │
-│  ┌────────────────────────────────────┐  │
-│  │  Instance 0 BatchMetadata          │  │  mailbox_offset_0 = 0
-│  ├────────────────────────────────────┤  │
-│  │  Instance 1 BatchMetadata          │  │  mailbox_offset_1 = sizeof(BatchMetadata)
-│  ├────────────────────────────────────┤  │
-│  │  Instance N ...                    │  │  mailbox_offset_N = N * sizeof(BatchMetadata)
-│  └────────────────────────────────────┘  │
-│                                          │
-├──────────────────────────────────────────┤  <-- control_block_end (frame-aligned)
-│                                          │
-│  Per-Instance WASM Heap/Stack Partitions │
-│  ┌────────────────────────────────────┐  │
-│  │  Instance 0 WASM private memory    │  │  partition_start_0
-│  ├────────────────────────────────────┤  │
-│  │  Instance 1 WASM private memory    │  │  partition_start_1
-│  ├────────────────────────────────────┤  │
-│  │  Instance N ...                    │  │  partition_start_N
-│  └────────────────────────────────────┘  │
-│                                          │
-├──────────────────────────────────────────┤  <-- reserved_bytes (partition_offset boundary)
-│                                          │
-│  AF_XDP Payload Frames (128 MB)          │  Raw Ethernet frames from/to NIC
-│                                          │
-└──────────────────────────────────────────┘
+Host Physical UMEM (byte offsets from Umem base ptr)
+┌──────────────────────────────────────────────────────────────────────┐
+│  Scratchpad Partitions  [0 .. reserved_bytes - control_block_bytes)  │
+│                                                                      │
+│  partition_start_bytes_0 = 0                                         │
+│  ┌──────────────────────────────────────┐                            │
+│  │  Instance 0: Stack, Heap, Globals    │  (partition_size bytes)    │
+│  └──────────────────────────────────────┘                            │
+│  partition_start_bytes_1 = 1 × partition_size                        │
+│  ┌──────────────────────────────────────┐                            │
+│  │  Instance 1: Stack, Heap, Globals    │  (partition_size bytes)    │
+│  └──────────────────────────────────────┘                            │
+│  partition_start_bytes_N = N × partition_size                        │
+│  ┌──────────────────────────────────────┐                            │
+│  │  Instance N: Stack, Heap, Globals    │  (partition_size bytes)    │
+│  └──────────────────────────────────────┘                            │
+│                                                                      │
+├──────────────────────────────────────────────────────────────────────┤
+│  Control Block  [reserved_bytes - control_block_bytes .. reserved_bytes) │
+│                                                                      │
+│  mailbox_offset_0 = reserved_bytes - 1 × sizeof(BatchMetadata)      │
+│  mailbox_offset_1 = reserved_bytes - 2 × sizeof(BatchMetadata)      │
+│  mailbox_offset_N = reserved_bytes - (N+1) × sizeof(BatchMetadata)  │
+│                                                                      │
+├──────────────────────────────────────────────────────────────────────┤  <-- reserved_bytes
+│  AF_XDP Payload Frames  [reserved_bytes .. total_size)               │
+│                                                                      │
+│  Raw Ethernet frames from / to the NIC (shared by all instances)     │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
-The strict separation between all reserved regions (Control Block + per-instance partitions) and the AF_XDP packet frames is guaranteed by the Host, which selects `reserved_frames` to cover both the full Control Block and the per-instance WASM private memory.
+#### Plugin-Side WASM Linear Memory View (Instance N)
 
-From Plugin N's WASM linear memory perspective, `partition_start_N` is WASM address `0`. The Control Block and the packet frames are both visible at negative-wrapping addresses computed via `(0u32).wrapping_sub(partition_start_N)`.
+Wasmtime maps each instance's WASM linear memory starting at `partition_start_bytes_N`. The window extends to the end of the full UMEM. From the plugin's perspective:
+
+```text
+WASM Linear Memory — Instance N  (WASM address 0x0000_0000 onward)
+┌──────────────────────────────────────────────────────────────────────┐
+│  WASM address 0x0000_0000                                            │
+│                                                                      │
+│  Static Data / Stack / Heap                                          │
+│  (Rust allocator stays within this partition — software convention)  │
+│                                                                      │
+├──────────────────────────────────────────────────────────────────────┤
+│  Instance N's BatchMetadata Mailbox                                  │
+│  WASM address = mailbox_offset_N - partition_start_bytes_N  (> 0)   │
+│                                                                      │
+├──────────────────────────────────────────────────────────────────────┤
+│  AF_XDP Payload Frames                                               │
+│  WASM address = desc_addr - partition_start_bytes_N         (> 0)   │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+Because the Control Block sits at the **end** of the reserved region (above every instance's `partition_start_bytes`), and AF_XDP frames start beyond that, both the mailbox and every packet frame are at **positive** WASM addresses within the linear memory window. No address wrapping is required to reach them.
+
+> **`partition_start_bytes_N` vs `partition_offset`**
+> These are the same numeric value, but carry different roles:
+> - **`partition_start_bytes_N`** — host-side UMEM byte offset where instance N's WASM address 0 is anchored.
+> - **`partition_offset`** — the WIT argument `process-batch(…, partition-offset: u32, …)` passed into the plugin so it can translate UMEM-relative addresses to WASM addresses (`umem_offset - partition_offset`).
 
 ### 3. Absolute Address Translation
 
@@ -59,11 +89,12 @@ let umem_addr = (0u32).wrapping_sub(partition_offset) as usize;
 
 // The packet base address
 let base_addr = pdu.base_addr(umem_addr);
+
 ```
 
 **How the math works:**
 
-1. **`partition_offset`:** The host tells the Wasm plugin exactly where the 128 MB UMEM block begins inside the linear memory. Equals `partition_start_N` for instance N.
+1. **`partition_offset`:** The host tells the Wasm plugin exactly where the 128 MB UMEM block begins inside the linear memory.
 2. **`wrapping_sub`:** This is a clever two's-complement arithmetic trick. Subtracting the `partition_offset` from `0` creates a negative base address (in 32-bit unsigned math) that resolves to the exact absolute memory address inside the Wasm sandbox.
 
 ### 4. Zero-Copy Packet Payloads

@@ -18,19 +18,34 @@ thread_local! {
 
 /// Thread-safe handle to the mmap'd AF_XDP UMEM region.
 ///
+/// Each WASM instance gets its own handle with a distinct `partition_start_bytes`
+/// so that WASM address 0 maps to the start of that instance's private scratchpad.
+/// The window extends to the end of the full Umem, giving the plugin positive-address
+/// access to its mailbox, other instances' scratchpads above it, and all AF_XDP frames.
+///
 /// Memory layout (host-side byte offsets from Umem base):
 /// ```
-/// [0 .. control_block_bytes)              Control Block: per-instance BatchMetadata mailboxes
-/// [control_block_bytes .. reserved_bytes) Per-instance WASM heap/stack partitions
-/// [reserved_bytes .. total_size)          AF_XDP payload frames (accessible to all instances)
+/// [0 .. reserved_bytes - control_block_bytes)            per-instance scratchpad partitions
+///   partition_start_bytes_0 = 0
+///   partition_start_bytes_1 = partition_size
+///   partition_start_bytes_N = N * partition_size
+/// [reserved_bytes - control_block_bytes .. reserved_bytes) Control Block (per-instance mailboxes)
+///   mailbox_offset_N = reserved_bytes - (N+1) * sizeof(BatchMetadata)
+/// [reserved_bytes .. total_size)                           AF_XDP payload frames
 /// ```
-/// For instance N, WASM address 0 maps to `control_block_bytes + N * scratchpad_size`.
+/// For instance N (`partition_start_bytes = N * partition_size`):
+/// ```
+/// WASM addr 0                              == host offset partition_start_bytes_N
+/// WASM addr mailbox_offset_N - start_N     == instance N's BatchMetadata (positive, in-bounds)
+/// WASM addr desc_addr        - start_N     == AF_XDP frame payload   (positive, in-bounds)
+/// ```
 #[derive(Clone)]
 pub struct UmemHandle {
     pub ptr: *mut u8,
     /// Total Umem size in bytes (`frame_count * frame_size`).
     pub size: usize,
     /// Byte offset from `ptr` where this instance's WASM address 0 begins.
+    /// Zero for non-partitioned or first-instance use.
     pub partition_start_bytes: u32,
     /// Number of frames at the start of the UMEM exclusively reserved for WASM plugins.
     /// Byte range: [0, reserved_frames * frame_size).
@@ -47,7 +62,7 @@ impl UmemHandle {
         control_block_frames(self.instance_count, self.frame_size)
     }
 
-    /// Byte size of the Control Block at UMEM offset 0.
+    /// Byte size of the Control Block located at the end of the reserved region.
     #[inline]
     pub fn control_block_bytes(&self) -> usize {
         self.control_block_frame_count() as usize * self.frame_size as usize
@@ -56,7 +71,7 @@ impl UmemHandle {
     /// UMEM-relative byte offset to instance N's `BatchMetadata` mailbox.
     #[inline]
     pub fn mailbox_offset(&self, instance_idx: u32) -> u32 {
-        instance_idx * MAILBOX_STRIDE as u32
+        self.reserved_bytes() as u32 - (instance_idx + 1) * MAILBOX_STRIDE as u32
     }
 
     /// Raw pointer to instance N's `BatchMetadata` within the shared UMEM.
@@ -71,7 +86,7 @@ impl UmemHandle {
         unsafe { self.ptr.add(self.mailbox_offset(instance_idx) as usize) as *mut BatchMetadata }
     }
 
-    /// Byte size of the region reserved exclusively for WASM plugins: [0, reserved_bytes()).
+    /// Byte size of the region reserved exclusively for WASM plugins: [0, reserved_bytes()) and their mailboxes.
     #[inline]
     pub fn reserved_bytes(&self) -> usize {
         self.reserved_frames as usize * self.frame_size as usize
@@ -164,11 +179,14 @@ pub struct WasmManager {
 impl WasmManager {
     pub fn new(frame_size: u32, reserved_frames: u32, frame_count: u32, umem: Arc<Umem>, instance_count: u32) -> Result<Self> {
         let min_ctrl = control_block_frames(instance_count, frame_size);
-        if reserved_frames < min_ctrl {
+        // Reserved region must hold both the Control Block (at the end) and at least
+        // one scratchpad frame per instance (at the start).
+        let min_reserved = min_ctrl + instance_count;
+        if reserved_frames < min_reserved {
             return Err(wasmtime::Error::msg(format!(
-                "WasmManager: reserved_frames ({}) is too small to hold the Control Block \
-                 ({} frames needed for {} instances × {} B mailbox)",
-                reserved_frames, min_ctrl, instance_count, MAILBOX_STRIDE
+                "WasmManager: reserved_frames ({}) is too small. Need at least {} frames: \
+                 {} for the Control Block ({} instances × {} B mailbox) + {} scratchpad frames (1 per instance)",
+                reserved_frames, min_reserved, min_ctrl, instance_count, MAILBOX_STRIDE, instance_count
             )));
         }
 
