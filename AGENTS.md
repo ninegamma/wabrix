@@ -117,7 +117,7 @@ Standard Rust ergonomics apply. Heap allocations, `anyhow`/`thiserror` for error
 
 ### D. Unrequested Code Changes
 
-* **NEVER** change fundamental structs like `Packet`, except if explicitely requested. In case the change is needed from your view, write a change request with the exact reasoning.
+* **NEVER** change fundamental structs and interfaces except if explicitly requested. In case you need to do the change, ask for permission with the exact reasoning.
 
 ---
 

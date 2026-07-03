@@ -1,17 +1,5 @@
 use core::mem::size_of;
-use xbricks_protocol::MAX_BATCH_SIZE;
-
-#[repr(C)]
-pub struct BatchMetadata {
-    /// Written by host before calling process-batch: AF_XDP frame descriptor offsets
-    pub desc_addrs:  [u32; MAX_BATCH_SIZE],
-    /// Written by host before calling process-batch: original packet lengths
-    pub lengths:     [u32; MAX_BATCH_SIZE],
-    /// Written by plugin during process-batch: routing decisions (route_id / DROP)
-    pub actions:     [u32; MAX_BATCH_SIZE],
-    /// Written by plugin during process-batch: modified packet lengths (0 = unchanged)
-    pub new_lengths: [u32; MAX_BATCH_SIZE],
-}
+use xbricks_protocol::BatchMetadata;
 
 pub const MAILBOX_STRIDE: usize = size_of::<BatchMetadata>();
 

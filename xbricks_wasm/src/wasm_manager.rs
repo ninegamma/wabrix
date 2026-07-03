@@ -4,8 +4,9 @@ use std::sync::Arc;
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, LinearMemory, MemoryCreator, MemoryType, OptLevel, Result};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
+use xbricks_protocol::BatchMetadata;
 use xsk_rs::Umem;
-use xbricks_base::mailbox::{BatchMetadata, control_block_frames, MAILBOX_STRIDE};
+use xbricks_base::mailbox::{control_block_frames, MAILBOX_STRIDE};
 use crate::wasm_engine;
 
 // A thread-local slot to securely hold the partition handle during instantiation

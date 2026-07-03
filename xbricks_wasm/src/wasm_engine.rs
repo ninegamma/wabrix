@@ -5,11 +5,21 @@ use crate::wasm_manager::{MyHostState, WasmManager};
 use wasmtime::Store;
 use wasmtime::component::{bindgen, ResourceTable};
 use wasmtime_wasi::WasiCtxBuilder;
-use xbricks_protocol::MAX_BATCH_SIZE;
+use xbricks_protocol::{BatchMetadata, MAX_BATCH_SIZE};
+use core::mem::size_of;
+
+/// Host-side view of `BatchMetadata` that uses `Pdu` instead of `Pdu0`.
+/// `Pdu` and `Pdu0` are layout-identical (64 bytes: 56-byte `WPdu` core + 8-byte tail);
+/// plugins never read/write the last 8 bytes, so the cast is safe.
+#[repr(C)]
+struct HostBatch {
+    pdus:    [Pdu; MAX_BATCH_SIZE],
+    actions: [u32; MAX_BATCH_SIZE],
+}
+const _: () = assert!(size_of::<HostBatch>() == size_of::<BatchMetadata>());
 use xbricks_base::{ControlEvent, Directive, Node, NodeId};
 use xbricks_base::interface::batch::{Batch};
 use xbricks_base::interface::Pdu;
-use xbricks_base::mailbox::BatchMetadata;
 use xbricks_base::telemetry::TelemetryMetrics;
 use xbricks_base::frame_registry::get_worker_frame_registry;
 use xbricks_base::system::PlatformData;
@@ -136,28 +146,40 @@ impl WasmEngine {
             return Directive::Stop;
         }
 
-        // ==========================================================
-        // 1. POPULATE MAILBOX & CALL PLUGIN
-        // ==========================================================
-
         // Capture the raw mailbox pointer before mutably borrowing self.store.
         // SAFETY: Control Block frames are excluded from the AF_XDP Fill Queue;
         // this instance's mailbox slice is exclusively owned by this thread
         // during the entire call window (write before call, read after return).
-        let mailbox_ptr: *mut BatchMetadata = {
+        let mailbox_ptr: *mut HostBatch = {
             let base = self.store.data().umem.ptr;
             // SAFETY: mailbox_offset is within the Control Block, which the host
             // guarantees is backed by allocated UMEM memory.
-            unsafe { base.add(self.mailbox_offset as usize) as *mut BatchMetadata }
+            unsafe { base.add(self.mailbox_offset as usize) as *mut HostBatch }
         };
 
+        // ==========================================================
+        //    THE FAST METADATA COPY (Host Batch -> UMEM Mailbox)
+        // ==========================================================
+        // ptr::copy_nonoverlapping is heavily optimized by LLVM into SIMD instructions.
+        // It moves the 16KB of Pdu structs in a handful of CPU cycles.
+        //
+        // SAFETY: `batch.as_ptr()` points to a `[MaybeUninit<Pdu>; MAX_BATCH_SIZE]` array
+        // whose first `len` slots are fully initialized (guaranteed by `Batch::push`).
+        // Casting to `*const Pdu` is sound because `MaybeUninit<Pdu>` and `Pdu` have
+        // identical layout. `(*mailbox_ptr).pdus` is inside the Control Block, which is
+        // backed by allocated UMEM and never touched by the NIC (withheld from Fill Queue).
+        // Source (native Batch) and destination (UMEM mailbox) are non-overlapping distinct
+        // memory regions. `mailbox_ptr` is exclusively owned by this thread for the entire
+        // call window (write → WASM call → read).
         unsafe {
-            let m = &mut *mailbox_ptr;
-            for (i, pdu) in batch.iter().enumerate() {
-                m.desc_addrs[i] = pdu.w.desc_addr as u32;
-                m.lengths[i]    = pdu.w.data_len();
-            }
+            std::ptr::copy_nonoverlapping(
+                batch.as_ptr() as *const Pdu,          // Source: Host's native Batch array
+                (*mailbox_ptr).pdus.as_mut_ptr(),      // Dest: The UMEM Mailbox
+                len                                    // Number of Pdu structs
+            );
         }
+
+
 
         let status = self.bindings
             .xbricks_plugins_packet_engine()
@@ -208,17 +230,18 @@ impl WasmEngine {
         }
 
         // ==========================================
-        // 3. MUTATION PHASE — read new_lengths from mailbox
+        // 3. MUTATION PHASE — copy plugin-modified PDUs back into the host Batch
         // ==========================================
-        // SAFETY: WASM call returned; we have exclusive access again.
+        // SAFETY: WASM call returned; we have exclusive access to the mailbox again.
+        // The plugin may have mutated WPdu fields (e.g. desc_len, desc_addr). Copying
+        // the full Pdu slots back preserves those changes. The last 8 bytes of each slot
+        // (system_bus pointer) are never touched by the plugin, so they are round-trip intact.
         unsafe {
-            let m = &*mailbox_ptr;
-            for (i, pdu) in batch.iter_mut().enumerate() {
-                let new_len = m.new_lengths[i];
-                if new_len > 0 {
-                    pdu.w.set_data_length(new_len);
-                }
-            }
+            std::ptr::copy_nonoverlapping(
+                (*mailbox_ptr).pdus.as_ptr(),           // Source: UMEM Mailbox
+                batch.as_mut_ptr() as *mut Pdu,  // Dest: Host's native Batch array
+                len,                                    // Number of Pdu structs
+            );
         }
 
         // ==========================================

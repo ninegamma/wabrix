@@ -101,79 +101,73 @@ The WIT interface is reduced to a minimal signaling mechanism — no data crossi
 process-batch: func(batch-size: u32, partition-offset: u32, mailbox-offset: u32) -> u32;
 ```
 
-- **`batch-size`:** Number of valid entries written into the mailbox.
+- **`batch-size`:** Number of valid PDU entries written into the mailbox.
 - **`partition-offset`:** Equals `partition_start_N`; used to compute `umem_base_wasm_addr`.
 - **`mailbox-offset`:** UMEM-relative byte offset of this instance's `BatchMetadata`. Equals `N × sizeof(BatchMetadata)`.
 
-Inside the Wasm Plugin, the Mailbox is a `#[repr(C)]` struct accessed via the UMEM base address:
+#### The `BatchMetadata` Layout
+
+`BatchMetadata` (defined in `xbricks_protocol`) is the shared control structure written by the host and read/written by the plugin:
 
 ```rust
 #[repr(C)]
 pub struct BatchMetadata {
-    // Written by host before calling process-batch:
-    pub desc_addrs:  [u32; MAX_BATCH_SIZE],   // AF_XDP frame descriptor offsets
-    pub lengths:     [u32; MAX_BATCH_SIZE],   // Original packet lengths
-
-    // Written by plugin during process-batch:
-    pub actions:     [u32; MAX_BATCH_SIZE],   // Routing decisions (route_id / DROP)
-    pub new_lengths: [u32; MAX_BATCH_SIZE],   // Modified packet lengths (0 = unchanged)
-}
-
-fn process_batch(batch_size: u32, partition_offset: u32, mailbox_offset: u32) -> u32 {
-    // 1. Resolve absolute UMEM base in this plugin's address space
-    let umem_base_addr = (0u32).wrapping_sub(partition_offset) as usize;
-
-    // 2. Resolve this instance's exclusive mailbox
-    //    SAFETY: mailbox_offset points into the Control Block, which the host guarantees
-    //    is excluded from the AF_XDP FQ (NIC never DMAs here).
-    let mailbox = unsafe {
-        &mut *((umem_base_addr + mailbox_offset as usize) as *mut BatchMetadata)
-    };
-
-    // 3. Process each packet
-    for i in 0..batch_size as usize {
-        let data_ptr = (umem_base_addr + mailbox.desc_addrs[i] as usize) as *mut u8;
-        // ... read/write packet payload at data_ptr with length mailbox.lengths[i] ...
-        mailbox.actions[i]     = target_route;
-        mailbox.new_lengths[i] = new_packet_length;
-    }
-    0
+    pub pdus:    [Pdu0; MAX_BATCH_SIZE],  // Full packet descriptors (plugin view)
+    pub actions: [u32;  MAX_BATCH_SIZE],  // Routing decisions written by plugin
 }
 ```
 
-#### The Host Interface
+Each `Pdu0` slot is 64 bytes: a 56-byte `WPdu` core (header stack, descriptor address, length, options, metadata, timestamp) plus 8 bytes the plugin must never read or write. The host uses an identical-layout `HostBatch` type that places a `*const SystemBus` pointer in those last 8 bytes:
 
-When the Wasm execution yields, the host does not copy any vectors. It casts the native UMEM pointer directly into the same `BatchMetadata` struct to read routing decisions and dispatch packets:
+```
+Byte layout of each PDU slot (64 bytes, repr(C, align(64))):
+┌─────────────────────────────────┬──────────────────┐
+│  WPdu core  [0..56]             │  tail  [56..64]  │
+│  header_stack (16)              │  host: SystemBus* │
+│  desc_addr (8)                  │  plugin: (unused) │
+│  desc_len (4)                   │                  │
+│  desc_options (4)               │                  │
+│  metadata (16)                  │                  │
+│  timestamp (8)                  │                  │
+└─────────────────────────────────┴──────────────────┘
+```
+
+A compile-time assertion enforces layout compatibility:
+```rust
+const _: () = assert!(size_of::<HostBatch>() == size_of::<BatchMetadata>());
+```
+
+#### The Hot-Path Data Flow
+
+Each call to `execute_wasm_and_route` follows four phases:
+
+**Phase 1 — Populate (Host → Mailbox):**  
+A single `ptr::copy_nonoverlapping` copies all `len` `Pdu` structs from the host `Batch` into the UMEM mailbox. LLVM lowers this to SIMD instructions, moving ~16 KB in a handful of CPU cycles. The plugin sees the full packet descriptor (address, length, header metadata) for each frame.
 
 ```rust
-// Before calling the plugin — write inputs
-let mailbox_ptr = unsafe {
-    (umem_ptr as *mut u8).add(mailbox_offset as usize) as *mut BatchMetadata
-};
-// SAFETY: Control Block frames are excluded from the AF_XDP FQ.
-// This instance's mailbox slice [mailbox_offset, mailbox_offset + sizeof(BatchMetadata))
-// is exclusively owned by this host thread during the call window.
-unsafe {
-    let mailbox = &mut *mailbox_ptr;
-    for (i, pdu) in batch.iter().enumerate() {
-        mailbox.desc_addrs[i] = pdu.frame_desc_offset() as u32;
-        mailbox.lengths[i]    = pdu.w.data_len();
-    }
-}
-
-// Call plugin — zero bytes cross the sandbox boundary
-call_process_batch(batch_size, partition_start_bytes, mailbox_offset)?;
-
-// After the plugin returns — read outputs, no copy needed
-unsafe {
-    let mailbox = &*mailbox_ptr;
-    for i in 0..batch_size {
-        let action     = mailbox.actions[i];
-        let new_length = mailbox.new_lengths[i];
-        // ... apply routing and length mutation ...
-    }
-}
+ptr::copy_nonoverlapping(
+    batch.as_ptr() as *const Pdu,
+    (*mailbox_ptr).pdus.as_mut_ptr(),
+    len,
+);
 ```
+
+**Phase 2 — WASM Execution:**  
+The host calls `process_batch(batch_size, partition_offset, mailbox_offset)`. The plugin reads `pdus[i]` for packet metadata, processes frames zero-copy, and writes its routing decision to `actions[i]`. It may also mutate `WPdu` fields such as `desc_len` or `desc_addr` to reflect packet modifications.
+
+**Phase 3 — Mutation (Mailbox → Host):**  
+A symmetric `ptr::copy_nonoverlapping` copies the plugin-modified PDU slots back into the host `Batch`. The `system_bus` tail bytes are preserved unchanged (plugins never touch them), so the host's `Pdu` state remains consistent.
+
+```rust
+ptr::copy_nonoverlapping(
+    (*mailbox_ptr).pdus.as_ptr(),
+    batch.as_mut_ptr() as *mut Pdu,
+    len,
+);
+```
+
+**Phase 4 — Routing:**  
+The host reads `actions[i]` from the mailbox and distributes PDUs across output `Batch` queues according to each plugin's routing decision.
 
 This architecture guarantees that:
 
