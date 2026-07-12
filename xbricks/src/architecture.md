@@ -317,9 +317,9 @@ fn release_frame(&mut self, frame_idx: u32) {
 ### Frame Flow in Split Socket Model
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Worker Thread                             │
-│                                                              │
+┌────────────────────────────────────────────────────────────┐
+│                    Worker Thread                           │
+│                                                            │
 │  ┌──────────────┐              ┌──────────────┐            │
 │  │  XSocketRx   │              │  XSocketTx   │            │
 │  │              │              │              │            │
@@ -336,10 +336,10 @@ fn release_frame(&mut self, frame_idx: u32) {
 │  │              │              │ │  drain   │─┼───┐        │
 │  │              │              │ └──────────┘ │   │        │
 │  └──────────────┘              └──────────────┘   │        │
-│         ▲                                          │        │
-│         │ get_worker_frame_registry()              │        │
-│         │ (thread-local access)                    │        │
-│         │                                          │        │
+│         ▲                                          │       │
+│         │ get_worker_frame_registry()              │       │
+│         │ (thread-local access)                    │       │
+│         │                                          │       │
 │  ┌──────┴──────────────┐                          │        │
 │  │ FrameRegistry       │◄─────────────────────────┘        │
 │  │  (via TLS)          │         SystemBus                 │
@@ -349,14 +349,14 @@ fn release_frame(&mut self, frame_idx: u32) {
 │  │   (PartitionData)   │                                   │
 │  │   • free_stash      │                                   │
 │  └─────────────────────┘                                   │
-│         ▲                                                   │
+│         ▲                                                  │
 │         │ process_returns()                                │
-│         │                                                   │
-│  ┌──────┴────────────────────────────────────┐            │
+│         │                                                  │
+│  ┌──────┴────────────────────────────────────┐             │
 │  │           SystemBus Channels               │            │
 │  │    (Worker-to-Worker Frame Returns)        │            │
 │  └────────────────────────────────────────────┘            │
-└─────────────────────────────────────────────────────────────┘
+└────────────────────────────────────────────────────────────┘
 ```
 
 ### Key Properties

@@ -9,6 +9,7 @@ pub mod pipeline;
 pub mod toml_parser;
 pub(crate) mod system_runner;
 pub mod generator_node;
+pub mod tcp_node;
 
 // Include the generated BPF skeleton code
 pub mod xscrubber_skel {

@@ -793,7 +793,7 @@ export function PipelineNode({ data, id }: NodeProps<PipelineNodeType>) {
                 </div>
             )}
 
-            {data.type === 'WasmEngine' && (
+            {(data.type === 'WasmEngine' || data.type === 'TcpNode') && (
                 <div style={{ marginTop: '6px', borderTop: `1px solid ${colors.divider}`, paddingTop: '4px' }}>
                     <div style={{ fontSize: '10px', color: '#64748b', marginBottom: '3px' }}>operational state</div>
                     <div style={{ display: 'flex', gap: '4px' }}>
