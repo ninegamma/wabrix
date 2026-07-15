@@ -25,6 +25,7 @@ arc-swap = { workspace = true }
 wabrix_lib = { path = "../wabrix_lib" }
 wabrix_base = { path = "../wabrix_base" }
 wabrix_api = { workspace= true}
+env_logger = "0.11.11"
 
 [build-dependencies]
 anyhow = { workspace = true }

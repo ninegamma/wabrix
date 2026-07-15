@@ -1,6 +1,3 @@
-pub mod api;
-mod pcap;
-pub mod logger;
 use std::collections::HashMap;
 use anyhow::Context;
 use clap::Parser;
@@ -9,13 +6,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use separator::Separatable;
 use tokio::sync::{mpsc, RwLock};
+use tokio::io::{AsyncBufReadExt, BufReader};
+
 use wabrix_lib::config::hot_config::SharedSystemState;
-use logger::WsLogger;
 use wabrix_base::ControlEvent;
 use wabrix_lib::probe_kernel_fds;
 use wabrix_base::telemetry::{spawn_telemetry_ice_for_ifaces, spawn_pipeline_telemetry, TMLiveStats};
 use wabrix_base::system::PlatformData;
-use crate::api::{spawn_management_api, AppState, SystemCommand};
 
 #[derive(Debug, Parser)]
 struct Opt {
@@ -24,25 +21,27 @@ struct Opt {
     config: String,
 }
 
+/// Commands sent from the CLI terminal to the main lifecycle loop
+#[derive(Debug, Clone, PartialEq)]
+pub enum SystemCommand {
+    Start,
+    Stop,
+    Check,
+    Restart,
+    Shutdown,
+    Run,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // 1. Create the broadcast channel FIRST
-    let (console_tx, _rx) = tokio::sync::broadcast::channel::<String>(1000);
+    // Initialize standard terminal logging (e.g., via env_logger)
+    // Run with `RUST_LOG=info cargo run` to see logs
+    env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
+
     let (telemetry_tx, _) = tokio::sync::broadcast::channel::<TMLiveStats>(100);
     let (ctrl_tx, _) = tokio::sync::broadcast::channel::<Arc<ControlEvent>>(100);
 
-    // 2. Hijack the global `log` crate and attach it to our channel
-    let logger = WsLogger::new(console_tx.clone());
-    log::set_boxed_logger(Box::new(logger))?;
-
-    // Open the floodgates globally; WsLogger will filter them!
-    log::set_max_level(log::LevelFilter::Debug);
-
-    //let log_level_str = env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
-    //let log_level = LevelFilter::from_str(&log_level_str).unwrap_or(LevelFilter::Info);
-    //log::set_max_level(log_level);
-
-    log::info!("Starting XBricks System...");
+    log::info!("Starting Wabrix Open Source Engine...");
     let opt = Opt::parse();
     let platform_data = PlatformData::detect();
     info!("TSC frequency: {} Hz", platform_data.tsc_frequency.separated_string());
@@ -54,38 +53,70 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("Failed to load configuration from {}", opt.config))?;
     info!("Configuration loaded and validated successfully");
 
-    // Wrap config in an Arc<RwLock> so both the Main Loop and the Axum API can read/write it
     let shared_config = Arc::new(RwLock::new(config));
+    let config_path = Arc::new(RwLock::new(opt.config.clone()));
+
+    let initial_state = SharedSystemState::new(HashMap::new());
+    let active_shared_state = Arc::new(arc_swap::ArcSwap::new(initial_state));
 
     // --- SETUP CONTROL CHANNEL ---
-    // This channel allows the Axum API to send commands (Restart/Shutdown) to the main loop
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<SystemCommand>(10);
 
     // ==========================================================
-    // START THE AXUM MANAGEMENT API (Runs OUTSIDE the loop)
+    // SPAWN ASYNC CLI LISTENER
     // ==========================================================
-    info!("Starting Management API on http://0.0.0.0:3000...");
-    let initial_state = SharedSystemState::new(HashMap::new());
-    // Create a swap-able pointer to hold the live system state
-    let active_shared_state = Arc::new(arc_swap::ArcSwap::new(initial_state));
+    let cli_cmd_tx = cmd_tx.clone();
+    let cli_ctrl_tx = ctrl_tx.clone(); // <-- NEW: Give the CLI access to the plugin control channel
 
-    let config_path = Arc::new(RwLock::new(opt.config.clone()));
-    let app_state = AppState {
-        config: shared_config.clone(),
-        shared_state: active_shared_state.clone(),
-        console_tx: console_tx.clone(),
-        cmd_tx: cmd_tx.clone(),
-        config_path: config_path.clone(),
-        telemetry_tx: telemetry_tx.clone(),
-        ctrl_tx: ctrl_tx.clone(),
-    };
-    let (axum_shutdown_tx, axum_join_handle) = spawn_management_api(app_state);
+    tokio::spawn(async move {
+        let stdin = tokio::io::stdin();
+        let mut reader = BufReader::new(stdin).lines();
+
+        println!("=========================================");
+        println!("Wabrix CLI Ready.");
+        println!("Commands: start, stop, restart, check, run, trigger <opcode>, shutdown");
+        println!("=========================================");
+
+        while let Ok(Some(line)) = reader.next_line().await {
+            let parts: Vec<&str> = line.trim().split_whitespace().collect();
+            if parts.is_empty() { continue; }
+
+            match parts[0].to_lowercase().as_str() {
+                "start" => { let _ = cli_cmd_tx.send(SystemCommand::Start).await; }
+                "stop" => { let _ = cli_cmd_tx.send(SystemCommand::Stop).await; }
+                "restart" => { let _ = cli_cmd_tx.send(SystemCommand::Restart).await; }
+                "check" => { let _ = cli_cmd_tx.send(SystemCommand::Check).await; }
+                "run" => { let _ = cli_cmd_tx.send(SystemCommand::Run).await; }
+                "online" | "trigger" => {
+                    // If you type `trigger <opcode> <byte1> <byte2>...`
+                    let opcode = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+
+                    // Parse any remaining parts as u8 bytes for the payload
+                    let payload: Vec<u8> = parts.iter().skip(2)
+                        .filter_map(|s| s.parse::<u8>().ok())
+                        .collect();
+
+                    println!("=> Broadcasting ControlEvent (opcode: {}, payload: {:?}) to plugins...", opcode, payload);
+
+                    let event = Arc::new(ControlEvent {
+                        address_pattern: "*".to_string(), // Broadcast to all Wasm plugins
+                        opcode,
+                        payload,
+                    });
+                    let _ = cli_ctrl_tx.send(event);
+                }
+                "shutdown" | "exit" | "quit" => {
+                    let _ = cli_cmd_tx.send(SystemCommand::Shutdown).await;
+                    break;
+                }
+                _ => println!("Unknown command. Use: start, stop, restart, check, trigger <opcode> [payload_bytes...], shutdown"),
+            }
+        }
+    });
 
     // ==========================================================
     // DATA PLANE LIFECYCLE LOOP (State Machine)
     // ==========================================================
-
-    // We start in the RUNNING state when launched from the console.
     let mut dataplane_active = true;
 
     loop {
@@ -94,9 +125,8 @@ async fn main() -> anyhow::Result<()> {
         if dataplane_active {
             info!("--- Initializing Data Plane ---");
 
-            // We use a block here to strictly enforce Rust's Drop semantics for hardware
             let action = {
-                // 1. Reload config from disk so manual edits are picked up on every start
+                // 1. Reload config from disk
                 let current_config = {
                     let path = config_path.read().await;
                     match wabrix_lib::toml_parser::XBricksConfig::from_file(&*path) {
@@ -136,8 +166,8 @@ async fn main() -> anyhow::Result<()> {
                 info!("Building XDP system from configuration...");
                 let sys_builder = current_config.to_system_builder()
                     .context("Failed to create system builder").unwrap();
-                // Clone the transmitter for the builder
-                let builder_ctrl_tx = Some(ctrl_tx.clone()) ;
+
+                let builder_ctrl_tx = Some(ctrl_tx.clone());
 
                 let xbricks_system = tokio::task::block_in_place(|| {
                     sys_builder.build(Some(&interface_skels), platform_data.clone(), builder_ctrl_tx)
@@ -167,11 +197,23 @@ async fn main() -> anyhow::Result<()> {
                 spawn_pipeline_telemetry(telemetry_tx.clone(), pipeline_registry, shutdown.clone())?;
 
                 // ==========================================================
-                // WAIT FOR EVENTS WHILE RUNNING
+                // WAIT FOR CLI EVENTS OR WORKER COMPLETION WHILE RUNNING
                 // ==========================================================
+                let num_workers = handles.len();
                 let cmd = tokio::select! {
                     _ = tokio::signal::ctrl_c() => SystemCommand::Shutdown,
                     Some(c) = cmd_rx.recv() => c,
+                    _ = async {
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                            if num_workers > 0 && workers_completed.load(Ordering::Acquire) >= num_workers {
+                                break;
+                            }
+                        }
+                    } => {
+                        info!("All workers have completed their execution. Ending single run.");
+                        SystemCommand::Stop
+                    },
                     else => SystemCommand::Shutdown,
                 };
 
@@ -203,10 +245,9 @@ async fn main() -> anyhow::Result<()> {
                 drop(_xdp_links);
                 drop(interface_skels);
 
-                cmd // Return the command out of the block to dictate the next state
+                cmd
             }; // <--- 🔥 RUST SCOPE DESTROYS ALL SOCKETS HERE 🔥
 
-            // Kernel cleanup wait
             probe_kernel_fds("POST-DROP");
             info!("Userspace destroyed. Yielding to kernel for graceful AF_XDP unbind...");
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -216,9 +257,9 @@ async fn main() -> anyhow::Result<()> {
 
         } else {
             // ==========================================================
-            // IDLE STATE (Dataplane is stopped, waiting for commands)
+            // IDLE STATE
             // ==========================================================
-            info!("Dataplane is currently OFFLINE. Management API is listening...");
+            info!("Dataplane is currently OFFLINE. Awaiting CLI commands...");
 
             next_cmd = tokio::select! {
                 _ = tokio::signal::ctrl_c() => SystemCommand::Shutdown,
@@ -235,52 +276,42 @@ async fn main() -> anyhow::Result<()> {
                 info!("Received START command. Booting hardware...");
                 dataplane_active = true;
             }
+            SystemCommand::Run => {
+                info!("Received RUN command. Triggering a single run of the dataplane...");
+                dataplane_active = true;
+            }
             SystemCommand::Stop => {
-                info!("Received STOP command. Keeping API alive...");
+                info!("Received STOP command. Entering IDLE state...");
                 dataplane_active = false;
             }
+            SystemCommand::Restart => {
+                info!("Received RESTART command. Rebooting data plane...");
+                dataplane_active = true;
+            }
             SystemCommand::Check => {
-                // ==========================================================
-                // CONFIGURATION DRY-RUN
-                // ==========================================================
                 info!("Received CHECK command. Validating configuration...");
-
-                // 1. Read current memory state
                 let current_config = {
                     let guard = shared_config.read().await;
                     guard.clone()
                 };
 
-                // 2. Validate OS/Hardware prerequisites
-                info!("Running pre-flight system checks...");
                 let worker_cores: Vec<usize> = current_config.wabrix.workers.iter().map(|w| w.core).collect();
                 let interfaces: Vec<String> = current_config.wabrix.ifaces.iter().map(|i| i.name.clone()).collect();
                 wabrix_base::system::check_system(&worker_cores, &interfaces);
 
-                // 3. Validate Pipeline Topology (The "Blueprint")
                 info!("Validating pipeline topology...");
                 match current_config.to_system_builder() {
-                    Ok(_) => info!("✅ Configuration and topology are valid! Ready to start."),
+                    Ok(_) => info!("✅ Configuration and topology are valid!"),
                     Err(e) => error!("❌ Topology validation failed: {}", e),
                 }
-
-                // IMPORTANT: We do NOT change `dataplane_active` here.
-                // If it was stopped, it stays stopped. If it was running, it stays running.
             }
             SystemCommand::Shutdown => {
                 info!("Received SHUTDOWN command. Exiting application...");
-                break; // Break the master loop to trigger final shutdown
+                break;
             }
         }
-    } // <-- End of loop
+    }
 
-    // ==========================================================
-    // SHUTDOWN AXUM SERVER
-    // ==========================================================
-    info!("Shutting down Management API...");
-    let _ = axum_shutdown_tx.send(());
-    let _ = axum_join_handle.await;
-    info!("Axum server exited safely.");
-
+    info!("Wabrix shut down gracefully.");
     Ok(())
 }
