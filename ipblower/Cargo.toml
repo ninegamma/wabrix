@@ -4,8 +4,8 @@ version = "0.2.0"
 edition.workspace = true
 
 [dependencies]
-xbricks_lib = { path = "../xbricks_lib", default-features = false }
-xbricks_base = { path= "../xbricks_base" }
+wabrix_lib = { path = "../wabrix_lib", default-features = false }
+wabrix_base = { path= "../wabrix_base" }
 log = { workspace = true }
 anyhow = { workspace = true }
 env_logger = { workspace = true }

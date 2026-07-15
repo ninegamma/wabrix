@@ -1,0 +1,83 @@
+# Multi-interface, single UMEM configuration example
+# Demonstrates multiple NICs with one UMEM domain
+#
+# Architecture:
+# - Worker: single-threaded execution unit running on one core (multiple workers can share a core)
+# - Pipeline: logical packet processing graph assigned to one or more workers
+#   * Each worker gets its own instance of the pipeline
+#   * Node queues array maps 1:1 with pipeline workers array (queues[i] → workers[i])
+# - Node: processing element bound to (interface, queues) pair
+# - Queue core affinity: DERIVED from worker->pipeline->node->queue chain
+#
+# Validation rules:
+# - Node queues array length must equal pipeline workers array length
+# - Each queue should map to exactly one core (via the worker->pipeline->node chain)
+# - pipeline.workers must reference valid worker IDs from workers section
+# - Node IDs are namespaced per pipeline to prevent collisions
+
+[wabrix]
+# Interface declarations (descriptive only - queue count determined by xsk config)
+ifaces = [
+    { name = "enp2s0f0np0", rxd = 8160, txd = 4096, irq_core = 8  },
+    { name = "enp2s0f1np1", rxd = 8160, txd = 4096, irq_core = 8  }
+]
+
+umem = [
+    { id = 0, frame_size = 2048, frame_count = 262144, fq_size = 65536, cq_size = 65536, head_room = 128, partitions = 1 },
+]
+
+# --- XSK SOCKET CONFIG ---
+# XSK socket configuration (core affinity is derived from worker assignments)
+xsk = [
+    { iface = "enp2s0f0np0", queues = [0], umem = 0, rxq_size = 32768, txq_size = 8192, zerocopy = false },
+    { iface = "enp2s0f1np1", queues = [0], umem = 0, rxq_size = 32768, txq_size = 8192, zerocopy = false },
+]
+
+# --- WORKER & PARTITION ASSIGNMENT ---
+# Workers request specific partition quotas from the UMEMs.
+# The builder automatically pops the next available partition index for that UMEM.
+workers = [
+    { id = 0, core = 9, partitions = [ { umem = 0, count = 1 } ] },
+    # { id = 1, core = 3, partitions = [ { umem = 0, count = 1 } ] }
+]
+
+[[pipelines]]
+name = "wire_f0_to_f1"
+workers = [0]
+
+    # --- Node 1: Source ---
+    [[pipelines.nodes]]
+    id = "rx_source_0"
+    type = "BatchRxNode"
+    routes = ["tx_sink_1"]
+    queues = [0]
+    args = { source_type = "xsk", interface = "enp2s0f0np0", batch_size= "256" }
+
+    # --- Node 2: Sink ---
+    [[pipelines.nodes]]
+    id = "tx_sink_1"
+    type = "BatchTxNode"
+    queues = [0]
+    args = { sink_type = "xsk", interface = "enp2s0f1np1" }
+
+
+[[pipelines]]
+name = "wire_f1_to_f0"
+workers = [0]
+
+    # --- Node 1: Source ---
+    [[pipelines.nodes]]
+    id = "rx_source_1"
+    type = "BatchRxNode"
+    routes = ["tx_sink_0"]
+    queues = [0]
+    args = { source_type = "xsk", interface = "enp2s0f1np1"}
+
+    # --- Node 2: Sink ---
+    [[pipelines.nodes]]
+    id = "tx_sink_0"
+    type = "BatchTxNode"
+    queues = [0]
+    args = { sink_type = "xsk", interface = "enp2s0f0np0"}
+
+

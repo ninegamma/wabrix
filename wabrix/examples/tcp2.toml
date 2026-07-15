@@ -1,0 +1,322 @@
+[wabrix]
+ifaces= [
+    { name = "enp2s0f0np0", rxd = 8160, txd = 8160, irq_core = 6 },
+    { name = "veth_xbricks", rxd = 1024, txd = 1024, type = "veth", namespace = "ns-xbricks", peer = "tap-veth-0", mac_if = "enp2s0f0np0", ipnet = "10.10.10.222/24", checksum_offload = false },
+    { name = "enp2s0f1np1", rxd = 8160, txd = 8160, irq_core = 8 },
+    { name = "veth_xbricks_1", rxd = 1024, txd = 1024, type = "veth", namespace = "ns-xbricks_1", peer = "tap-veth-1", mac_if = "enp2s0f1np1", ipnet = "10.10.10.31/24", checksum_offload = false },
+]
+umem= [
+    { id = 0, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 2, reserved = 131072 },
+    { id = 1, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 2, reserved = 131072 },
+    { id = 2, frame_size = 2048, frame_count = 131072, fq_size = 16384, cq_size = 16384, head_room = 128, partitions = 2, reserved = 10240 },
+]
+xsk= [
+    { iface = "enp2s0f0np0", queues = [0], umem = 0, rxq_size = 16384, txq_size = 16384, zerocopy = true, xdp_mode = "auto" },
+    { iface = "veth_xbricks", queues = [0], umem = 2, rxq_size = 4096, txq_size = 4096, zerocopy = false, xdp_mode = "auto" },
+    { iface = "enp2s0f1np1", queues = [0], umem = 1, rxq_size = 16384, txq_size = 16384, zerocopy = true, xdp_mode = "auto" },
+    { iface = "veth_xbricks_1", queues = [0], umem = 2, rxq_size = 4096, txq_size = 4096, zerocopy = false, xdp_mode = "auto" },
+]
+workers= [
+    { id = 0, core = 7, partitions = [{ umem = 0, count = 1 }, { umem = 2, count = 1 }] },
+    { id = 1, core = 9, partitions = [{ umem = 1, count = 1 }, { umem = 2, count = 1 }] },
+]
+
+# ===================================================================
+# PIPELINE: UNIFIED_NIC0
+# ===================================================================
+[[pipelines]]
+name = "unified_nic0"
+workers = [0]
+poll_frequency = 10000
+
+[[pipelines.nodes]]
+id = "rx_source"
+type = "BatchRxNode"
+routes = ["nd_parser"]
+queues = [0]
+args= { interface = "enp2s0f0np0", batch_size = "256" }
+hot_args= {}
+
+[[pipelines.nodes]]
+id = "nd_veth_source"
+type = "BatchRxNode"
+routes = ["nd_parser_veth"]
+queues = [0]
+args= { interface = "veth_xbricks" }
+hot_args= {}
+
+[[pipelines.nodes]]
+id = "nd_parser"
+type = "FastParserNode"
+routes = ["tcp_engine"]
+args= {}
+hot_args= {}
+
+[[pipelines.nodes]]
+id = "tcp_engine"
+type = "WasmEngine"
+routes = ["shared_tx_sink", "veth_sink", "drop"]
+labels = ["SentSyn", "SentSynAck", "SentSynAck2", "SentFin", "SentFinPssv", "SentAck4Fin", "SentAck", "SentRst", "RecvSyn", "RecvSynAck", "RecvSynAck2", "RecvFin", "RecvFinPssv", "RecvAck4Fin", "RecvAck", "RecvRst", "Unexpected", "RecvPayload", "SentPayload", "TickDrop", "ToLinux", "Drop", "Watermark"]
+args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/tcp_engine.wasm", umem = "0" }
+hot_args= {}
+
+[pipelines.nodes.wasm_data]
+dst_ip = "10.10.10.31"
+close_timeout = "100"
+src_mac = "44:49:88:06:63:38"
+src_ip = "10.10.10.222"
+syn_limit = "100M"
+dst_mac = "44:49:88:06:63:39"
+syn_rate = "1800k"
+
+[[pipelines.nodes]]
+id = "nd_parser_veth"
+type = "FastParserNode"
+routes = ["nd_icmp_filter"]
+args= {}
+hot_args= {}
+
+[[pipelines.nodes]]
+id = "nd_icmp_filter"
+type = "WasmInspectorNode"
+routes = ["shared_tx_sink", "drop"]
+labels = ["icmp ping", "icmp reply", "icmp other", "any other"]
+args= { umem = "2", wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/icmp_filter.wasm" }
+hot_args= {}
+
+[[pipelines.nodes]]
+id = "shared_tx_sink"
+type = "BatchTxNode"
+routes = []
+queues = [0]
+args= { interface = "enp2s0f0np0", sink_type = "xsk" }
+hot_args= {}
+
+[[pipelines.nodes]]
+id = "veth_sink"
+type = "BatchTxNode"
+routes = []
+queues = [0]
+args= { interface = "veth_xbricks" }
+hot_args= {}
+
+[[pipelines.nodes]]
+id = "drop"
+type = "DropNode"
+routes = []
+args= {}
+hot_args= {}
+
+# ===================================================================
+# PIPELINE: UNIFIED_NIC1
+# ===================================================================
+[[pipelines]]
+name = "unified_nic1"
+workers = [1]
+poll_frequency = 10000
+
+[[pipelines.nodes]]
+id = "rx_source"
+type = "BatchRxNode"
+routes = ["nd_parser"]
+queues = [0]
+args= { interface = "enp2s0f1np1", batch_size = "256" }
+hot_args= {}
+
+[[pipelines.nodes]]
+id = "nd_veth_source"
+type = "BatchRxNode"
+routes = ["nd_parser_veth"]
+queues = [0]
+args= { interface = "veth_xbricks_1" }
+hot_args= {}
+
+[[pipelines.nodes]]
+id = "nd_parser"
+type = "FastParserNode"
+routes = ["tcp_engine"]
+args= {}
+hot_args= {}
+
+[[pipelines.nodes]]
+id = "tcp_engine"
+type = "WasmEngine"
+routes = ["shared_tx_sink", "veth_sink", "drop"]
+labels = ["SentSyn", "SentSynAck", "SentSynAck2", "SentFin", "SentFinPssv", "SentAck4Fin", "SentAck", "SentRst", "RecvSyn", "RecvSynAck", "RecvSynAck2", "RecvFin", "RecvFinPssv", "RecvAck4Fin", "RecvAck", "RecvRst", "Unexpected", "RecvPayload", "SentPayload", "TickDrop", "ToLinux", "Drop", "Watermerk"]
+args= { umem = "1", wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/tcp_engine.wasm" }
+hot_args= {}
+
+[pipelines.nodes.wasm_data]
+src_ip = "10.10.10.31"
+src_mac = "44:49:88:06:63:39"
+dst_mac = "44:49:88:06:63:38"
+
+[[pipelines.nodes]]
+id = "nd_parser_veth"
+type = "FastParserNode"
+routes = ["nd_icmp_filter"]
+args= {}
+hot_args= {}
+
+[[pipelines.nodes]]
+id = "nd_icmp_filter"
+type = "WasmInspectorNode"
+routes = ["shared_tx_sink", "drop"]
+labels = ["icmp ping", "icmp reply", "icmp other", "any other"]
+args= { umem = "2", wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/icmp_filter.wasm" }
+hot_args= {}
+
+[[pipelines.nodes]]
+id = "shared_tx_sink"
+type = "BatchTxNode"
+routes = []
+queues = [0]
+args= { sink_type = "xsk", interface = "enp2s0f1np1" }
+hot_args= {}
+
+[[pipelines.nodes]]
+id = "veth_sink"
+type = "BatchTxNode"
+routes = []
+queues = [0]
+args= { interface = "veth_xbricks_1" }
+hot_args= {}
+
+[[pipelines.nodes]]
+id = "drop"
+type = "DropNode"
+routes = []
+args= {}
+hot_args= {}
+
+[layout.umem_1]
+x = 347.7292
+y = -474.0604
+
+[layout."unified_nic1/nd_veth_source"]
+x = 35.16894
+y = 426.1648
+
+[layout.umem_2]
+x = 569.6098
+y = -474.251
+
+[layout.xsk_2]
+x = 350.49826
+y = -43.530087
+
+[layout."unified_nic0/nd_parser"]
+x = 343.08206
+y = 843.437
+
+[layout."pipeline_header/unified_nic1"]
+x = -192.39479
+y = 398.23654
+
+[layout."unified_nic1/nd_parser"]
+x = 341.34558
+y = 249.28572
+
+[layout."unified_nic1/nd_icmp_filter"]
+x = 632.00653
+y = 442.7149
+
+[layout.iface_enp2s0f0np0]
+x = -119.40271
+y = -410.4738
+
+[layout."unified_nic1/drop"]
+x = 956.80206
+y = 532.706
+
+[layout."unified_nic0/rx_source"]
+x = 51.870453
+y = 816.3551
+
+[layout."unified_nic0/nd_parser_veth"]
+x = 340.7271
+y = 600.14355
+
+[layout.iface_enp2s0f1np1]
+x = 818.47345
+y = -428.85867
+
+[layout."unified_nic1/nd_parser_veth"]
+x = 339.27682
+y = 458.2306
+
+[layout.worker_0]
+x = 216.38416
+y = -163.66304
+
+[layout."unified_nic0/shared_tx_sink"]
+x = 956.1196
+y = 657.37897
+
+[layout."pipeline_header/unified_nic0"]
+x = -178.77568
+y = 706.5006
+
+[layout."unified_nic1/veth_sink"]
+x = 948.527
+y = 408.58032
+
+[layout."unified_nic0/nd_veth_source"]
+x = 43.957733
+y = 581.7434
+
+[layout."unified_nic0/veth_sink"]
+x = 959.65204
+y = 827.652
+
+[layout.umem_0]
+x = 127.025856
+y = -473.063
+
+[layout.xsk_0]
+x = 83.86233
+y = -40.407444
+
+[layout.iface_veth_xbricks_1]
+x = 803.8245
+y = -674.63544
+
+[layout."unified_nic1/shared_tx_sink"]
+x = 945.0362
+y = 263.76706
+
+[layout."unified_nic1/tcp_engine"]
+x = 585.4594
+y = 146.88205
+
+[layout.worker_1]
+x = 479.90054
+y = -161.83752
+
+[layout."unified_nic1/rx_source"]
+x = 31.031418
+y = 227.56374
+
+[layout."unified_nic0/tcp_engine"]
+x = 593.80347
+y = 740.7365
+
+[layout."unified_nic0/nd_icmp_filter"]
+x = 642.961
+y = 583.6589
+
+[layout.iface_veth_xbricks]
+x = -122.77464
+y = -655.993
+
+[layout.xsk_3]
+x = 910.0391
+y = -40.01767
+
+[layout.xsk_1]
+x = 680.04095
+y = -42.2179
+
+[layout."unified_nic0/drop"]
+x = 962.00696
+y = 960.246

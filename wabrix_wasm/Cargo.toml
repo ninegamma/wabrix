@@ -1,0 +1,26 @@
+[package]
+name = "wabrix_wasm"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+
+# WASM Logic
+wasmtime = { workspace = true }
+wasmtime-wasi = { workspace = true }
+log = { workspace = true }
+xsk-rs = { workspace = true }
+dashmap = "6.1" # Using stable 6.1 instead of 7.0-rc2 for reliability
+wabrix_base = { path = "../wabrix_base" }
+wabrix_api = { workspace = true }
+crossbeam-channel = { workspace = true }
+tokio = "1.51.1"
+
+[lib]
+name = "wabrix_wasm"
+path = "src/lib.rs"
+
+[features]
+performance = []
+profiling = []
+default = ["profiling"]

@@ -1,10 +1,10 @@
 [workspace]
 members = [
     "ipblower",
-    "xbricks",
-    "xbricks_lib",
-    "xbricks_wasm",
-    "xbricks_base",
+    "wabrix",
+    "wabrix_lib",
+    "wabrix_wasm",
+    "wabrix_base",
 ]
 resolver = "2"
 
@@ -13,9 +13,10 @@ edition = "2021"
 version = "0.1.0"
 publish = false
 license-file = "LICENSE.txt"
+name="wabrix"
 
 [workspace.dependencies]
-xbricks_protocol = { path = "../xbricks_public/xbricks_protocol", features=["host"] }
+wabrix_api = { path = "../wabrix_api/wabrix_api", features=["host"] }
 libbpf-rs = "^0.26.2"
 libbpf-sys = { version = "1.7", default-features = false }
 xsk-rs = { path = "../xsk-rs" }

@@ -1,0 +1,21 @@
+[package]
+name = "wabrix_base"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+xsk-rs = { workspace = true }
+macaddr = { workspace = true }
+wabrix_api = { workspace = true }
+crossbeam-queue = { workspace = true }
+log = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+separator = { workspace = true }
+serde = { workspace = true }
+ts-rs = { workspace = true }
+
+[features]
+performance = []
+profiling = []
+default = ["profiling"]

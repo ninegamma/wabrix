@@ -6,11 +6,11 @@
 # --- NODE.JS / VITE (FRONTEND) ---
 # Ignore massive JavaScript dependencies
 node_modules/
-/xbricks-ui/node_modules/
+/wabrix_ui/node_modules/
 
 # Ignore compiled Vite frontend assets
 dist/
-/xbricks-ui/dist/
+/wabrix_ui/dist/
 
 # Ignore JS environment files (in case you add secrets later)
 .env

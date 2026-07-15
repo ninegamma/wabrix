@@ -6,7 +6,7 @@ NATIVE_MEMBERS = -p ipblower
 build:
 build:
 	# 1. Mount the whole 'rust' folder to /app
-	# 2. Set the working directory to /app/xbrix
+	# 2. Set the working directory to /app/wabrix
 	docker run --rm \
 		-v /home/rainer1956/rust:/app \
 		-w /app/xbrix \

@@ -5,7 +5,7 @@
 The project is split into two repositories:
 
 * **xbrix:** Contains the code for the platform of the dataplane engine.
-* **xbricks_public:** Contains the public SDK for creating WASM plugins for the XBRIX platform (includes `xbricks_protocol` crate and `.wit` interface definitions).
+* **xbricks_public:** Contains the public SDK for creating WASM plugins for the XBRIX platform (includes `wabrix_api` crate and `.wit` interface definitions).
 
 These repositories implement a high-performance, software-based networking engine/router. The system processes packets at high throughput (target: 25 Gbps – 100 Gbps) using Linux kernel-bypass via AF_XDP, and features a sandboxed WebAssembly plugin architecture for data-plane programmability.
 
@@ -37,7 +37,7 @@ xbrix/
 |---|---|---|
 | `xbricks_base` | Core types: `FrameRegistry`, `SystemBus`, `UmemPartition`, `Pdu`, `Batch`, `RuntimeUmemConfig`, telemetry counters | `xsk-rs`, `crossbeam-queue`, `log`, `serde`, external protocol types |
 | `xbricks_lib` | AF_XDP sockets (`XSocket`/`XSocketRx`/`XSocketTx`), pipeline DAG, TOML config, BPF program loading, system builder | `xbricks_base`, `xsk-rs`, `libbpf-rs`, `wasmtime` (behind `wasm` feature), `tokio` |
-| `xbricks_wasm` | WASM runtime host: loads `.wasm` components, exposes host functions via WIT bindings, manages plugin lifecycle | `xbricks_base`, `xbricks_protocol`, `wasmtime`, `wasmtime-wasi` |
+| `xbricks_wasm` | WASM runtime host: loads `.wasm` components, exposes host functions via WIT bindings, manages plugin lifecycle | `xbricks_base`, `wabrix_api`, `wasmtime`, `wasmtime-wasi` |
 | `xbricks` | Binary: CLI (`clap`), management REST+WebSocket API (`axum`), logging sink, startup/teardown orchestration | `xbricks_lib`, `xbricks_base` |
 | `ipblower` | Standalone packet blower / traffic generator binary | `xbricks_lib` (no-wasm), `xbricks_base` |
 
@@ -153,7 +153,7 @@ cargo test
 sudo ./target/release/ipblower --help
 
 # Run the engine (requires root for AF_XDP)
-sudo ./target/release/xbricks --config xbricks.toml
+sudo ./target/release/wabrix --config wabrix.toml
 ```
 
 ---

@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use clap::{Parser, ArgAction};
 use log::info;
 use separator::Separatable;
-use xbricks_base::system::{get_nic_tx_packets_detailed, PacketStats, PlatformData};
+use wabrix_base::system::{get_nic_tx_packets_detailed, PacketStats, PlatformData};
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "High-performance packet generator using AF_XDP")]
@@ -116,10 +116,10 @@ async fn main() -> anyhow::Result<()> {
     let platform_data = PlatformData::detect();
     info!("TSC frequency: {} Hz", platform_data.tsc_frequency.separated_string());
     let toml_data = r#"
-    [xbricks]
+    [wabrix]
     ifaces = [ { name = "lo"} ]"#;
 
-    let mut config = xbricks_lib::toml_parser::XBricksConfig::from_toml_str(toml_data)?;
+    let mut config = wabrix_lib::toml_parser::XBricksConfig::from_toml_str(toml_data)?;
     config.set_interface_0(&opt.interface);
     let (dst_ip, dst_mac) = parse_dst_config(opt.dst.as_deref());
     let base_core = opt.core.unwrap_or(0);
@@ -136,24 +136,24 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Apply zerocopy setting to all generated XSK mappings
-    for xsk in &mut config.xbricks.xsk {
+    for xsk in &mut config.wabrix.xsk {
         xsk.zerocopy = opt.zerocopy;
     }
 
     // --- SYSTEM CHECKS ---
-    let worker_cores: Vec<usize> = config.xbricks.workers.iter().map(|w| w.core).collect();
-    let interfaces: Vec<String> = config.xbricks.ifaces.iter().map(|i| i.name.clone()).collect();
-    xbricks_base::system::check_system(&worker_cores, &interfaces);
+    let worker_cores: Vec<usize> = config.wabrix.workers.iter().map(|w| w.core).collect();
+    let interfaces: Vec<String> = config.wabrix.ifaces.iter().map(|i| i.name.clone()).collect();
+    wabrix_base::system::check_system(&worker_cores, &interfaces);
 
     // --- CONFIGURE NETWORK INTERFACES ---
     info!("Configuring network interfaces...");
-    let _configured_ifaces = xbricks_lib::config::interface_setup::check_or_configure_interfaces(
-        &config.xbricks.ifaces,
-        &config.xbricks.xsk,
+    let _configured_ifaces = wabrix_lib::config::interface_setup::check_or_configure_interfaces(
+        &config.wabrix.ifaces,
+        &config.wabrix.xsk,
         true,
     )?;
 
-    let unique_ifaces: Vec<String> = config.xbricks.ifaces.iter().map(|i| i.name.clone()).collect();
+    let unique_ifaces: Vec<String> = config.wabrix.ifaces.iter().map(|i| i.name.clone()).collect();
 
     // we must keep _xdp_links alive for the lifetime of the program
     let (_interface_skels, _xdp_links) = configure_bpf::setup_bpf(unique_ifaces)?;
@@ -177,11 +177,11 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    xbricks_base::system::wait_for_physical_link(&opt.interface).await;
+    wabrix_base::system::wait_for_physical_link(&opt.interface).await;
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let workers_completed = Arc::new(AtomicUsize::new(0));
-    let total_workers = config.xbricks.workers.len();
+    let total_workers = config.wabrix.workers.len();
 
     info!(
         "Configuration specifies {} workers, expecting {} completions",
@@ -239,7 +239,7 @@ async fn main() -> anyhow::Result<()> {
         match handle.await {
             Ok(Ok(stats)) => {
                 info!("Worker {} stopped:", idx);
-                let stats: Vec<xbricks_lib::PipelineStats> = stats;
+                let stats: Vec<wabrix_lib::PipelineStats> = stats;
                 for pstats in stats.iter() {
                     info!(
                         "  Pipeline '{}': {} packets, {} runs ({} idle)",

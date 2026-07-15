@@ -1462,8 +1462,8 @@ dependencies = [
  "log",
  "separator",
  "tokio",
- "xbricks_base",
- "xbricks_lib",
+ "wabrix_base",
+ "wabrix_lib",
 ]
 
 [[package]]
@@ -2980,6 +2980,109 @@ dependencies = [
 ]
 
 [[package]]
+name = "wabrix"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "axum",
+ "clap",
+ "env_filter 0.1.4",
+ "futures-util",
+ "log",
+ "pcap-file",
+ "separator",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml 1.1.2+spec-1.1.0",
+ "toml_edit",
+ "tower-http",
+ "ts-rs",
+ "wabrix_api",
+ "wabrix_base",
+ "wabrix_lib",
+]
+
+[[package]]
+name = "wabrix_api"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "byteorder",
+ "fnv",
+ "hashbrown 0.17.1",
+ "log",
+ "macaddr",
+ "network-types",
+]
+
+[[package]]
+name = "wabrix_base"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crossbeam-queue",
+ "log",
+ "macaddr",
+ "separator",
+ "serde",
+ "tokio",
+ "ts-rs",
+ "wabrix_api",
+ "xsk-rs",
+]
+
+[[package]]
+name = "wabrix_lib"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "cargo_metadata 0.18.1",
+ "core_affinity",
+ "crossbeam-channel",
+ "crossbeam-queue",
+ "ipnet",
+ "libbpf-cargo",
+ "libbpf-rs",
+ "libbpf-sys",
+ "libc",
+ "log",
+ "macaddr",
+ "network-types",
+ "rand 0.10.1",
+ "rustix 1.1.4",
+ "separator",
+ "serde",
+ "spin",
+ "tokio",
+ "toml 1.1.2+spec-1.1.0",
+ "ts-rs",
+ "wabrix_api",
+ "wabrix_base",
+ "wabrix_wasm",
+ "wasmtime",
+ "wasmtime-wasi",
+ "xsk-rs",
+]
+
+[[package]]
+name = "wabrix_wasm"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "dashmap",
+ "log",
+ "tokio",
+ "wabrix_api",
+ "wabrix_base",
+ "wasmtime",
+ "wasmtime-wasi",
+ "xsk-rs",
+]
+
+[[package]]
 name = "wasi"
 version = "0.11.1+wasi-snapshot-preview1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3869,111 +3972,6 @@ name = "writeable"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
-
-[[package]]
-name = "xbricks"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arc-swap",
- "axum",
- "clap",
- "crossbeam-channel",
- "env_filter 0.1.4",
- "env_logger",
- "futures-util",
- "log",
- "pcap-file",
- "separator",
- "serde",
- "serde_json",
- "tokio",
- "toml 1.1.2+spec-1.1.0",
- "toml_edit",
- "tower-http",
- "ts-rs",
- "xbricks_base",
- "xbricks_lib",
- "xbricks_protocol",
-]
-
-[[package]]
-name = "xbricks_base"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "crossbeam-queue",
- "log",
- "macaddr",
- "separator",
- "serde",
- "tokio",
- "ts-rs",
- "xbricks_protocol",
- "xsk-rs",
-]
-
-[[package]]
-name = "xbricks_lib"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arc-swap",
- "cargo_metadata 0.18.1",
- "core_affinity",
- "crossbeam-channel",
- "crossbeam-queue",
- "ipnet",
- "libbpf-cargo",
- "libbpf-rs",
- "libbpf-sys",
- "libc",
- "log",
- "macaddr",
- "network-types",
- "rand 0.10.1",
- "rustix 1.1.4",
- "separator",
- "serde",
- "spin",
- "tokio",
- "toml 1.1.2+spec-1.1.0",
- "ts-rs",
- "wasmtime",
- "wasmtime-wasi",
- "xbricks_base",
- "xbricks_protocol",
- "xbricks_wasm",
- "xsk-rs",
-]
-
-[[package]]
-name = "xbricks_protocol"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "byteorder",
- "fnv",
- "hashbrown 0.17.1",
- "log",
- "macaddr",
- "network-types",
-]
-
-[[package]]
-name = "xbricks_wasm"
-version = "0.1.0"
-dependencies = [
- "crossbeam-channel",
- "dashmap",
- "log",
- "tokio",
- "wasmtime",
- "wasmtime-wasi",
- "xbricks_base",
- "xbricks_protocol",
- "xsk-rs",
-]
 
 [[package]]
 name = "xsk-rs"

@@ -1,4 +1,4 @@
-Copyright (c) 2026 [Your Name or Company Name]. All rights reserved.
+Copyright (c) 2026 [ninegamma.com]. All rights reserved.
 
 This software and associated documentation files (the "Software") are proprietary and confidential. 
 No part of this Software may be copied, reproduced, distributed, or transmitted in any form or by any means 
