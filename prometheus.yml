@@ -1,0 +1,11 @@
+# prometheus.yml
+global:
+  scrape_interval: 5s # How often to fetch metrics from Wabrix
+
+scrape_configs:
+  - job_name: 'wabrix_engine'
+    # Use 'host.docker.internal' so the Docker container can reach
+    # the Wabrix engine running on your host machine's localhost.
+    # (If on Linux, use 'localhost' and run docker with --network host)
+    static_configs:
+      - targets: ['host.docker.internal:9090']

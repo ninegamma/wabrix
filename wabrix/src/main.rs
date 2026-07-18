@@ -1,3 +1,5 @@
+mod metrics_server; // Added the new metrics server module
+
 use std::collections::HashMap;
 use anyhow::Context;
 use clap::Parser;
@@ -29,7 +31,6 @@ pub enum SystemCommand {
     Check,
     Restart,
     Shutdown,
-    Run,
 }
 
 #[tokio::main]
@@ -40,6 +41,11 @@ async fn main() -> anyhow::Result<()> {
 
     let (telemetry_tx, _) = tokio::sync::broadcast::channel::<TMLiveStats>(100);
     let (ctrl_tx, _) = tokio::sync::broadcast::channel::<Arc<ControlEvent>>(100);
+
+    // ==========================================================
+    // SPAWN PROMETHEUS METRICS SERVER
+    // ==========================================================
+    metrics_server::spawn_metrics_server(telemetry_tx.subscribe());
 
     log::info!("Starting Wabrix Open Source Engine...");
     let opt = Opt::parse();
@@ -66,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
     // SPAWN ASYNC CLI LISTENER
     // ==========================================================
     let cli_cmd_tx = cmd_tx.clone();
-    let cli_ctrl_tx = ctrl_tx.clone(); // <-- NEW: Give the CLI access to the plugin control channel
+    let cli_ctrl_tx = ctrl_tx.clone();
 
     tokio::spawn(async move {
         let stdin = tokio::io::stdin();
@@ -74,7 +80,8 @@ async fn main() -> anyhow::Result<()> {
 
         println!("=========================================");
         println!("Wabrix CLI Ready.");
-        println!("Commands: start, stop, restart, check, run, trigger <opcode>, shutdown");
+        println!("Prometheus Exporter: http://localhost:9090/metrics");
+        println!("Commands: start, stop, restart, check, run, ctrl <address_pattern> <opcode>, shutdown");
         println!("=========================================");
 
         while let Ok(Some(line)) = reader.next_line().await {
@@ -86,20 +93,20 @@ async fn main() -> anyhow::Result<()> {
                 "stop" => { let _ = cli_cmd_tx.send(SystemCommand::Stop).await; }
                 "restart" => { let _ = cli_cmd_tx.send(SystemCommand::Restart).await; }
                 "check" => { let _ = cli_cmd_tx.send(SystemCommand::Check).await; }
-                "run" => { let _ = cli_cmd_tx.send(SystemCommand::Run).await; }
-                "online" | "trigger" => {
-                    // If you type `trigger <opcode> <byte1> <byte2>...`
-                    let opcode = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+                "ctrl" => {
+                    // If you type `ctrl <address_pattern> <opcode> <byte1> <byte2>...`
+                    let address_pattern = parts.get(1).unwrap_or(&"*").to_string();
+                    let opcode = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
 
                     // Parse any remaining parts as u8 bytes for the payload
-                    let payload: Vec<u8> = parts.iter().skip(2)
+                    let payload: Vec<u8> = parts.iter().skip(3)
                         .filter_map(|s| s.parse::<u8>().ok())
                         .collect();
 
-                    println!("=> Broadcasting ControlEvent (opcode: {}, payload: {:?}) to plugins...", opcode, payload);
+                    println!("=> Broadcasting ControlEvent (address: {}, opcode: {}, payload: {:?}) to plugins...", address_pattern, opcode, payload);
 
                     let event = Arc::new(ControlEvent {
-                        address_pattern: "*".to_string(), // Broadcast to all Wasm plugins
+                        address_pattern,
                         opcode,
                         payload,
                     });
@@ -109,7 +116,7 @@ async fn main() -> anyhow::Result<()> {
                     let _ = cli_cmd_tx.send(SystemCommand::Shutdown).await;
                     break;
                 }
-                _ => println!("Unknown command. Use: start, stop, restart, check, trigger <opcode> [payload_bytes...], shutdown"),
+                _ => println!("Unknown command. Use: start, stop, restart, check, ctrl <address_pattern> <opcode> [payload_bytes...], shutdown"),
             }
         }
     });
@@ -274,10 +281,6 @@ async fn main() -> anyhow::Result<()> {
         match next_cmd {
             SystemCommand::Start => {
                 info!("Received START command. Booting hardware...");
-                dataplane_active = true;
-            }
-            SystemCommand::Run => {
-                info!("Received RUN command. Triggering a single run of the dataplane...");
                 dataplane_active = true;
             }
             SystemCommand::Stop => {

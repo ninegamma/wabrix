@@ -22,10 +22,10 @@ workers= [
 ]
 
 # ===================================================================
-# PIPELINE: UNIFIED_NIC0
+# PIPELINE: NIC0
 # ===================================================================
 [[pipelines]]
-name = "unified_nic0"
+name = "nic0"
 workers = [0]
 poll_frequency = 10000
 
@@ -108,10 +108,10 @@ args= {}
 hot_args= {}
 
 # ===================================================================
-# PIPELINE: UNIFIED_NIC1
+# PIPELINE: NIC1
 # ===================================================================
 [[pipelines]]
-name = "unified_nic1"
+name = "nic1"
 workers = [1]
 poll_frequency = 10000
 
