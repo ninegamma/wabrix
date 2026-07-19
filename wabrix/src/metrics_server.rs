@@ -14,23 +14,27 @@ pub fn spawn_metrics_server(mut tm_rx: Receiver<TMLiveStats>) {
         // Create Gauge Vectors with labels for pipeline name and specific node/interface label
         let packets_total = IntGaugeVec::new(
             Opts::new("wabrix_packets_total", "Total packets processed"),
-            &["tmstats_name", "data_label"]
-        ).unwrap();
+            &["tmstats_name", "data_label"],
+        )
+        .unwrap();
 
         let bytes_total = IntGaugeVec::new(
             Opts::new("wabrix_bytes_total", "Total bytes processed"),
-            &["tmstats_name", "data_label"]
-        ).unwrap();
+            &["tmstats_name", "data_label"],
+        )
+        .unwrap();
 
         let pps_live = IntGaugeVec::new(
             Opts::new("wabrix_packets_per_second", "Live packets per second (PPS)"),
-            &["tmstats_name", "data_label"]
-        ).unwrap();
+            &["tmstats_name", "data_label"],
+        )
+        .unwrap();
 
         let bps_live = IntGaugeVec::new(
             Opts::new("wabrix_bytes_per_second", "Live bytes per second (BPS)"),
-            &["tmstats_name", "data_label"]
-        ).unwrap();
+            &["tmstats_name", "data_label"],
+        )
+        .unwrap();
 
         registry.register(Box::new(packets_total.clone())).unwrap();
         registry.register(Box::new(bytes_total.clone())).unwrap();
@@ -70,15 +74,18 @@ pub fn spawn_metrics_server(mut tm_rx: Receiver<TMLiveStats>) {
         });
 
         // 3. Expose the registry over HTTP for Prometheus to scrape
-        let app = Router::new().route("/metrics", get(move || async move {
-            let mut buffer = vec![];
-            let encoder = TextEncoder::new();
-            let metric_families = metrics_registry.gather();
-            if let Err(e) = encoder.encode(&metric_families, &mut buffer) {
-                log::error!("Failed to encode prometheus metrics: {}", e);
-            }
-            String::from_utf8(buffer).unwrap_or_default()
-        }));
+        let app = Router::new().route(
+            "/metrics",
+            get(move || async move {
+                let mut buffer = vec![];
+                let encoder = TextEncoder::new();
+                let metric_families = metrics_registry.gather();
+                if let Err(e) = encoder.encode(&metric_families, &mut buffer) {
+                    log::error!("Failed to encode prometheus metrics: {}", e);
+                }
+                String::from_utf8(buffer).unwrap_or_default()
+            }),
+        );
 
         let addr = SocketAddr::from(([0, 0, 0, 0], 9090));
         log::info!("Prometheus Metrics Exporter listening on http://{}/metrics", addr);

@@ -1,5 +1,4 @@
 # Multi-interface, single UMEM configuration example
-# Demonstrates multiple NICs with one UMEM domain
 #
 # Architecture:
 # - Worker: single-threaded execution unit running on one core (multiple workers can share a core)

@@ -13,7 +13,6 @@ edition = "2021"
 version = "0.1.0"
 publish = false
 license-file = "LICENSE.txt"
-name="wabrix"
 
 [workspace.dependencies]
 wabrix_api = { path = "../wabrix_api/wabrix_api", features=["host"] }
@@ -30,7 +29,7 @@ macaddr = { version = "1.0.1", default-features = false, features = ["serde"] }
 
 # Common dependencies
 anyhow = "1"
-log = "0.4"
+log = { version = "0.4", default-features = false }
 tokio = { version = "1.49", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 separator = "0.4"

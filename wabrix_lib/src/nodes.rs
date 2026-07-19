@@ -332,7 +332,6 @@ impl Node for QueueNode {
     }
 }
 
-
 /// A sink node that intentionally discards all packets it receives.
 /// Useful for:
 /// 1. Terminating "unmatched" traffic from a Classifier (Default Route).
@@ -479,4 +478,3 @@ impl Node for FastParserNode {
         self.total_cycles
     }
 }
-

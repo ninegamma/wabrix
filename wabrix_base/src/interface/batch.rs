@@ -6,8 +6,6 @@ use wabrix_api::MAX_BATCH_SIZE;
 use crate::frame_registry::get_worker_frame_registry;
 use crate::interface::Pdu;
 
-
-
 pub struct Batch {
     /// A dense array of uninitialized memory.
     /// NO padding between PDUs.
@@ -65,7 +63,7 @@ impl Batch {
     pub fn is_empty(&self) -> bool {
         self.count == 0
     }
-    
+
     /// returns a raw pointer to the batch's data
     #[inline]
     pub fn as_ptr(&self) -> *const u8 {

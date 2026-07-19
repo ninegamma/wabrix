@@ -42,7 +42,7 @@ id = "nd_veth_source"
 type = "BatchRxNode"
 routes = ["nd_parser_veth"]
 queues = [0]
-args= { interface = "veth_xbricks" }
+args= { interface = "veth_wabrix" }
 hot_args= {}
 
 [[pipelines.nodes]]
@@ -97,7 +97,7 @@ id = "veth_sink"
 type = "BatchTxNode"
 routes = []
 queues = [0]
-args= { interface = "veth_xbricks" }
+args= { interface = "veth_wabrix" }
 hot_args= {}
 
 [[pipelines.nodes]]
@@ -128,7 +128,7 @@ id = "nd_veth_source"
 type = "BatchRxNode"
 routes = ["nd_parser_veth"]
 queues = [0]
-args= { interface = "veth_xbricks_1" }
+args= { interface = "veth_wabrix_1" }
 hot_args= {}
 
 [[pipelines.nodes]]
@@ -179,7 +179,7 @@ id = "veth_sink"
 type = "BatchTxNode"
 routes = []
 queues = [0]
-args= { interface = "veth_xbricks_1" }
+args= { interface = "veth_wabrix_1" }
 hot_args= {}
 
 [[pipelines.nodes]]
@@ -277,7 +277,7 @@ y = -473.063
 x = 83.86233
 y = -40.407444
 
-[layout.iface_veth_xbricks_1]
+[layout.iface_veth_wabrix_1]
 x = 803.8245
 y = -674.63544
 
@@ -305,7 +305,7 @@ y = 740.7365
 x = 642.961
 y = 583.6589
 
-[layout.iface_veth_xbricks]
+[layout.iface_veth_wabrix]
 x = -122.77464
 y = -655.993
 

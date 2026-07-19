@@ -32,8 +32,6 @@ pub fn get_tsc_start() -> u64 {
     TSC_START.with(|s| s.get())
 }
 
-
-
 /// Set the worker's frame registry for the current thread
 /// Must be called before any socket operations
 pub fn set_worker_frame_registry(registry: *mut FrameRegistry) {
@@ -95,7 +93,6 @@ pub fn decode_global_frame(global_idx: u32) -> (usize, u32) {
     (umem_id, local_idx)
 }
 
-
 /// Per-UMEM partition data within a worker's registry.
 /// `free_stash` holds encoded global frame indices (encode_global_frame format).
 /// `refcounts` is indexed directly by UMEM-relative local_idx — no subtraction needed.
@@ -153,7 +150,7 @@ impl FrameRegistry {
 
             // Convert absolute partition range to UMEM-relative local indices.
             let local_start = partition.start_idx - group_start;
-            let local_end   = partition.end_idx   - group_start;
+            let local_end = partition.end_idx - group_start;
             let partition_size = (local_end - local_start) as usize;
 
             // Pre-encode every frame in the partition.
@@ -217,7 +214,6 @@ impl FrameRegistry {
                 }
 
                 processed_count += 1;
-
             } else {
                 // 🚨 CRITICAL: The queue is empty. Break the loop! 🚨
                 break;
@@ -225,8 +221,18 @@ impl FrameRegistry {
         }
 
         if processed_count > 0 && log::log_enabled!(log::Level::Trace) {
-            let total_free: usize = self.registry_map.iter().filter_map(|e| e.as_ref()).map(|p| p.free_stash.len()).sum();
-            log::trace!("Worker {}: Processed {} frame commands, total free frames: {}", self.worker_id, processed_count, total_free);
+            let total_free: usize = self
+                .registry_map
+                .iter()
+                .filter_map(|e| e.as_ref())
+                .map(|p| p.free_stash.len())
+                .sum();
+            log::trace!(
+                "Worker {}: Processed {} frame commands, total free frames: {}",
+                self.worker_id,
+                processed_count,
+                total_free
+            );
         }
     }
 
@@ -250,7 +256,11 @@ impl FrameRegistry {
                 let refcount = partition_data.refcounts.get_unchecked_mut(idx);
 
                 if *refcount == 0 {
-                    log::error!("🔥 CRITICAL: Prevented Double-Free of frame local_idx={} in UMEM {}!", idx, umem_id);
+                    log::error!(
+                        "🔥 CRITICAL: Prevented Double-Free of frame local_idx={} in UMEM {}!",
+                        idx,
+                        umem_id
+                    );
                     return;
                 }
 
@@ -260,10 +270,13 @@ impl FrameRegistry {
                 }
             }
         } else {
-            log::error!("Worker {}: partition data not found for UMEM group {}!", self.worker_id, umem_id);
+            log::error!(
+                "Worker {}: partition data not found for UMEM group {}!",
+                self.worker_id,
+                umem_id
+            );
         }
     }
-
 
     /// Allocates up to `dst.len()` frames from the specific UMEM partition.
     /// Writes encoded global indices directly into the provided slice.
@@ -342,7 +355,11 @@ impl FrameRegistry {
 
     /// Get total number of free frames across all UMEM partitions
     pub fn total_free_frames(&self) -> usize {
-        self.registry_map.iter().filter_map(|e| e.as_ref()).map(|p| p.free_stash.len()).sum()
+        self.registry_map
+            .iter()
+            .filter_map(|e| e.as_ref())
+            .map(|p| p.free_stash.len())
+            .sum()
     }
 
     /// Allocates frames and creates PDUs for them
@@ -394,13 +411,7 @@ impl FrameRegistry {
             let frame_addr = (local_idx as usize) << frame_size_log2;
             let desc = FrameDesc::new(frame_addr + headroom);
 
-            let pdu = Pdu::new(
-                desc,
-                frame_idx,
-                self.worker_id as u8,
-                system_bus,
-                frame_size_log2,
-            );
+            let pdu = Pdu::new(desc, frame_idx, self.worker_id as u8, system_bus, frame_size_log2);
 
             pdus.push(pdu);
         }

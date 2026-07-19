@@ -15,7 +15,6 @@ use crate::config::hot_config::NodeDynamicState;
 use crate::system_builder::SystemBuilder;
 use crate::xsocket::XdpSocketConfig;
 
-
 /// Persisted position of a single graph node, stored under [layout] in wabrix.toml.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SavedPosition {
@@ -214,9 +213,12 @@ where
                     toml::Value::Integer(i) => i.to_string(),
                     toml::Value::Float(f) => f.to_string(),
                     toml::Value::Boolean(b) => b.to_string(),
-                    other => return Err(serde::de::Error::custom(
-                        format!("unsupported value type in args: {:?}", other)
-                    )),
+                    other => {
+                        return Err(serde::de::Error::custom(format!(
+                            "unsupported value type in args: {:?}",
+                            other
+                        )))
+                    }
                 };
                 result.insert(key, s);
             }
@@ -261,9 +263,12 @@ where
                     toml::Value::Integer(i) => i.to_string(),
                     toml::Value::Float(f) => f.to_string(),
                     toml::Value::Boolean(b) => b.to_string(),
-                    other => return Err(serde::de::Error::custom(
-                        format!("unsupported value type in wasm_data: {:?}", other)
-                    )),
+                    other => {
+                        return Err(serde::de::Error::custom(format!(
+                            "unsupported value type in wasm_data: {:?}",
+                            other
+                        )))
+                    }
                 };
                 result.insert(key, s);
             }
@@ -301,7 +306,6 @@ pub struct NodeInstance {
     pub node_instance_id: NodeInstanceId,
 }
 
-
 impl NodeConfig {
     /// Returns the value for `key` from `hot_args` if present, otherwise from `args`.
     pub fn effective_arg(&self, key: &str) -> Option<&String> {
@@ -325,8 +329,6 @@ pub struct WorkerBuilderConfig {
     pub core_id: u32,                     // The CPU Core to pin to
     pub pipelines: Vec<PipelineInstance>, // List of pipelines this worker runs
 }
-
-
 
 impl XBricksConfig {
     /// Load configuration from a TOML file and validate it
@@ -436,7 +438,6 @@ impl XBricksConfig {
 
         // Create a separate pipeline for each worker
         for (worker_id, &packets_for_this_worker) in packets_per_worker_vec.iter().enumerate() {
-
             // Naming standard: Even for a single worker, it becomes "generator_0"
             let pipeline = PipelineConfig {
                 name: format!("generator_{}", worker_id),
@@ -524,8 +525,11 @@ impl XBricksConfig {
                     Reserved: {}, Hardware Locked (FQ+RX+TX across {} sockets): {}.\n\
                     Shortfall: {} frames.\n\
                     Fix: Increase `frame_count` or decrease ring sizes (fq_size, rxq_size) in your TOML!",
-                    umem.id, umem.frame_count,
-                    umem.reserved, socket_count, hardware_locked_frames,
+                    umem.id,
+                    umem.frame_count,
+                    umem.reserved,
+                    socket_count,
+                    hardware_locked_frames,
                     total_required - umem.frame_count
                 );
             } else if umem.frame_count < safe_minimum {
@@ -533,19 +537,24 @@ impl XBricksConfig {
                     "⚠️ UMEM {} is dangerously low on free frames.\n\
                     Total: {}, Hardware+Reserved: {}. Leaves only {} frames for {} workers to share.\n\
                     This may cause 'Starvation!' warnings under load. Consider increasing frame_count.",
-                    umem.id, umem.frame_count, total_required,
-                    umem.frame_count - total_required, umem.partitions
+                    umem.id,
+                    umem.frame_count,
+                    total_required,
+                    umem.frame_count - total_required,
+                    umem.partitions
                 );
             } else {
                 log::info!(
                     "✓ UMEM {} memory math verified (Total: {}, Hardware Locked: {}, Free for app: {})",
-                    umem.id, umem.frame_count, total_required, umem.frame_count - total_required
+                    umem.id,
+                    umem.frame_count,
+                    total_required,
+                    umem.frame_count - total_required
                 );
             }
         }
         Ok(())
     }
-
 
     /// Validate the configuration for consistency and correctness
     fn validate(&self) -> Result<()> {
@@ -567,7 +576,8 @@ impl XBricksConfig {
             if umem_cfg.id >= MAX_UMEM {
                 return Err(anyhow!(
                     "UMEM id {} exceeds maximum of {} (must fit in 8 bits for frame encoding)",
-                    umem_cfg.id, MAX_UMEM - 1
+                    umem_cfg.id,
+                    MAX_UMEM - 1
                 ));
             }
 
@@ -1023,11 +1033,19 @@ impl XBricksConfig {
                 for node in &pipeline.nodes {
                     if node.node_type == "WasmInspectorNode" {
                         let wasm_umem_str = node.args.get("umem").ok_or_else(|| {
-                            anyhow!("Pipeline '{}': WasmInspectorNode '{}' is missing 'umem' argument", pipeline.name, node.id)
+                            anyhow!(
+                                "Pipeline '{}': WasmInspectorNode '{}' is missing 'umem' argument",
+                                pipeline.name,
+                                node.id
+                            )
                         })?;
 
                         let wasm_umem = wasm_umem_str.parse::<usize>().map_err(|_| {
-                            anyhow!("Pipeline '{}': Invalid 'umem' format for WasmInspectorNode '{}'", pipeline.name, node.id)
+                            anyhow!(
+                                "Pipeline '{}': Invalid 'umem' format for WasmInspectorNode '{}'",
+                                pipeline.name,
+                                node.id
+                            )
                         })?;
 
                         // Check if any propagated UMEM reaching this node differs from its bound UMEM
@@ -1127,7 +1145,8 @@ impl XBricksConfig {
                                         // Get the worker config to check its UMEM partition allocations
                                         if let Some(worker_cfg) = section.workers.iter().find(|w| w.id == worker_id) {
                                             // Check if worker has a partition from the same UMEM as the queue
-                                            let has_matching_umem = worker_cfg.partitions.iter().any(|p| p.umem == xsk_umem_id);
+                                            let has_matching_umem =
+                                                worker_cfg.partitions.iter().any(|p| p.umem == xsk_umem_id);
 
                                             if !has_matching_umem {
                                                 let worker_umems: Vec<usize> =
@@ -1401,7 +1420,6 @@ impl XBricksConfig {
         Ok(system_builder)
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1906,12 +1924,10 @@ mod tests {
         let config: XBricksConfig = toml::from_str(toml_str).unwrap();
         let result = config.validate();
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("total requested partitions (5) exceeds available partitions (4)")
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("total requested partitions (5) exceeds available partitions (4)"));
     }
 
     #[test]
@@ -2061,7 +2077,8 @@ mod tests {
     /// PacketGenerator feeds a WasmInspectorNode.  The `gen_umem` / `wasm_umem`
     /// parameters control the `umem` arg on each node so we can provoke mismatches.
     fn wasm_umem_pipeline_toml(gen_umem: usize, wasm_umem: usize) -> String {
-        format!(r#"
+        format!(
+            r#"
             [wabrix]
             ifaces = [
                 {{ name = "lo", rxd = 2048, txd = 2048 }}
@@ -2097,9 +2114,9 @@ mod tests {
                 [[pipelines.nodes]]
                 id = "drop2"
                 type = "DropNode"
-        "#)
+        "#
+        )
     }
-
 
     #[test]
     fn test_wasm_inspector_upstream_umem_match_is_accepted() {
@@ -2227,7 +2244,8 @@ mod tests {
         // Assert it threw the correct specific error
         assert!(
             err_msg.contains("WasmInspectorNode 'wasm' is bound to umem 1, but can receive PDUs from umem 0"),
-            "Error message did not match expected output. Got: {}", err_msg
+            "Error message did not match expected output. Got: {}",
+            err_msg
         );
     }
 }

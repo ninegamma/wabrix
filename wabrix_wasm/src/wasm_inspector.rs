@@ -93,7 +93,8 @@ impl WasmInspectorNode {
 
         if !wasm_data.is_empty() {
             let data: Vec<(String, String)> = wasm_data.into_iter().collect();
-            bindings.wabrix_plugins_inspector()
+            bindings
+                .wabrix_plugins_inspector()
                 .call_init_data(&mut store, &data)
                 .expect("Failed to call init-data on Wasm inspector");
         }
@@ -131,7 +132,8 @@ impl Node for WasmInspectorNode {
         debug_assert!(
             batch.iter().all(|pdu| pdu.w.umem_id() == self.umem_id),
             "NODE {}: PDU from wrong Umem arrived (expected umem_id={})",
-            self.id, self.umem_id
+            self.id,
+            self.umem_id
         );
 
         self.processed_packets += len as u64;
@@ -142,14 +144,17 @@ impl Node for WasmInspectorNode {
 
         // Calculate the exact byte size of the populated packets
         let active_bytes = len * size_of::<Pdu>();
-        log::trace!("NODE {}: Processing batch of {} packets. Partition offset: {}", self.id, len, self.partition_start_bytes);
+        log::trace!(
+            "NODE {}: Processing batch of {} packets. Partition offset: {}",
+            self.id,
+            len,
+            self.partition_start_bytes
+        );
         // Call the Component Model plugin inside a block so that `batch_bytes`
         // (a shared reference into `batch`) is dropped before we restore desc_addr.
         let action_vector = {
             // View the Host Batch as a raw byte slice
-            let batch_bytes: &[u8] = unsafe {
-                std::slice::from_raw_parts(batch.as_ptr(), active_bytes)
-            };
+            let batch_bytes: &[u8] = unsafe { std::slice::from_raw_parts(batch.as_ptr(), active_bytes) };
 
             self.bindings
                 .wabrix_plugins_inspector()
@@ -161,7 +166,6 @@ impl Node for WasmInspectorNode {
                 })
         };
 
-
         // Safety check: Ensure Wasm returned an action for every packet
         if action_vector.len() != len {
             log::error!("Wasm returned mismatched action array!");
@@ -172,13 +176,10 @@ impl Node for WasmInspectorNode {
         // PREPARE DYNAMIC OUTPUTS
         let num_routes = self.routing_table.len();
         log::trace!("NODE {}: Routing table has {} available routes.", self.id, num_routes);
-        let mut outputs: Vec<Batch> = std::iter::repeat_with(Batch::new)
-            .take(num_routes)
-            .collect();
+        let mut outputs: Vec<Batch> = std::iter::repeat_with(Batch::new).take(num_routes).collect();
 
         // We need an iterator index to match PDUs to the Wasm Action Vector
         let mut pdu_index = 0;
-
 
         // DISTRIBUTE AND EXECUTE ACTIONS
         // Bits 0-7 (Route ID): Which output port to send the packet to (0-254). 255 = DROP.
@@ -193,36 +194,50 @@ impl Node for WasmInspectorNode {
             let telemetry_bucket = ((action >> 16) & 0xFF) as usize; // Get the port bucket (0-10)
             let _send_sample = (action & TELEMETRY_FLAG) != 0;
             // TRACE LOG: Inspect the exact bitfield returned by WASM for this packet
-            log::trace!("  -> Pkt [{}]: Action Bits = {:#010X} | Extracted Route ID = {} | Tel Bucket = {}", pdu_index, action, route_id, telemetry_bucket);
+            log::trace!(
+                "  -> Pkt [{}]: Action Bits = {:#010X} | Extracted Route ID = {} | Tel Bucket = {}",
+                pdu_index,
+                action,
+                route_id,
+                telemetry_bucket
+            );
             // 1. HIGH VOLUME (Atomics) -> Cost: ~10 cycles
             // (Assuming telemetry_metrics is thread-local to this worker!)
             if telemetry_bucket < self.telemetry_metrics.counters_pkts.len() {
                 self.telemetry_metrics.counters_pkts[telemetry_bucket].fetch_add(1, Ordering::Relaxed);
-                self.telemetry_metrics.counters_bytes[telemetry_bucket].fetch_add(pdu.w.data_len() as u64, Ordering::Relaxed);
+                self.telemetry_metrics.counters_bytes[telemetry_bucket]
+                    .fetch_add(pdu.w.data_len() as u64, Ordering::Relaxed);
             }
-/*
-            // TODO
-            // 2. LOW VOLUME (Channels) -> Cost: ~80 cycles (but rarely happens)
-            if send_sample {
-                // Only send a sample for anomalous packets
-                let _ = self.telemetry_channel.try_send(AnomalyEvent {
-                    bucket: telemetry_bucket,
-                    // ... packet metadata
-                });
-            }
-*/
+            /*
+                        // TODO
+                        // 2. LOW VOLUME (Channels) -> Cost: ~80 cycles (but rarely happens)
+                        if send_sample {
+                            // Only send a sample for anomalous packets
+                            let _ = self.telemetry_channel.try_send(AnomalyEvent {
+                                bucket: telemetry_bucket,
+                                // ... packet metadata
+                            });
+                        }
+            */
             // invalid route ID: pdu remains in batch, and maybe dropped later
             if route_id >= num_routes {
                 log::warn!("NODE {}: Invalid Route ID {} for Pkt [{}].", self.id, route_id, pdu_index);
                 usize::MAX
-            } else { route_id }
+            } else {
+                route_id
+            }
         });
 
         // 4. DISPATCH DIRECTIVES
         let mut split_branches = Vec::with_capacity(num_routes);
         for (i, output_batch) in outputs.into_iter().enumerate() {
             if !output_batch.is_empty() {
-                log::trace!("NODE {}: Branching {} packets to Target Node ID: {}", self.id, output_batch.len(), self.routing_table[i]);
+                log::trace!(
+                    "NODE {}: Branching {} packets to Target Node ID: {}",
+                    self.id,
+                    output_batch.len(),
+                    self.routing_table[i]
+                );
                 // Route ID matches the index in our dynamic routing table
                 split_branches.push((self.routing_table[i].clone(), output_batch));
             }

@@ -1,7 +1,7 @@
 [wabrix]
 ifaces= [
     { name = "enp2s0f0np0", rxd = 8096, txd = 8096, irq_core = 8 },
-    { name = "veth_xbricks", rxd = 1024, txd = 1024, type = "veth", namespace = "ns-xbricks", peer = "tap-veth", mac_if = "enp2s0f0np0", ipnet = "10.10.10.222/24", checksum_offload = false },
+    { name = "veth_wabrix", rxd = 1024, txd = 1024, type = "veth", namespace = "ns-wabrix", peer = "tap-veth", mac_if = "enp2s0f0np0", ipnet = "10.10.10.222/24", checksum_offload = false },
 ]
 umem= [
     { id = 0, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 16384, head_room = 128, partitions = 1, reserved = 30720 },
@@ -9,7 +9,7 @@ umem= [
 ]
 xsk= [
     { iface = "enp2s0f0np0", queues = [0], umem = 0, rxq_size = 16384, txq_size = 4096, zerocopy = true, xdp_mode = "auto" },
-    { iface = "veth_xbricks", queues = [0], umem = 1, rxq_size = 4096, txq_size = 4096, zerocopy = false, xdp_mode = "auto" },
+    { iface = "veth_wabrix", queues = [0], umem = 1, rxq_size = 4096, txq_size = 4096, zerocopy = false, xdp_mode = "auto" },
 ]
 workers= [
     { id = 0, core = 9, partitions = [{ umem = 0, count = 1 }, { umem = 1, count = 1 }] },
@@ -36,7 +36,7 @@ id = "nd_veth_source"
 type = "BatchRxNode"
 routes = ["nd_parser_veth"]
 queues = [0]
-args= { interface = "veth_xbricks" }
+args= { interface = "veth_wabrix" }
 hot_args= {}
 
 [[pipelines.nodes]]
@@ -66,16 +66,8 @@ dst_ip = "10.10.10.31"
 [[pipelines.nodes]]
 id = "nd_parser_veth"
 type = "FastParserNode"
-routes = ["nd_icmp_filter"]
+routes = ["shared_tx_sink"]
 args= {}
-hot_args= {}
-
-[[pipelines.nodes]]
-id = "nd_icmp_filter"
-type = "WasmInspectorNode"
-routes = ["shared_tx_sink", "drop"]
-labels = ["icmp ping", "icmp reply", "icmp other", "any other"]
-args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/icmp_filter.wasm", umem = "1" }
 hot_args= {}
 
 [[pipelines.nodes]]
@@ -91,7 +83,7 @@ id = "veth_sink"
 type = "BatchTxNode"
 routes = []
 queues = [0]
-args= { interface = "veth_xbricks" }
+args= { interface = "veth_wabrix" }
 hot_args= {}
 
 [[pipelines.nodes]]
@@ -165,6 +157,6 @@ y = 997.55975
 x = -78.890785
 y = 338.87372
 
-[layout.iface_veth_xbricks]
+[layout.iface_veth_wabrix]
 x = 685.3797
 y = -3.5324233

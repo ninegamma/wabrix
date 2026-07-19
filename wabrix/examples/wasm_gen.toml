@@ -32,7 +32,7 @@ hot_args= {}
 id = "pctgen"
 type = "PacketGenerator"
 routes = ["nd_transmitter"]
-args= { no-zerocopy = "false", wasm_file_path = "/home/rainer1956/rust/wabrix/target/wasm32-wasip2/release/generator_plugin.wasm", umem = "0" }
+args= { no-zerocopy = "false", wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/generator_plugin.wasm", umem = "0" }
 hot_args= { batch_size = "4", dst_ip = "192.168.177.222", pps = "4", dst_mac = "44:49:88:06:63:39", packet_limit = "120" }
 
 [pipelines.nodes.wasm_data]

@@ -19,8 +19,9 @@ use wabrix_api::connections::{ConnectionNode, ConnectionPool, FlowKey, TcpState}
 use wabrix_api::MAX_BATCH_SIZE;
 
 use wabrix_api::tcp_common::{
-    EngineConfig, SynGenerator, TimeoutStack, run_tcp_state_machine, write_tcp_reply,
-    FLAG_ACK, FLAG_FIN, FLAG_RST, FLAG_SYN, PORT_START_RANGE, PORT_END_RANGE, STAT_COUNT, STAT_DROP, STAT_RECV_RST, STAT_RECV_SYN, STAT_SENT_FIN, STAT_SENT_RST, STAT_SENT_SYN, STAT_SENT_SYNACK, STAT_TO_LINUX, STAT_UNEXPECTED
+    EngineConfig, SynGenerator, TimeoutStack, run_tcp_state_machine, write_tcp_reply, FLAG_ACK, FLAG_FIN, FLAG_RST,
+    FLAG_SYN, PORT_START_RANGE, PORT_END_RANGE, STAT_COUNT, STAT_DROP, STAT_RECV_RST, STAT_RECV_SYN, STAT_SENT_FIN,
+    STAT_SENT_RST, STAT_SENT_SYN, STAT_SENT_SYNACK, STAT_TO_LINUX, STAT_UNEXPECTED,
 };
 
 const MAX_CONNECTIONS: usize = 524_288;
@@ -86,7 +87,9 @@ impl TcpNode {
         }
 
         // Resolve node name using fallback chain
-        let node_name = config.name.clone()
+        let node_name = config
+            .name
+            .clone()
             .or(raw_src_ip)
             .unwrap_or_else(|| alloc::string::String::from("unknown"));
 
@@ -182,8 +185,13 @@ impl TcpNode {
                 if payload.len() == 1 {
                     let new_state = payload[0];
                     self.set_state(new_state);
-                    log::info!("TcpNode '{}': state → {} (activated={}, bypass={})",
-                        self.id.id, new_state, self.syn_gen.activated, self.config.bypass);
+                    log::info!(
+                        "TcpNode '{}': state → {} (activated={}, bypass={})",
+                        self.id.id,
+                        new_state,
+                        self.syn_gen.activated,
+                        self.config.bypass
+                    );
                     true
                 } else {
                     false
@@ -264,13 +272,8 @@ impl Node for TcpNode {
             }
 
             let current_tsc = self.current_tsc;
-            let route = handle_tcp_packet(
-                &mut pdu,
-                &mut self.connections,
-                &self.config,
-                &mut self.stats,
-                current_tsc,
-            ) as usize;
+            let route =
+                handle_tcp_packet(&mut pdu, &mut self.connections, &self.config, &mut self.stats, current_tsc) as usize;
 
             if route < num_routes {
                 self.output_batches[route].push(pdu).ok();
@@ -350,7 +353,7 @@ impl Node for TcpNode {
         }
 
         // === 2. Calculate how many frames we need ===
-        let timeout_count = self.timeout_queue.len().min(2*MAX_BATCH_SIZE/3);
+        let timeout_count = self.timeout_queue.len().min(2 * MAX_BATCH_SIZE / 3);
 
         let syn_count = {
             let syn_rate = self.config.syn_rate.unwrap_or(0);
@@ -367,8 +370,13 @@ impl Node for TcpNode {
                         // (e.g. the TCP server node) from spamming this line every
                         // poll_timers tick, which floods stdout and starves the
                         // async telemetry tasks.
-                        log::info!("TcpNode '{}': SYN generator activated — syn_rate={}, src_ip={:?}, dst_ip={:?}",
-                            self.id.id, syn_rate, self.config.src_ip, self.config.dst_ip);
+                        log::info!(
+                            "TcpNode '{}': SYN generator activated — syn_rate={}, src_ip={:?}, dst_ip={:?}",
+                            self.id.id,
+                            syn_rate,
+                            self.config.src_ip,
+                            self.config.dst_ip
+                        );
                         self.syn_gen.last_tsc = current_tsc;
                     }
                     let delta = current_tsc.saturating_sub(self.syn_gen.last_tsc);
@@ -403,10 +411,7 @@ impl Node for TcpNode {
             return Directive::Stop;
         }
         let frame_registry = unsafe { &mut *registry_ptr };
-        let allocated = frame_registry.allocate_pdus_into(
-            self.umem_group_id,
-            &mut self.scratch_pdus[..frames_needed],
-        );
+        let allocated = frame_registry.allocate_pdus_into(self.umem_group_id, &mut self.scratch_pdus[..frames_needed]);
         if allocated == 0 {
             return Directive::Stop;
         }
@@ -498,10 +503,7 @@ impl Node for TcpNode {
             frame_idx += 1;
 
             self.syn_gen.syns_sent += 1;
-            self.syn_gen.prng_state = self.syn_gen
-                .prng_state
-                .wrapping_mul(1_664_525)
-                .wrapping_add(1_013_904_223);
+            self.syn_gen.prng_state = self.syn_gen.prng_state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             let isn = self.syn_gen.prng_state;
 
             let src_port = self.syn_gen.port_counter;
@@ -594,27 +596,38 @@ fn handle_tcp_packet(
     let ip_size = size_of::<IpHeader>();
 
     // Extract all header values before any write so there is no aliasing.
-    let (incoming_src_mac, incoming_dst_mac, src_ip, dst_ip, src_port, dst_port,
-         tcp_flags, seq_num, ack_num, ip_total_len, ip_hdr_len, tcp_hdr_len) =
-        unsafe {
-            let mac = &*(data as *const MacHeader);
-            let ip  = &*(data.add(mac_size) as *const IpHeader);
-            let tcp = &*(data.add(mac_size + ip_size) as *const TcpHeader);
-            (
-                mac.src.into_array(),
-                mac.dst.into_array(),
-                ip.src(),
-                ip.dst(),
-                tcp.src_port(),
-                tcp.dst_port(),
-                tcp.flags(),
-                tcp.seq_num(),
-                tcp.ack_num(),
-                ip.length() as u32,
-                (ip.ihl() * 4) as u32,
-                (tcp.data_offset() * 4) as u32,
-            )
-        };
+    let (
+        incoming_src_mac,
+        incoming_dst_mac,
+        src_ip,
+        dst_ip,
+        src_port,
+        dst_port,
+        tcp_flags,
+        seq_num,
+        ack_num,
+        ip_total_len,
+        ip_hdr_len,
+        tcp_hdr_len,
+    ) = unsafe {
+        let mac = &*(data as *const MacHeader);
+        let ip = &*(data.add(mac_size) as *const IpHeader);
+        let tcp = &*(data.add(mac_size + ip_size) as *const TcpHeader);
+        (
+            mac.src.into_array(),
+            mac.dst.into_array(),
+            ip.src(),
+            ip.dst(),
+            tcp.src_port(),
+            tcp.dst_port(),
+            tcp.flags(),
+            tcp.seq_num(),
+            tcp.ack_num(),
+            ip.length() as u32,
+            (ip.ihl() * 4) as u32,
+            (tcp.data_offset() * 4) as u32,
+        )
+    };
 
     let flow_key = FlowKey(src_ip, src_port, dst_ip, dst_port);
     let payload_len = ip_total_len.saturating_sub(ip_hdr_len + tcp_hdr_len);
@@ -689,4 +702,3 @@ fn handle_tcp_packet(
 
     ROUTE_DROP
 }
-

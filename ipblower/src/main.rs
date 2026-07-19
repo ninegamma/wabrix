@@ -147,11 +147,8 @@ async fn main() -> anyhow::Result<()> {
 
     // --- CONFIGURE NETWORK INTERFACES ---
     info!("Configuring network interfaces...");
-    let _configured_ifaces = wabrix_lib::config::interface_setup::check_or_configure_interfaces(
-        &config.wabrix.ifaces,
-        &config.wabrix.xsk,
-        true,
-    )?;
+    let _configured_ifaces =
+        wabrix_lib::config::interface_setup::check_or_configure_interfaces(&config.wabrix.ifaces, &config.wabrix.xsk, true)?;
 
     let unique_ifaces: Vec<String> = config.wabrix.ifaces.iter().map(|i| i.name.clone()).collect();
 

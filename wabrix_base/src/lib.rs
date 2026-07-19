@@ -40,10 +40,12 @@ pub struct RuntimeUmemConfig {
 impl Drop for RuntimeUmemConfig {
     fn drop(&mut self) {
         // This will ONLY print when the strong_count hits ZERO
-        println!("!!! KERNEL NOTIFY: Umem Group {} is physically DEALLOCATING now !!!", self.group_id);
+        println!(
+            "!!! KERNEL NOTIFY: Umem Group {} is physically DEALLOCATING now !!!",
+            self.group_id
+        );
     }
 }
-
 
 #[derive(Debug, Clone, Copy)]
 pub struct UmemPartition {
@@ -51,7 +53,7 @@ pub struct UmemPartition {
     pub umem_group_id: usize, // Memory domain (UMEM group)
     pub start_idx: u32,       // Absolute global frame index (used by system_builder for layout math)
     // end_idx is non-inclusive: [start_idx, end_idx)
-    pub end_idx: u32,         // Absolute global frame index
+    pub end_idx: u32, // Absolute global frame index
     /// UMEM-relative start: local_start = start_idx - group_start_frame_idx
     pub local_start: u32,
     /// UMEM-relative end (non-inclusive): local_end = end_idx - group_start_frame_idx
@@ -64,9 +66,7 @@ impl UmemPartition {
     #[inline]
     pub fn owns_encoded(&self, encoded_frame_idx: u32) -> bool {
         let (umem_id, local_idx) = crate::frame_registry::decode_global_frame(encoded_frame_idx);
-        umem_id == self.umem_group_id
-            && local_idx >= self.local_start
-            && local_idx < self.local_end
+        umem_id == self.umem_group_id && local_idx >= self.local_start && local_idx < self.local_end
     }
 }
 
@@ -87,8 +87,6 @@ pub struct SystemBus {
 /// SAFETY: Arc<ArrayQueue<u32>> is Send, so Vec<Arc<ArrayQueue<u32>>> is also Send.
 unsafe impl Send for SystemBus {}
 
-
-
 /// Directives tell the scheduler where the batch should go next.
 pub enum Directive {
     /// Pass the entire batch to the next node in the DAG.
@@ -100,8 +98,6 @@ pub enum Directive {
     Stop,
 }
 
-
-
 pub trait Node: Send + std::any::Any {
     fn id(&self) -> &NodeId;
 
@@ -110,13 +106,17 @@ pub trait Node: Send + std::any::Any {
     fn process(&mut self, batch: &mut Batch) -> Directive;
 
     /// Control-path for timers (defaults to doing nothing)
-    fn requires_timers(&self) -> bool { false }
+    fn requires_timers(&self) -> bool {
+        false
+    }
     fn poll_timers(&mut self, _batch: &mut Batch, _current_tsc: u64) -> Directive {
         Directive::Stop // Default implementation does nothing
     }
 
     /// do we have a control channel (defaults to doing nothing)
-    fn requires_control_events(&self) -> bool { false }
+    fn requires_control_events(&self) -> bool {
+        false
+    }
 
     /// called by the scheduler when a control event is received for this node (defaults to doing nothing)
     fn handle_control_event(&mut self, _event: &ControlEvent) {}

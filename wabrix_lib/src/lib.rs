@@ -112,7 +112,9 @@ pub fn probe_kernel_fds(stage: &str) {
 
     log::debug!(
         "📊 FD Summary | Sockets: {}, BPF Maps/Progs: {}, Suspicious Inodes: {}",
-        socket_count, bpf_count, anon_count
+        socket_count,
+        bpf_count,
+        anon_count
     );
     log::debug!("-----------------------------------------");
 }

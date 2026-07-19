@@ -5,9 +5,7 @@ use arc_swap::ArcSwap;
 use core_affinity::CoreId;
 use log::{debug, info};
 use crate::toml_parser::PipelineInstance;
-pub(crate) use crate::nodes::{
-    BatchRxNode, BatchTxNode, DropNode, FastParserNode,
-};
+pub(crate) use crate::nodes::{BatchRxNode, BatchTxNode, DropNode, FastParserNode};
 
 pub(crate) use crate::{BatchRx, BatchTx};
 use wabrix_base::system::PlatformData;
@@ -50,13 +48,10 @@ impl PipelineFactory {
         mut telemetry_registry: Option<&mut TelemetryRegistry>,
         ctrl_tx: Option<Sender<Arc<ControlEvent>>>,
         platform_data: &PlatformData,
-        #[cfg(feature = "wasm")]
-        wasm_managers: &[Option<Arc<WasmManager>>],
+        #[cfg(feature = "wasm")] wasm_managers: &[Option<Arc<WasmManager>>],
         shared_state: Arc<crate::config::hot_config::SharedSystemState>,
-        #[cfg(feature = "wasm")]
-        wasm_instance_totals: &[usize],
-        #[cfg(feature = "wasm")]
-        wasm_instance_counters: &mut [u32],
+        #[cfg(feature = "wasm")] wasm_instance_totals: &[usize],
+        #[cfg(feature = "wasm")] wasm_instance_counters: &mut [u32],
     ) -> Result<(Vec<Box<dyn Node>>, Vec<usize>), String> {
         // --- PASS 1: ID Resolution ---
         // Map "string_id" -> NodeId
@@ -66,14 +61,18 @@ impl PipelineFactory {
             if id_map.contains_key(&node_conf.node_config.id) {
                 return Err(format!("Duplicate Node ID: {}", node_conf.node_config.id));
             }
-            id_map.insert(node_conf.node_config.id.clone(), NodeId::new(index as u32, node_conf.node_config.id.clone()));
+            id_map.insert(
+                node_conf.node_config.id.clone(),
+                NodeId::new(index as u32, node_conf.node_config.id.clone()),
+            );
         }
 
         // =========================================================
         // --- PASS 1.2: Populate Initial Hot Configuration ---
         // =========================================================
         // Grab the specific RCU pointer for this pipeline
-        let pipeline_rcu = shared_state.pipelines
+        let pipeline_rcu = shared_state
+            .pipelines
             .get(&pipeline_instance.name)
             .expect("Pipeline RCU state not initialized!")
             .clone();
@@ -87,9 +86,9 @@ impl PipelineFactory {
         for (index, node_conf) in pipeline_instance.node_instances.iter().enumerate() {
             name_to_index.insert(node_conf.node_config.id.clone(), index);
 
-
             for r_str in &node_conf.node_config.routes {
-                let rid = id_map.get(r_str)
+                let rid = id_map
+                    .get(r_str)
                     .ok_or(format!("Route target '{}' not found", r_str))?
                     .clone();
                 resolved_routes.push(rid);
@@ -123,16 +122,21 @@ impl PipelineFactory {
                 // === 1. RX Node ===
                 "BatchRxNode" => {
                     let next_str = node_instance
-                        .node_config.routes
+                        .node_config
+                        .routes
                         .first()
                         .ok_or(format!("Node {} missing routes[0]", node_instance.node_config.id))?;
                     let next_id = id_map
                         .get(next_str)
-                        .ok_or(format!("Node {} points to unknown next '{}'", node_instance.node_config.id, next_str))?
+                        .ok_or(format!(
+                            "Node {} points to unknown next '{}'",
+                            node_instance.node_config.id, next_str
+                        ))?
                         .clone();
 
                     let iface = node_instance
-                        .node_config.args
+                        .node_config
+                        .args
                         .get("interface")
                         .ok_or(format!("RxNode {} missing 'interface' arg", node_instance.node_config.id))?;
 
@@ -142,14 +146,18 @@ impl PipelineFactory {
 
                     // Parse batch_size from args (default: 64, max: MAX_BATCH_SIZE)
                     let batch_size = node_instance
-                        .node_config.effective_arg("batch_size")
+                        .node_config
+                        .effective_arg("batch_size")
                         .and_then(|s| s.parse::<usize>().ok())
                         .unwrap_or(64);
                     debug!("BatchRxNode {}: batch_size={}", node_instance.node_config.id, batch_size);
 
                     // Validate batch_size
                     if batch_size == 0 {
-                        return Err(format!("BatchRxNode {}: batch_size must be > 0", node_instance.node_config.id));
+                        return Err(format!(
+                            "BatchRxNode {}: batch_size must be > 0",
+                            node_instance.node_config.id
+                        ));
                     }
                     if batch_size > MAX_BATCH_SIZE {
                         return Err(format!(
@@ -168,19 +176,27 @@ impl PipelineFactory {
                 // === 2. PacketGenerator Node ===
                 "PacketGenerator" => {
                     let next_str = node_instance
-                        .node_config.routes
+                        .node_config
+                        .routes
                         .first()
                         .ok_or(format!("Node {} missing routes[0]", node_instance.node_config.id))?;
                     let next_id = id_map
                         .get(next_str)
-                        .ok_or(format!("Node {} points to unknown next '{}'", node_instance.node_config.id, next_str))?
+                        .ok_or(format!(
+                            "Node {} points to unknown next '{}'",
+                            node_instance.node_config.id, next_str
+                        ))?
                         .clone();
 
                     // Get UMEM ID
                     let umem_group_id = node_instance
-                        .node_config.args
+                        .node_config
+                        .args
                         .get("umem")
-                        .ok_or(format!("PacketGenerator {} missing 'umem' in args", node_instance.node_config.id))?
+                        .ok_or(format!(
+                            "PacketGenerator {} missing 'umem' in args",
+                            node_instance.node_config.id
+                        ))?
                         .parse::<usize>()
                         .map_err(|_| format!("PacketGenerator {} 'umem' must be a number", node_instance.node_config.id))?;
                     // e.g. args = { pps = "1M" }
@@ -193,7 +209,8 @@ impl PipelineFactory {
 
                     // Get packets per iteration (default to 256)
                     let batch_size = node_instance
-                        .node_config.effective_arg("batch_size")
+                        .node_config
+                        .effective_arg("batch_size")
                         .and_then(|s| s.parse::<usize>().ok())
                         .unwrap_or(256);
 
@@ -208,16 +225,17 @@ impl PipelineFactory {
                     // Get packets_to_generate: accepts "packets_to_generate" (raw number) or
                     // "no-packets" (human-readable like ipblower's --no-packets, e.g. "100K")
                     let packets_to_generate = node_instance
-                        .node_config.effective_arg("packet_count")
+                        .node_config
+                        .effective_arg("packet_count")
                         .and_then(|s| parse_suffixed_number(s).ok())
                         .or_else(|| {
                             node_instance
-                                .node_config.args
+                                .node_config
+                                .args
                                 .get("no-packets")
                                 .and_then(|s| parse_suffixed_number(s).ok())
                         })
                         .unwrap_or(0);
-
 
                     // Find the eventual sink node by traversing the chain
                     use macaddr::MacAddr6;
@@ -227,9 +245,16 @@ impl PipelineFactory {
                         let mut found_interface: Option<String> = None;
 
                         // Traverse the chain to find a BatchTxNode
-                        while let Some(current_node) = pipeline_instance.node_instances.iter().find(|n| n.node_config.id == current_node_id) {
+                        while let Some(current_node) = pipeline_instance
+                            .node_instances
+                            .iter()
+                            .find(|n| n.node_config.id == current_node_id)
+                        {
                             if visited.contains(&current_node_id) {
-                                debug!("PacketGenerator {}: Cycle detected in node chain", node_instance.node_config.id);
+                                debug!(
+                                    "PacketGenerator {}: Cycle detected in node chain",
+                                    node_instance.node_config.id
+                                );
                                 break;
                             }
                             visited.insert(current_node_id.clone());
@@ -254,7 +279,10 @@ impl PipelineFactory {
                             use wabrix_base::system::get_mac_from_ifname;
                             match get_mac_from_ifname(&iface) {
                                 Ok(mac) => {
-                                    debug!("PacketGenerator {}: Using MAC {} from interface {}", node_instance.node_config.id, mac, iface);
+                                    debug!(
+                                        "PacketGenerator {}: Using MAC {} from interface {}",
+                                        node_instance.node_config.id, mac, iface
+                                    );
                                     mac
                                 }
                                 Err(e) => {
@@ -278,7 +306,8 @@ impl PipelineFactory {
                     // matching ipblower's --dst option but using ':' as the ip/mac separator.
                     // Individual "dst_ip" and "dst_mac" args take precedence if also present.
                     let (dst_from_combined_ip, dst_from_combined_mac) = node_instance
-                        .node_config.effective_arg("dst")
+                        .node_config
+                        .effective_arg("dst")
                         .and_then(|s| {
                             // The IP is dotted-decimal; split on the first ':' to separate it from the MAC.
                             s.find(':').map(|pos| (&s[..pos], &s[pos + 1..]))
@@ -301,14 +330,16 @@ impl PipelineFactory {
 
                     // Parse destination IP from args (default to 192.168.177.1)
                     let dst_ip = node_instance
-                        .node_config.effective_arg("dst_ip")
+                        .node_config
+                        .effective_arg("dst_ip")
                         .and_then(|s| s.parse::<std::net::Ipv4Addr>().ok())
                         .or(dst_from_combined_ip)
                         .unwrap_or(std::net::Ipv4Addr::new(192, 168, 177, 1));
 
                     // Parse destination MAC from args (default to 08:bf:b8:0a:0b:0c)
                     let dst_mac = node_instance
-                        .node_config.effective_arg("dst_mac")
+                        .node_config
+                        .effective_arg("dst_mac")
                         .and_then(|s| {
                             let parts: Vec<&str> = s.split(':').collect();
                             if parts.len() == 6 {
@@ -322,7 +353,9 @@ impl PipelineFactory {
                         .unwrap_or(MacAddr6::new(0x08, 0xbf, 0xb8, 0x0a, 0x0b, 0x0c));
 
                     // 3. Inject it into the fast_nodes array
-                    let index = *name_to_index.get(&node_instance.node_config.id).ok_or(format!("Node {} not found", node_instance.node_config.id))?;
+                    let index = *name_to_index
+                        .get(&node_instance.node_config.id)
+                        .ok_or(format!("Node {} not found", node_instance.node_config.id))?;
                     fast_nodes[index] = HotNodeData {
                         routes: vec![next_id.clone()],
                         dynamic_state: NodeDynamicState::Generator {
@@ -331,7 +364,7 @@ impl PipelineFactory {
                             packet_limit: packets_to_generate,
                             batch_size: batch_size as u32,
                             dst_ip,
-                            dst_mac
+                            dst_mac,
                         },
                     };
 
@@ -345,7 +378,10 @@ impl PipelineFactory {
 
                     // Detect if this generator should start immediately (ipblower)
                     // or start idle (wabrix GUI). Default to false. ipblower sets autostart="true".
-                    let autostart = node_instance.node_config.args.get("autostart")
+                    let autostart = node_instance
+                        .node_config
+                        .args
+                        .get("autostart")
                         .map(|s| s.to_lowercase() == "true")
                         .unwrap_or(false);
 
@@ -375,30 +411,37 @@ impl PipelineFactory {
                     // NEW: Resolve WASM properties if the feature is enabled
                     // =========================================================
                     #[cfg(feature = "wasm")]
-                    let (wasm_mgr_opt, wasm_path_opt, partition_start_bytes) = if let Some(path) = node_instance.node_config.args.get("wasm_file_path") {
-                        let manager = wasm_managers[umem_group_id]
-                            .as_ref()
-                            .ok_or(format!("PacketGenerator {}: no WasmManager for umem {}", node_instance.node_config.id, umem_group_id))?;
+                    let (wasm_mgr_opt, wasm_path_opt, partition_start_bytes) =
+                        if let Some(path) = node_instance.node_config.args.get("wasm_file_path") {
+                            let manager = wasm_managers[umem_group_id].as_ref().ok_or(format!(
+                                "PacketGenerator {}: no WasmManager for umem {}",
+                                node_instance.node_config.id, umem_group_id
+                            ))?;
 
-                        // Compute this instance's scratchpad partition.
-                        // Scratchpads occupy [0, reserved_bytes - control_block_bytes); the
-                        // Control Block is at the end of the reserved region, so partition_start
-                        // starts at UMEM offset 0 for instance 0.
-                        let instance_idx = wasm_instance_counters[umem_group_id];
-                        let total_instances = wasm_instance_totals[umem_group_id].max(1);
-                        let umem_info = manager.umem();
-                        let cb_frames = wabrix_base::mailbox::control_block_frames(total_instances as u32, umem_info.frame_size);
-                        let scratchpad_frames = umem_info.reserved_frames.saturating_sub(cb_frames);
-                        let frames_per_instance = if total_instances > 0 { scratchpad_frames / total_instances as u32 } else { 0 };
-                        let p_start = instance_idx * frames_per_instance * umem_info.frame_size;
+                            // Compute this instance's scratchpad partition.
+                            // Scratchpads occupy [0, reserved_bytes - control_block_bytes); the
+                            // Control Block is at the end of the reserved region, so partition_start
+                            // starts at UMEM offset 0 for instance 0.
+                            let instance_idx = wasm_instance_counters[umem_group_id];
+                            let total_instances = wasm_instance_totals[umem_group_id].max(1);
+                            let umem_info = manager.umem();
+                            let cb_frames =
+                                wabrix_base::mailbox::control_block_frames(total_instances as u32, umem_info.frame_size);
+                            let scratchpad_frames = umem_info.reserved_frames.saturating_sub(cb_frames);
+                            let frames_per_instance = if total_instances > 0 {
+                                scratchpad_frames / total_instances as u32
+                            } else {
+                                0
+                            };
+                            let p_start = instance_idx * frames_per_instance * umem_info.frame_size;
 
-                        // Increment the counter so the next plugin gets the next memory slice
-                        wasm_instance_counters[umem_group_id] += 1;
+                            // Increment the counter so the next plugin gets the next memory slice
+                            wasm_instance_counters[umem_group_id] += 1;
 
-                        (Some(manager.as_ref()), Some(path.as_str()), p_start)
-                    } else {
-                        (None, None, 0)
-                    };
+                            (Some(manager.as_ref()), Some(path.as_str()), p_start)
+                        } else {
+                            (None, None, 0)
+                        };
 
                     Box::new(GeneratorNode::new(
                         my_id.clone(),
@@ -435,7 +478,8 @@ impl PipelineFactory {
                 // === 3. TX Node ===
                 "BatchTxNode" => {
                     let iface = node_instance
-                        .node_config.args
+                        .node_config
+                        .args
                         .get("interface")
                         .ok_or(format!("TxNode {} missing 'interface' arg", node_instance.node_config.id))?;
 
@@ -470,12 +514,16 @@ impl PipelineFactory {
                 // === 5. FastParser Node ===
                 "FastParserNode" => {
                     let next_str = node_instance
-                        .node_config.routes
+                        .node_config
+                        .routes
                         .first()
                         .ok_or(format!("Node {} missing routes[0]", node_instance.node_config.id))?;
                     let next_id = id_map
                         .get(next_str)
-                        .ok_or(format!("Node {} points to unknown next '{}'", node_instance.node_config.id, next_str))?
+                        .ok_or(format!(
+                            "Node {} points to unknown next '{}'",
+                            node_instance.node_config.id, next_str
+                        ))?
                         .clone();
 
                     Box::new(FastParserNode::new(my_id.clone(), next_id))
@@ -484,12 +532,15 @@ impl PipelineFactory {
                 // === 6. Native TcpNode ===
                 "TcpNode" => {
                     let routing_table: Vec<NodeId> = node_instance
-                        .node_config.routes
+                        .node_config
+                        .routes
                         .iter()
                         .map(|r| {
                             id_map
                                 .get(r)
-                                .ok_or_else(|| format!("TcpNode {} points to unknown route '{}'", node_instance.node_config.id, r))
+                                .ok_or_else(|| {
+                                    format!("TcpNode {} points to unknown route '{}'", node_instance.node_config.id, r)
+                                })
                                 .cloned()
                         })
                         .collect::<Result<Vec<_>, _>>()?;
@@ -498,7 +549,8 @@ impl PipelineFactory {
                     }
 
                     let umem_group_id = node_instance
-                        .node_config.args
+                        .node_config
+                        .args
                         .get("umem")
                         .ok_or(format!("TcpNode {} missing 'umem' in args", node_instance.node_config.id))?
                         .parse::<usize>()
@@ -514,12 +566,9 @@ impl PipelineFactory {
 
                     let labels = node_instance.node_config.labels.clone();
                     let num_buckets = labels.as_ref().map_or(0, |l| l.len());
-                    let counters_pkts: Vec<Arc<AtomicU64>> = (0..num_buckets)
-                        .map(|_| Arc::new(AtomicU64::new(0)))
-                        .collect();
-                    let counters_bytes: Vec<Arc<AtomicU64>> = (0..num_buckets)
-                        .map(|_| Arc::new(AtomicU64::new(0)))
-                        .collect();
+                    let counters_pkts: Vec<Arc<AtomicU64>> = (0..num_buckets).map(|_| Arc::new(AtomicU64::new(0))).collect();
+                    let counters_bytes: Vec<Arc<AtomicU64>> =
+                        (0..num_buckets).map(|_| Arc::new(AtomicU64::new(0))).collect();
                     let tm_force_sync = Arc::new(AtomicBool::new(false));
                     if let Some(registry) = telemetry_registry.as_mut() {
                         registry.register(
@@ -548,24 +597,27 @@ impl PipelineFactory {
                 "WasmInspectorNode" | "WasmEngine" => {
                     let node_type = node_instance.node_config.node_type.as_str();
 
-                    let wasm_path = node_instance
-                        .node_config.args
-                        .get("wasm_file_path")
-                        .ok_or_else(|| format!("{} {} missing 'wasm_file_path' in args", node_type, node_instance.node_config.id))?;
+                    let wasm_path = node_instance.node_config.args.get("wasm_file_path").ok_or_else(|| {
+                        format!(
+                            "{} {} missing 'wasm_file_path' in args",
+                            node_type, node_instance.node_config.id
+                        )
+                    })?;
 
                     let umem_id = node_instance
-                        .node_config.args
+                        .node_config
+                        .args
                         .get("umem")
                         .ok_or_else(|| format!("{} {} missing 'umem' in args", node_type, node_instance.node_config.id))?
                         .parse::<usize>()
                         .map_err(|_| format!("{} {} 'umem' must be a number", node_type, node_instance.node_config.id))?;
 
-                    let manager = wasm_managers[umem_id]
-                        .as_ref()
-                        .ok_or_else(|| format!(
+                    let manager = wasm_managers[umem_id].as_ref().ok_or_else(|| {
+                        format!(
                             "{} {}: no WasmManager for umem {}",
                             node_type, node_instance.node_config.id, umem_id
-                        ))?;
+                        )
+                    })?;
 
                     if node_instance.node_config.routes.len() > 255 {
                         return Err(format!(
@@ -581,22 +633,21 @@ impl PipelineFactory {
                     for route_name in &node_instance.node_config.routes {
                         let target_id = id_map
                             .get(route_name)
-                            .ok_or_else(|| format!(
-                                "{} {}: route target '{}' not found",
-                                node_type, node_instance.node_config.id, route_name
-                            ))?
+                            .ok_or_else(|| {
+                                format!(
+                                    "{} {}: route target '{}' not found",
+                                    node_type, node_instance.node_config.id, route_name
+                                )
+                            })?
                             .clone();
                         routing_table.push(target_id);
                     }
 
                     let labels = node_instance.node_config.labels.clone();
                     let num_buckets = labels.as_ref().map_or(0, |l| l.len());
-                    let counters_pkts: Vec<Arc<AtomicU64>> = (0..num_buckets)
-                        .map(|_| Arc::new(AtomicU64::new(0)))
-                        .collect();
-                    let counters_bytes: Vec<Arc<AtomicU64>> = (0..num_buckets)
-                        .map(|_| Arc::new(AtomicU64::new(0)))
-                        .collect();
+                    let counters_pkts: Vec<Arc<AtomicU64>> = (0..num_buckets).map(|_| Arc::new(AtomicU64::new(0))).collect();
+                    let counters_bytes: Vec<Arc<AtomicU64>> =
+                        (0..num_buckets).map(|_| Arc::new(AtomicU64::new(0))).collect();
                     let tm_force_sync = Arc::new(AtomicBool::new(false));
 
                     if let Some(registry) = telemetry_registry.as_mut() {
@@ -628,7 +679,11 @@ impl PipelineFactory {
                     let umem_info = manager.umem();
                     let cb_frames = wabrix_base::mailbox::control_block_frames(total_instances as u32, umem_info.frame_size);
                     let scratchpad_frames = umem_info.reserved_frames.saturating_sub(cb_frames);
-                    let frames_per_instance = if total_instances > 0 { scratchpad_frames / total_instances as u32 } else { 0 };
+                    let frames_per_instance = if total_instances > 0 {
+                        scratchpad_frames / total_instances as u32
+                    } else {
+                        0
+                    };
                     let mailbox_offset = umem_info.mailbox_offset(instance_idx);
                     let partition_start_bytes = instance_idx * frames_per_instance * umem_info.frame_size;
                     wasm_instance_counters[umem_id] += 1;
@@ -644,7 +699,7 @@ impl PipelineFactory {
                             telemetry_metrics,
                             partition_start_bytes,
                             umem_id as u8,
-                            node_instance.node_config.wasm_data.clone().unwrap_or_default()
+                            node_instance.node_config.wasm_data.clone().unwrap_or_default(),
                         ))
                     } else {
                         use wabrix_wasm::WasmEngine;
@@ -674,7 +729,11 @@ impl PipelineFactory {
         let final_nodes = built_nodes.into_iter().map(|n| n.unwrap()).collect();
 
         // Store the fully-populated hot config now that all nodes have been initialised.
-        pipeline_rcu.store(Arc::new(HotPipelineConfig { fast_nodes, name_to_index, poll_frequency: pipeline_instance.poll_frequency }));
+        pipeline_rcu.store(Arc::new(HotPipelineConfig {
+            fast_nodes,
+            name_to_index,
+            poll_frequency: pipeline_instance.poll_frequency,
+        }));
 
         // =========================================================
         // --- PASS 3: Topological Source Detection (In-Degree = 0)
@@ -700,7 +759,10 @@ impl PipelineFactory {
             .collect();
 
         if source_indices.is_empty() {
-            log::warn!("Pipeline '{}' forms a closed loop with no entry points! It will never execute.", pipeline_instance.name);
+            log::warn!(
+                "Pipeline '{}' forms a closed loop with no entry points! It will never execute.",
+                pipeline_instance.name
+            );
         }
 
         // Return both the nodes and the source indices
@@ -838,7 +900,9 @@ impl PipelineRunner {
                 Directive::Split(branches) => {
                     for (next_id, mut sub_batch) in branches {
                         let next_idx = usize::from(next_id);
-                        if next_idx >= self.nodes.len() { continue; }
+                        if next_idx >= self.nodes.len() {
+                            continue;
+                        }
 
                         log::trace!("Pipeline '{}': Executing Split Branch to Node {}", self.name, next_idx);
                         let mut current_directive = self.nodes[next_idx].process(&mut sub_batch);
@@ -847,15 +911,25 @@ impl PipelineRunner {
                             match current_directive {
                                 Directive::Next(branch_next_id) => {
                                     let branch_idx = usize::from(branch_next_id);
-                                    if branch_idx >= self.nodes.len() { break; }
-                                    log::trace!("Pipeline '{}': Executing Next Node in split branch {}", self.name, branch_idx);
+                                    if branch_idx >= self.nodes.len() {
+                                        break;
+                                    }
+                                    log::trace!(
+                                        "Pipeline '{}': Executing Next Node in split branch {}",
+                                        self.name,
+                                        branch_idx
+                                    );
                                     current_directive = self.nodes[branch_idx].process(&mut sub_batch);
                                 }
                                 Directive::Split(nested_branches) => {
                                     for (nested_id, mut nested_batch) in nested_branches {
                                         let nested_idx = usize::from(nested_id);
                                         if nested_idx < self.nodes.len() {
-                                            log::trace!("Pipeline '{}': Executing nested Split Branch to Node {}", self.name, nested_idx);
+                                            log::trace!(
+                                                "Pipeline '{}': Executing nested Split Branch to Node {}",
+                                                self.name,
+                                                nested_idx
+                                            );
                                             let _ = self.nodes[nested_idx].process(&mut nested_batch);
                                         }
                                     }
@@ -904,7 +978,6 @@ impl PipelineRunner {
             self.execute_directive_chain(directive);
         }
 
-
         let now = unsafe { std::arch::x86_64::_rdtsc() };
 
         let poll_frequency = self.pipeline_rcu.load().poll_frequency.max(1);
@@ -936,13 +1009,10 @@ impl PipelineRunner {
             if let Some(rx) = &mut self.control_rx {
                 // Drain all pending commands from the Axum API
                 while let Ok(event) = rx.try_recv() {
-
                     // Evaluate the wildcard pattern against every node in this pipeline
                     for (idx, identity) in self.node_identities.iter().enumerate() {
-
                         // Assuming you moved the matches_pattern() method onto NodeInstanceId
                         if identity.matches_pattern(&event.address_pattern) {
-
                             log::info!("Runner routing event opcode {} to node {}", event.opcode, identity.node_name);
 
                             // Directly invoke the handler on the matched node
@@ -951,7 +1021,6 @@ impl PipelineRunner {
                     }
                 }
             }
-
         }
 
         // =========================================================
@@ -963,10 +1032,8 @@ impl PipelineRunner {
             (total_packets_this_iteration, 0)
         } else {
             self.runs_idle += 1;
-            (0,1)
+            (0, 1)
         }
-
-
     }
 
     // Inside PipelineRunner implementation
@@ -1288,7 +1355,8 @@ pub fn spawn_worker_pipelines(
         loop {
             // 1. Check shutdown signal
             if shutdown.load(Ordering::Acquire) {
-                debug!( "Worker {} received shutdown signal after {} iterations",
+                debug!(
+                    "Worker {} received shutdown signal after {} iterations",
                     worker_id, iteration_count
                 );
                 break;
@@ -1333,7 +1401,7 @@ pub fn spawn_worker_pipelines(
 
                 if packets_processed > 0 {
                     _work_done_this_tick = true; // Mark that the core did actual work
-                    // TRAFFIC DETECTED! Reset all penalties.
+                                                 // TRAFFIC DETECTED! Reset all penalties.
                     idle_streaks[i] = 0;
                     skip_counters[i] = 0;
 
@@ -1359,26 +1427,26 @@ pub fn spawn_worker_pipelines(
                     skip_counters[i] = std::cmp::min(penalty, MAX_SKIP_PENALTY);
                 }
             }
-/*
-            // =======================================================
-            // GLOBAL CPU BACKOFF
-            // =======================================================
-            if work_done_this_tick {
-                global_idle_spins = 0;
-            } else {
-                global_idle_spins += 1;
+            /*
+                        // =======================================================
+                        // GLOBAL CPU BACKOFF
+                        // =======================================================
+                        if work_done_this_tick {
+                            global_idle_spins = 0;
+                        } else {
+                            global_idle_spins += 1;
 
-                if global_idle_spins < 1000 {
-                    // Phase 1: Pause the CPU pipeline (nanoseconds).
-                    // Drops thermal load without losing thread context.
-                    std::hint::spin_loop();
-                } else {
-                    // Phase 2: Deep idle (microseconds).
-                    // The whole core is dead. Yield to Linux.
-                    std::thread::yield_now();
-                }
-            }
-*/
+                            if global_idle_spins < 1000 {
+                                // Phase 1: Pause the CPU pipeline (nanoseconds).
+                                // Drops thermal load without losing thread context.
+                                std::hint::spin_loop();
+                            } else {
+                                // Phase 2: Deep idle (microseconds).
+                                // The whole core is dead. Yield to Linux.
+                                std::thread::yield_now();
+                            }
+                        }
+            */
             iteration_count += 1;
         }
 

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use core_affinity::CoreId;
 use crossbeam_queue::ArrayQueue;
 use wabrix_base::frame_registry::RETURN_QUEUE_CAPACITY;
-use xsk_rs::{Umem, };
+use xsk_rs::{Umem};
 use log::{warn, debug, info, error};
 use tokio::sync::broadcast::Sender;
 use xsk_rs::config::{FrameSize, QueueSize};
@@ -34,9 +34,6 @@ pub struct SystemBuilder {
     pub(crate) worker_partitions: Vec<Option<Vec<PartitionRequest>>>,
 }
 
-
-
-
 impl SystemBuilder {
     /// Build the XDP socket system
     /// Builds:
@@ -49,9 +46,8 @@ impl SystemBuilder {
         mut self,
         interface_skels: Option<&HashMap<String, Arc<XscrubberSkel<'static>>>>,
         platform_data: PlatformData,
-        ctrl_tx: Option<Sender::<Arc<ControlEvent>>>,
+        ctrl_tx: Option<Sender<Arc<ControlEvent>>>,
     ) -> Result<Box<XBricksSystem>, Box<dyn std::error::Error>> {
-
         use crate::config::hot_config::SharedSystemState;
         let num_workers = self.workers.len();
         let mut xbricks_system = Box::new(XBricksSystem {
@@ -79,7 +75,9 @@ impl SystemBuilder {
         // 2. Group XDP Configs by UMEM Group ID
         let mut umem_groups: Vec<Option<Vec<&XdpSocketConfig>>> = vec![None; MAX_UMEM];
         for config in &self.xdp_socket_configs {
-            umem_groups[config.umem_config.group_id].get_or_insert_with(Vec::new).push(config);
+            umem_groups[config.umem_config.group_id]
+                .get_or_insert_with(Vec::new)
+                .push(config);
         }
 
         // Pre-scan: count WASM instances per umem_id and adjust reserved_frames so that
@@ -103,7 +101,9 @@ impl SystemBuilder {
                 }
             }
             for (uid, &count) in counts.iter().enumerate() {
-                if count == 0 { continue; }
+                if count == 0 {
+                    continue;
+                }
                 if let Some(umem_conf_arc) = self.runtime_umems[uid].as_ref() {
                     let orig = umem_conf_arc.reserved_frames;
                     let frame_size = umem_conf_arc.frame_size;
@@ -118,12 +118,20 @@ impl SystemBuilder {
                         log::info!(
                             "UMEM {}: reserved_frames adjusted from {} to {} \
                              (control_block={} + {}×{} scratchpad frames)",
-                            uid, orig, adjusted, cb_frames, count, per_instance
+                            uid,
+                            orig,
+                            adjusted,
+                            cb_frames,
+                            count,
+                            per_instance
                         );
                     }
                     log::info!(
                         "UMEM {}: {} WASM instance(s): control_block={} frames, {} scratchpad frames each",
-                        uid, count, cb_frames, per_instance
+                        uid,
+                        count,
+                        cb_frames,
+                        per_instance
                     );
                 }
             }
@@ -138,9 +146,7 @@ impl SystemBuilder {
         let mut umem_partition_counters: Vec<usize> = vec![0; MAX_UMEM];
 
         // Process workers in order of their IDs for deterministic allocation
-        let sorted_worker_ids: Vec<usize> = (0..num_workers)
-            .filter(|&id| self.worker_partitions[id].is_some())
-            .collect();
+        let sorted_worker_ids: Vec<usize> = (0..num_workers).filter(|&id| self.worker_partitions[id].is_some()).collect();
 
         for worker_id in &sorted_worker_ids {
             let mut worker_parts = Vec::new();
@@ -151,10 +157,12 @@ impl SystemBuilder {
             // Process each partition request for this worker
             for partition_req in partition_reqs {
                 let umem_group_id = partition_req.umem;
-                let umem_conf = self
-                    .runtime_umems[umem_group_id]
-                    .as_ref()
-                    .ok_or_else(|| format!("Worker {}: requested partitions from unknown UMEM {}", worker_id, umem_group_id))?;
+                let umem_conf = self.runtime_umems[umem_group_id].as_ref().ok_or_else(|| {
+                    format!(
+                        "Worker {}: requested partitions from unknown UMEM {}",
+                        worker_id, umem_group_id
+                    )
+                })?;
 
                 // Calculate partition size from usable (non-reserved) frames only
                 let usable_frames = umem_conf.frame_count - umem_conf.reserved_frames;
@@ -178,7 +186,7 @@ impl SystemBuilder {
                     start_idx,
                     end_idx,
                     local_start: start_idx - umem_conf.group_start_frame_idx,
-                    local_end:   end_idx   - umem_conf.group_start_frame_idx,
+                    local_end: end_idx - umem_conf.group_start_frame_idx,
                 };
 
                 worker_parts.push((umem_group_id, partition));
@@ -227,15 +235,12 @@ impl SystemBuilder {
                 .map_err(|e| format!("Failed to create UMEM for group {}: {}", group_id, e))?;
 
             // xsk-rs returns the umem and the pre-calculated descriptors
-            let (umem, umem_descs) = Umem::new_with_opts(
-                xsk_umem_config,
-                true,
-            )?;
+            let (umem, umem_descs) = Umem::new_with_opts(xsk_umem_config, true)?;
 
             let shared_umem = Arc::from(umem);
             initialized_umems[group_id] = Some((shared_umem, umem_descs));
         }
-        let mut umem_addr= [None; MAX_UMEM];
+        let mut umem_addr = [None; MAX_UMEM];
         // Store all UMEM handles in XBricksSystem and propagate to each worker's registry.
         for (group_id, entry) in initialized_umems.iter().enumerate() {
             if let Some((umem, _)) = entry {
@@ -328,7 +333,7 @@ impl SystemBuilder {
                             &s.0.tx_queue  // Assuming your XSocket struct exposes tx
                         );
                         s
-                    },
+                    }
                     Err(e) => {
                         // Grab the exact kernel errno that triggered the failure
                         let os_err = std::io::Error::last_os_error();
@@ -363,9 +368,13 @@ impl SystemBuilder {
             if let Some(umem_conf) = umem_conf_opt {
                 if umem_conf.reserved_frames > 0 {
                     if let Some((umem, _)) = &initialized_umems[umem_id] {
-                        self.wasm_managers[umem_id] = Some(Arc::new(
-                            WasmManager::new(umem_conf.frame_size, umem_conf.reserved_frames, umem_conf.frame_count, umem.clone(), wasm_counts[umem_id] as u32)?
-                        ));
+                        self.wasm_managers[umem_id] = Some(Arc::new(WasmManager::new(
+                            umem_conf.frame_size,
+                            umem_conf.reserved_frames,
+                            umem_conf.frame_count,
+                            umem.clone(),
+                            wasm_counts[umem_id] as u32,
+                        )?));
                     } else {
                         log::error!("🔥 Failed to initialize WASM Manager for UMEM {}. Umem not found.", umem_id);
                     }
@@ -408,7 +417,7 @@ impl SystemBuilder {
                     // Initialize an empty RCU pointer for this pipeline
                     rcu_pipelines.insert(
                         pipeline.name.clone(),
-                        Arc::new(ArcSwap::from_pointee(HotPipelineConfig::default()))
+                        Arc::new(ArcSwap::from_pointee(HotPipelineConfig::default())),
                     );
                 }
             }
@@ -424,7 +433,7 @@ impl SystemBuilder {
         #[cfg(feature = "wasm")]
         let wasm_instance_totals: Vec<usize> = wasm_counts.clone();
         #[cfg(feature = "wasm")]
-        let mut wasm_instance_counters= vec![0u32; MAX_UMEM];
+        let mut wasm_instance_counters = vec![0u32; MAX_UMEM];
 
         // Build pipeline runners for each worker
         for worker in self.workers {
@@ -465,22 +474,23 @@ impl SystemBuilder {
                     &mut wasm_instance_counters,
                 )
                 .map_err(|e| anyhow::anyhow!(e))?;
-                
-                let pipeline_rcu = shared_state.pipelines
+
+                let pipeline_rcu = shared_state
+                    .pipelines
                     .get(&pipeline_instance_cfg.name)
                     .expect("Pipeline RCU missing for runner")
                     .clone();
-                
+
                 // Create the pipeline runner
                 let runner = crate::pipeline::PipelineRunner::new(
                     pipeline_instance_cfg.name.clone(),
                     worker_id,
                     nodes,
                     source_indices,
-                    node_identities,   
+                    node_identities,
                     runner_control_rx,
                     xbricks_system.platform_data.tsc_frequency,
-                    pipeline_rcu
+                    pipeline_rcu,
                 )
                 .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -553,7 +563,11 @@ mod tests {
     // Helper to create test SystemBus and configs
     fn create_test_bus_and_configs() -> (Arc<SystemBus>, Vec<Option<Arc<RuntimeUmemConfig>>>) {
         let queue = Arc::new(ArrayQueue::new(64));
-        let bus = Arc::new(SystemBus { bus_senders: vec![queue], umem_partitions: vec![], umem_addr: [None; MAX_UMEM] });
+        let bus = Arc::new(SystemBus {
+            bus_senders: vec![queue],
+            umem_partitions: vec![],
+            umem_addr: [None; MAX_UMEM],
+        });
 
         let mut configs: Vec<Option<Arc<RuntimeUmemConfig>>> = vec![None; MAX_UMEM];
         configs[0] = Some(Arc::new(RuntimeUmemConfig {
@@ -580,9 +594,12 @@ mod tests {
 
         // UMEM 0, group_start=0 → local range == absolute range
         let partition = UmemPartition {
-            worker_id: 0, umem_group_id: 0,
-            start_idx: 0, end_idx: 100,
-            local_start: 0, local_end: 100,
+            worker_id: 0,
+            umem_group_id: 0,
+            start_idx: 0,
+            end_idx: 100,
+            local_start: 0,
+            local_end: 100,
         };
 
         let mut registry = FrameRegistry::new(0, vec![(0, partition)], queue, bus, configs);
@@ -604,29 +621,49 @@ mod tests {
 
         // UMEM 0: 4096 frames, group_start=0
         let partition0 = UmemPartition {
-            worker_id: 0, umem_group_id: 0,
-            start_idx: 0, end_idx: 4096,
-            local_start: 0, local_end: 4096,
+            worker_id: 0,
+            umem_group_id: 0,
+            start_idx: 0,
+            end_idx: 4096,
+            local_start: 0,
+            local_end: 4096,
         };
 
         // UMEM 1: 2048 frames, group_start=4096 → local range [0, 2048)
         let partition1 = UmemPartition {
-            worker_id: 0, umem_group_id: 1,
-            start_idx: 4096, end_idx: 6144,
-            local_start: 0, local_end: 2048,
+            worker_id: 0,
+            umem_group_id: 1,
+            start_idx: 4096,
+            end_idx: 6144,
+            local_start: 0,
+            local_end: 2048,
         };
 
         let (bus, mut configs) = create_test_bus_and_configs();
         // Override UMEM 0 to have 4096 frames to match partition0
         configs[0] = Some(Arc::new(RuntimeUmemConfig {
-            group_id: 0, frame_size: 2048, frame_size_log2: 11,
-            frame_count: 4096, head_room: 128, fq_size: 512, cq_size: 512,
-            group_start_frame_idx: 0, partitions: 2, reserved_frames: 0,
+            group_id: 0,
+            frame_size: 2048,
+            frame_size_log2: 11,
+            frame_count: 4096,
+            head_room: 128,
+            fq_size: 512,
+            cq_size: 512,
+            group_start_frame_idx: 0,
+            partitions: 2,
+            reserved_frames: 0,
         }));
         configs[1] = Some(Arc::new(RuntimeUmemConfig {
-            group_id: 1, frame_size: 2048, frame_size_log2: 11,
-            frame_count: 2048, head_room: 128, fq_size: 512, cq_size: 512,
-            group_start_frame_idx: 4096, partitions: 1, reserved_frames: 0,
+            group_id: 1,
+            frame_size: 2048,
+            frame_size_log2: 11,
+            frame_count: 2048,
+            head_room: 128,
+            fq_size: 512,
+            cq_size: 512,
+            group_start_frame_idx: 4096,
+            partitions: 1,
+            reserved_frames: 0,
         }));
 
         let mut registry = FrameRegistry::new(0, vec![(0, partition0), (1, partition1)], queue, bus, configs);
@@ -655,23 +692,36 @@ mod tests {
 
         // UMEM 0: 100 frames, group_start=0
         let partition0 = UmemPartition {
-            worker_id: 0, umem_group_id: 0,
-            start_idx: 0, end_idx: 100,
-            local_start: 0, local_end: 100,
+            worker_id: 0,
+            umem_group_id: 0,
+            start_idx: 0,
+            end_idx: 100,
+            local_start: 0,
+            local_end: 100,
         };
 
         // UMEM 1: 100 frames, group_start=100 → local range [0, 100)
         let partition1 = UmemPartition {
-            worker_id: 0, umem_group_id: 1,
-            start_idx: 100, end_idx: 200,
-            local_start: 0, local_end: 100,
+            worker_id: 0,
+            umem_group_id: 1,
+            start_idx: 100,
+            end_idx: 200,
+            local_start: 0,
+            local_end: 100,
         };
 
         let (bus, mut configs) = create_test_bus_and_configs();
         configs[1] = Some(Arc::new(RuntimeUmemConfig {
-            group_id: 1, frame_size: 2048, frame_size_log2: 11,
-            frame_count: 100, head_room: 128, fq_size: 512, cq_size: 512,
-            group_start_frame_idx: 100, partitions: 1, reserved_frames: 0,
+            group_id: 1,
+            frame_size: 2048,
+            frame_size_log2: 11,
+            frame_count: 100,
+            head_room: 128,
+            fq_size: 512,
+            cq_size: 512,
+            group_start_frame_idx: 100,
+            partitions: 1,
+            reserved_frames: 0,
         }));
 
         let mut registry = FrameRegistry::new(0, vec![(0, partition0), (1, partition1)], queue, bus, configs);
@@ -700,9 +750,12 @@ mod tests {
         let (bus, configs) = create_test_bus_and_configs();
 
         let partition = UmemPartition {
-            worker_id: 0, umem_group_id: 0,
-            start_idx: 0, end_idx: 100,
-            local_start: 0, local_end: 100,
+            worker_id: 0,
+            umem_group_id: 0,
+            start_idx: 0,
+            end_idx: 100,
+            local_start: 0,
+            local_end: 100,
         };
 
         let mut registry = FrameRegistry::new(0, vec![(0, partition)], queue, bus.clone(), configs.clone());
@@ -732,9 +785,12 @@ mod tests {
 
         // 4 consecutive partitions merged into one — UMEM 0, group_start=0
         let merged_partition = UmemPartition {
-            worker_id: 0, umem_group_id: 0,
-            start_idx: 0, end_idx: 1024,
-            local_start: 0, local_end: 1024,
+            worker_id: 0,
+            umem_group_id: 0,
+            start_idx: 0,
+            end_idx: 1024,
+            local_start: 0,
+            local_end: 1024,
         };
 
         let mut registry = FrameRegistry::new(0, vec![(0, merged_partition)], queue, bus.clone(), configs.clone());
@@ -756,9 +812,12 @@ mod tests {
         let (bus, configs) = create_test_bus_and_configs();
 
         let partition = UmemPartition {
-            worker_id: 0, umem_group_id: 0,
-            start_idx: 0, end_idx: 10,
-            local_start: 0, local_end: 10,
+            worker_id: 0,
+            umem_group_id: 0,
+            start_idx: 0,
+            end_idx: 10,
+            local_start: 0,
+            local_end: 10,
         };
 
         let mut registry = FrameRegistry::new(0, vec![(0, partition)], queue, bus.clone(), configs.clone());
@@ -779,9 +838,12 @@ mod tests {
 
         // UMEM 0, group_start=0 → local_start=512, local_end=1024
         let partition = UmemPartition {
-            worker_id: 1, umem_group_id: 0,
-            start_idx: 512, end_idx: 1024,
-            local_start: 512, local_end: 1024,
+            worker_id: 1,
+            umem_group_id: 0,
+            start_idx: 512,
+            end_idx: 1024,
+            local_start: 512,
+            local_end: 1024,
         };
 
         let mut registry = FrameRegistry::new(1, vec![(0, partition)], queue, bus.clone(), configs.clone());

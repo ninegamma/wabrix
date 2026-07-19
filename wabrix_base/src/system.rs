@@ -94,9 +94,7 @@ pub fn get_mac_from_ifname(ifname: &str) -> Result<MacAddress, ParseError> {
 pub fn get_mac_string_from_ifname(ifname: &str) -> Result<String, ParseError> {
     let iface = Path::new("/sys/class/net").join(ifname).join("address");
     let mut macaddr = String::new();
-    File::open(iface)
-        .and_then(|mut f| f.read_to_string(&mut macaddr))
-        .unwrap();
+    File::open(iface).and_then(|mut f| f.read_to_string(&mut macaddr)).unwrap();
     Ok(macaddr.lines().next().unwrap_or("").to_string())
 }
 
@@ -245,7 +243,11 @@ pub fn get_nic_packets_detailed(interface: &str, rx: bool) -> Option<PacketStats
         }
     }
 
-    if found_any_ice_stat { Some(stats) } else { None }
+    if found_any_ice_stat {
+        Some(stats)
+    } else {
+        None
+    }
 }
 
 /// Wait for physical link to come up on a network interface
@@ -484,17 +486,17 @@ pub fn check_irdma_mod_unloaded() -> bool {
 /// XDP capability information for a single network interface.
 #[derive(Clone, Debug)]
 pub struct XdpIfaceCapabilities {
-    pub name:         String,
-    pub driver:       String,
-    pub version:      String,
+    pub name: String,
+    pub driver: String,
+    pub version: String,
     /// NETDEV_XDP_ACT_BASIC — native XDP (driver mode)
-    pub xdp_native:   bool,
+    pub xdp_native: bool,
     /// NETDEV_XDP_ACT_XSK_ZEROCOPY — AF_XDP zero-copy
     pub xdp_zerocopy: bool,
     /// Maximum RX ring size from ethtool -g Pre-set maximums
-    pub rx_ring_max:  Option<u32>,
+    pub rx_ring_max: Option<u32>,
     /// Maximum TX ring size from ethtool -g Pre-set maximums
-    pub tx_ring_max:  Option<u32>,
+    pub tx_ring_max: Option<u32>,
 }
 
 /// Query all physical network interfaces and return their XDP capabilities.
@@ -509,7 +511,9 @@ pub fn query_xdp_ifaces() -> Vec<XdpIfaceCapabilities> {
     if let Ok(entries) = fs::read_dir(net_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if name == "lo" { continue; }
+            if name == "lo" {
+                continue;
+            }
             if net_dir.join(&name).join("device").exists() {
                 ifaces.push(name);
             }
@@ -521,9 +525,9 @@ pub fn query_xdp_ifaces() -> Vec<XdpIfaceCapabilities> {
     let mut result = Vec::new();
 
     for iface in &ifaces {
-        let mut driver       = "?".to_string();
-        let mut version      = "?".to_string();
-        let mut xdp_native   = false;
+        let mut driver = "?".to_string();
+        let mut version = "?".to_string();
+        let mut xdp_native = false;
         let mut xdp_zerocopy = false;
         let mut rx_ring_max: Option<u32> = None;
         let mut tx_ring_max: Option<u32> = None;
@@ -573,11 +577,9 @@ pub fn query_xdp_ifaces() -> Vec<XdpIfaceCapabilities> {
                             break;
                         }
                         if rx_ring_max.is_none() && line.trim_start().starts_with("RX:") {
-                            rx_ring_max = line.split(':').nth(1)
-                                .and_then(|v| v.trim().parse().ok());
+                            rx_ring_max = line.split(':').nth(1).and_then(|v| v.trim().parse().ok());
                         } else if tx_ring_max.is_none() && line.trim_start().starts_with("TX:") {
-                            tx_ring_max = line.split(':').nth(1)
-                                .and_then(|v| v.trim().parse().ok());
+                            tx_ring_max = line.split(':').nth(1).and_then(|v| v.trim().parse().ok());
                         }
                     }
                 }
@@ -613,8 +615,20 @@ pub fn probe_xdp_interfaces() {
     let w = [20usize, 12, 24, 12, 12, 10, 10];
     let header = format!(
         "{:<w0$} {:<w1$} {:<w2$} {:<w3$} {:<w4$} {:>w5$} {:>w6$}",
-        "Interface", "Driver", "Version", "XDP Native", "ZeroCopy", "Ring Max RX", "Ring Max TX",
-        w0=w[0], w1=w[1], w2=w[2], w3=w[3], w4=w[4], w5=w[5], w6=w[6],
+        "Interface",
+        "Driver",
+        "Version",
+        "XDP Native",
+        "ZeroCopy",
+        "Ring Max RX",
+        "Ring Max TX",
+        w0 = w[0],
+        w1 = w[1],
+        w2 = w[2],
+        w3 = w[3],
+        w4 = w[4],
+        w5 = w[5],
+        w6 = w[6],
     );
     let sep = "─".repeat(header.len());
 
@@ -627,11 +641,17 @@ pub fn probe_xdp_interfaces() {
             r.name,
             r.driver,
             r.version,
-            if r.xdp_native   { "yes" } else { "no" },
+            if r.xdp_native { "yes" } else { "no" },
             if r.xdp_zerocopy { "yes" } else { "no" },
             r.rx_ring_max.map(|v| v.to_string()).unwrap_or_else(|| "?".to_string()),
             r.tx_ring_max.map(|v| v.to_string()).unwrap_or_else(|| "?".to_string()),
-            w0=w[0], w1=w[1], w2=w[2], w3=w[3], w4=w[4], w5=w[5], w6=w[6],
+            w0 = w[0],
+            w1 = w[1],
+            w2 = w[2],
+            w3 = w[3],
+            w4 = w[4],
+            w5 = w[5],
+            w6 = w[6],
         );
     }
     info!("{}", sep);

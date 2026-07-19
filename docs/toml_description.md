@@ -1,27 +1,27 @@
-# XBricks TOML Configuration Reference
+# wabrix TOML Configuration Reference
 
-The xbricks configuration file (default: `xbricks.toml`) is passed via the `-c/--config` flag.
-It has three top-level sections: `[xbricks]`, `[[pipelines]]`, and `[layout]`.
+The wabrix configuration file (default: `wabrix.toml`) is passed via the `-c/--config` flag.
+It has three top-level sections: `[wabrix]`, `[[pipelines]]`, and `[layout]`.
 
 ---
 
 ## Top-Level Structure
 
 ```toml
-[xbricks]          # required — hardware and memory infrastructure
+[wabrix]          # required — hardware and memory infrastructure
 [[pipelines]]      # optional (array) — packet processing graphs
 [layout]           # optional — UI node positions, managed by the frontend
 ```
 
 ---
 
-## [xbricks] — Infrastructure
+## [wabrix] — Infrastructure
 
 All four sub-keys have defaults, but in practice `umem`, `xsk`, and `workers` must be set explicitly for any real workload.
 
-### xbricks.ifaces — Interface Declarations
+### wabrix.ifaces — Interface Declarations
 
-Array of network interfaces used by xbricks. Non-veth interfaces must exist on the system.
+Array of network interfaces used by Wabrix. Non-veth interfaces must exist on the system.
 
 Default: `[{ name = "lo" }]`
 
@@ -45,14 +45,14 @@ Default: `[{ name = "lo" }]`
 ```toml
 ifaces = [
     { name = "enp2s0f0np0", rxd = 8160, txd = 4096, irq_core = 8 },
-    { name = "veth_xbricks", type = "veth", namespace = "ns-xbricks",
+    { name = "veth_wabrix", type = "veth", namespace = "ns-wabrix",
       peer = "tap-veth", mac_if = "enp2s0f0np0", ipnet = "192.168.177.222/24" },
 ]
 ```
 
 ---
 
-### xbricks.umem — User Memory Regions
+### wabrix.umem — User Memory Regions
 
 Array of AF_XDP UMEM (shared packet buffer) configurations. At least one is required.
 
@@ -81,7 +81,7 @@ umem = [
 
 ---
 
-### xbricks.xsk — XDP Socket Mappings
+### wabrix.xsk — XDP Socket Mappings
 
 Array of AF_XDP socket bindings. At least one is required.
 
@@ -102,14 +102,14 @@ Default: `[{ iface = "lo", queues = [0], umem = 0, rxq_size = 8192, txq_size = 8
 xsk = [
     { iface = "enp2s0f0np0", queues = [0, 1], umem = 0, rxq_size = 4096, txq_size = 4096,
       zerocopy = true, xdp_mode = "auto" },
-    { iface = "veth_xbricks", queues = [0], umem = 1, rxq_size = 2048, txq_size = 2048,
+    { iface = "veth_wabrix", queues = [0], umem = 1, rxq_size = 2048, txq_size = 2048,
       zerocopy = false },
 ]
 ```
 
 ---
 
-### xbricks.workers — Worker Thread Configuration
+### wabrix.workers — Worker Thread Configuration
 
 Array of worker threads. At least one is required.
 
@@ -339,7 +339,7 @@ y = 335.46
 ## Full Configuration Example
 
 ```toml
-[xbricks]
+[wabrix]
 ifaces = [
     { name = "enp2s0f0np0", rxd = 8160, txd = 4096, irq_core = 8 },
     { name = "enp2s0f1np1", rxd = 8160, txd = 4096, irq_core = 8 },

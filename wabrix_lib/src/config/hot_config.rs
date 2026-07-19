@@ -33,35 +33,57 @@ impl NodeDynamicState {
     /// Takes the current typed state and applies updates from the weakly-typed hot_args map.
     pub fn update_from_strings(&mut self, updates: &HashMap<String, String>) {
         match self {
-            NodeDynamicState::Generator { state, pps_limit, packet_limit, batch_size, .. } => {
-                if let Some(cmd) = updates.get("state") { // Replaces the old 'cmd' logic
+            NodeDynamicState::Generator {
+                state,
+                pps_limit,
+                packet_limit,
+                batch_size,
+                ..
+            } => {
+                if let Some(cmd) = updates.get("state") {
+                    // Replaces the old 'cmd' logic
                     *state = match cmd.as_str() {
                         "start" => GenState::Generating,
-                        "stop"  => GenState::Idle,
+                        "stop" => GenState::Idle,
                         _ => state.clone(), // Ignore invalid commands
                     };
                 }
                 if let Some(pps_str) = updates.get("pps") {
                     match parse_suffixed_number(pps_str) {
-                        Ok(v) => { *pps_limit = v; }
-                        Err(e) => { log::warn!("hot_args pps parse error: {}", e); }
+                        Ok(v) => {
+                            *pps_limit = v;
+                        }
+                        Err(e) => {
+                            log::warn!("hot_args pps parse error: {}", e);
+                        }
                     }
                 }
                 if let Some(count_str) = updates.get("packet_limit") {
                     match parse_suffixed_number(count_str) {
-                        Ok(v) => { *packet_limit = v; }
-                        Err(e) => { log::warn!("hot_args packet_count parse error: {}", e); }
+                        Ok(v) => {
+                            *packet_limit = v;
+                        }
+                        Err(e) => {
+                            log::warn!("hot_args packet_count parse error: {}", e);
+                        }
                     }
                 }
                 if let Some(bs_str) = updates.get("batch_size") {
                     match bs_str.parse::<u32>() {
-                        Ok(v) if v > 0 && v <= MAX_BATCH_SIZE as u32 => { *batch_size = v; }
-                        Ok(0) => { log::warn!("hot_args batch_size must be > 0"); }
-                        Ok(v) => { log::warn!("hot_args batch_size {} exceeds MAX_BATCH_SIZE {}", v, MAX_BATCH_SIZE); }
-                        Err(e) => { log::warn!("hot_args batch_size parse error: {}", e); }
+                        Ok(v) if v > 0 && v <= MAX_BATCH_SIZE as u32 => {
+                            *batch_size = v;
+                        }
+                        Ok(0) => {
+                            log::warn!("hot_args batch_size must be > 0");
+                        }
+                        Ok(v) => {
+                            log::warn!("hot_args batch_size {} exceeds MAX_BATCH_SIZE {}", v, MAX_BATCH_SIZE);
+                        }
+                        Err(e) => {
+                            log::warn!("hot_args batch_size parse error: {}", e);
+                        }
                     }
                 }
-
             }
             NodeDynamicState::Inspector { drop_probability } => {
                 if let Some(prob_str) = updates.get("drop_probability") {

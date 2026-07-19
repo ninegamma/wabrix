@@ -86,7 +86,9 @@ async fn main() -> anyhow::Result<()> {
 
         while let Ok(Some(line)) = reader.next_line().await {
             let parts: Vec<&str> = line.trim().split_whitespace().collect();
-            if parts.is_empty() { continue; }
+            if parts.is_empty() {
+                continue;
+            }
 
             match parts[0].to_lowercase().as_str() {
                 "start" => { let _ = cli_cmd_tx.send(SystemCommand::Start).await; }
@@ -161,23 +163,29 @@ async fn main() -> anyhow::Result<()> {
                     &current_config.wabrix.ifaces,
                     &current_config.wabrix.xsk,
                     false,
-                ).context("Failed to configure network interfaces").unwrap();
+                )
+                .context("Failed to configure network interfaces")
+                .unwrap();
 
                 // 4. Setup BPF
                 let (interface_skels, _xdp_links) = wabrix_lib::config::configure_bpf::setup_bpf(interfaces.clone())
-                    .context("Failed to setup BPF programs").unwrap();
+                    .context("Failed to setup BPF programs")
+                    .unwrap();
 
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
                 // 5. Build System
                 info!("Building XDP system from configuration...");
-                let sys_builder = current_config.to_system_builder()
-                    .context("Failed to create system builder").unwrap();
+                let sys_builder = current_config
+                    .to_system_builder()
+                    .context("Failed to create system builder")
+                    .unwrap();
 
                 let builder_ctrl_tx = Some(ctrl_tx.clone());
 
                 let xbricks_system = tokio::task::block_in_place(|| {
-                    sys_builder.build(Some(&interface_skels), platform_data.clone(), builder_ctrl_tx)
+                    sys_builder
+                        .build(Some(&interface_skels), platform_data.clone(), builder_ctrl_tx)
                         .map_err(|e| anyhow::anyhow!("Failed to build XDP system: {}", e))
                 })?;
 
@@ -200,7 +208,12 @@ async fn main() -> anyhow::Result<()> {
 
                 info!("All {} worker threads spawned. Data Plane is LIVE.", handles.len());
 
-                spawn_telemetry_ice_for_ifaces(telemetry_tx.clone(), &interfaces, pipeline_registry.clone(), shutdown.clone())?;
+                spawn_telemetry_ice_for_ifaces(
+                    telemetry_tx.clone(),
+                    &interfaces,
+                    pipeline_registry.clone(),
+                    shutdown.clone(),
+                )?;
                 spawn_pipeline_telemetry(telemetry_tx.clone(), pipeline_registry, shutdown.clone())?;
 
                 // ==========================================================
@@ -237,16 +250,18 @@ async fn main() -> anyhow::Result<()> {
                 for (idx, handle) in handles.into_iter().enumerate() {
                     match handle.await {
                         Ok(Ok(worker_stats)) => {
-                            for stats in worker_stats { stats.print_stats(idx); }
+                            for stats in worker_stats {
+                                stats.print_stats(idx);
+                            }
                         }
                         Ok(Err(e)) => error!("Worker {} stopped with error: {}", idx, e),
                         Err(e) => error!("Worker {} join error: {}", idx, e),
                     }
                 }
 
-                active_shared_state.store(
-                    wabrix_lib::config::hot_config::SharedSystemState::new(std::collections::HashMap::new())
-                );
+                active_shared_state.store(wabrix_lib::config::hot_config::SharedSystemState::new(
+                    std::collections::HashMap::new(),
+                ));
 
                 debug!("Detaching BPF programs from physical interfaces...");
                 drop(_xdp_links);
@@ -261,7 +276,6 @@ async fn main() -> anyhow::Result<()> {
             info!("Data plane teardown complete.");
 
             next_cmd = action;
-
         } else {
             // ==========================================================
             // IDLE STATE

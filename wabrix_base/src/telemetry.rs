@@ -18,7 +18,6 @@ pub struct TMLiveStats {
     pub is_active_run: bool,
 }
 
-
 /// Represents a single node's metrics
 #[derive(Clone)]
 pub struct TelemetryMetrics {
@@ -66,7 +65,6 @@ impl TelemetryRegistry {
     }
 }
 
-
 /// (node_id, pkt_counters, byte_counters, labels, active_flag) aggregated across workers.
 type AggregatedMetric = (String, Vec<u64>, Vec<u64>, Vec<String>, Option<bool>);
 
@@ -101,17 +99,17 @@ pub fn spawn_pipeline_telemetry(
         let aggregate = || {
             let mut seen: Vec<AggregatedMetric> = Vec::new();
             for metrics in registry.get_metrics() {
-                let pkts: Vec<u64> = metrics.counters_pkts.iter()
-                    .map(|c| c.load(Ordering::Relaxed))
-                    .collect();
-                let bytes: Vec<u64> = metrics.counters_bytes.iter()
-                    .map(|c| c.load(Ordering::Relaxed))
-                    .collect();
+                let pkts: Vec<u64> = metrics.counters_pkts.iter().map(|c| c.load(Ordering::Relaxed)).collect();
+                let bytes: Vec<u64> = metrics.counters_bytes.iter().map(|c| c.load(Ordering::Relaxed)).collect();
                 let active = metrics.active_flag.as_ref().map(|f| f.load(Ordering::Relaxed));
 
                 if let Some(entry) = seen.iter_mut().find(|(id, ..)| id == &metrics.node_id) {
-                    for (acc, v) in entry.1.iter_mut().zip(pkts.iter()) { *acc += v; }
-                    for (acc, v) in entry.2.iter_mut().zip(bytes.iter()) { *acc += v; }
+                    for (acc, v) in entry.1.iter_mut().zip(pkts.iter()) {
+                        *acc += v;
+                    }
+                    for (acc, v) in entry.2.iter_mut().zip(bytes.iter()) {
+                        *acc += v;
+                    }
                     // OR the active flags: Some(true) wins over Some(false) and None
                     entry.4 = match (entry.4, active) {
                         (Some(a), Some(b)) => Some(a || b),
@@ -193,8 +191,7 @@ pub fn spawn_pipeline_telemetry(
                 rate_tracker.insert(node_id.clone(), (now, counters_pkts.clone(), counters_bytes.clone()));
                 // Use the explicit active flag when available; fall back to the
                 // "any pkt counter > 0" heuristic for nodes that don't register one.
-                let is_active_run = active_flag
-                    .unwrap_or_else(|| counters_pkts.iter().any(|&v| v > 0));
+                let is_active_run = active_flag.unwrap_or_else(|| counters_pkts.iter().any(|&v| v > 0));
                 let stats = TMLiveStats {
                     tmstats_name: node_id,
                     labels,
@@ -224,7 +221,9 @@ pub fn spawn_telemetry_ice_for_ifaces(
             .ok()
             .filter(|o| o.status.success())
             .and_then(|o| {
-                String::from_utf8(o.stdout).ok()?.lines()
+                String::from_utf8(o.stdout)
+                    .ok()?
+                    .lines()
                     .find_map(|l| l.strip_prefix("driver: ").map(|d| d.trim() == "ice"))
             })
             .unwrap_or(false);
@@ -236,7 +235,12 @@ pub fn spawn_telemetry_ice_for_ifaces(
     Ok(())
 }
 
-pub fn spawn_telemetry_ice(telemetry_tx: Sender<TMLiveStats>, iface_name: String, registry: Arc<TelemetryRegistry>, shutdown_signal: Arc<AtomicBool>) -> anyhow::Result<()> {
+pub fn spawn_telemetry_ice(
+    telemetry_tx: Sender<TMLiveStats>,
+    iface_name: String,
+    registry: Arc<TelemetryRegistry>,
+    shutdown_signal: Arc<AtomicBool>,
+) -> anyhow::Result<()> {
     tokio::spawn(async move {
         // Real-time data-plane activity baseline (summed pipeline pkt counters).
         // The LIVE/IDLE state is driven from userspace pipeline activity rather
@@ -297,12 +301,12 @@ pub fn spawn_telemetry_ice(telemetry_tx: Sender<TMLiveStats>, iface_name: String
                         let key = parts[0];
                         if let Ok(val) = parts[1].parse::<u64>() {
                             match key {
-                                "rx_unicast:"   => curr_rx_uc = val,
+                                "rx_unicast:" => curr_rx_uc = val,
                                 "rx_multicast:" => curr_rx_mc = val,
                                 "rx_broadcast:" => curr_rx_bc = val,
-                                "rx_dropped:"   => curr_sw_drops = val,
+                                "rx_dropped:" => curr_sw_drops = val,
                                 "rx_dropped.nic:" => curr_hw_drops = val,
-                                "tx_unicast:"   => curr_tx_uc = val,
+                                "tx_unicast:" => curr_tx_uc = val,
                                 "tx_multicast:" => curr_tx_mc = val,
                                 "tx_broadcast:" => curr_tx_bc = val,
                                 _ => {} // Ignore the other 50+ stats we don't care about
@@ -346,24 +350,24 @@ pub fn spawn_telemetry_ice(telemetry_tx: Sender<TMLiveStats>, iface_name: String
                 // DELTA MATH
                 // ==========================================
                 // saturating_sub prevents a crash if the NIC driver resets its counters to 0
-                let delta_rx_uc    = curr_rx_uc.saturating_sub(prev_rx_uc);
-                let delta_rx_mc    = curr_rx_mc.saturating_sub(prev_rx_mc);
-                let delta_rx_bc    = curr_rx_bc.saturating_sub(prev_rx_bc);
+                let delta_rx_uc = curr_rx_uc.saturating_sub(prev_rx_uc);
+                let delta_rx_mc = curr_rx_mc.saturating_sub(prev_rx_mc);
+                let delta_rx_bc = curr_rx_bc.saturating_sub(prev_rx_bc);
                 let delta_sw_drops = curr_sw_drops.saturating_sub(prev_sw_drops);
                 let delta_hw_drops = curr_hw_drops.saturating_sub(prev_hw_drops);
-                let delta_tx_uc    = curr_tx_uc.saturating_sub(prev_tx_uc);
-                let delta_tx_mc    = curr_tx_mc.saturating_sub(prev_tx_mc);
-                let delta_tx_bc    = curr_tx_bc.saturating_sub(prev_tx_bc);
+                let delta_tx_uc = curr_tx_uc.saturating_sub(prev_tx_uc);
+                let delta_tx_mc = curr_tx_mc.saturating_sub(prev_tx_mc);
+                let delta_tx_bc = curr_tx_bc.saturating_sub(prev_tx_bc);
 
                 // Save for the next loop
-                prev_rx_uc    = curr_rx_uc;
-                prev_rx_mc    = curr_rx_mc;
-                prev_rx_bc    = curr_rx_bc;
+                prev_rx_uc = curr_rx_uc;
+                prev_rx_mc = curr_rx_mc;
+                prev_rx_bc = curr_rx_bc;
                 prev_sw_drops = curr_sw_drops;
                 prev_hw_drops = curr_hw_drops;
-                prev_tx_uc    = curr_tx_uc;
-                prev_tx_mc    = curr_tx_mc;
-                prev_tx_bc    = curr_tx_bc;
+                prev_tx_uc = curr_tx_uc;
+                prev_tx_mc = curr_tx_mc;
+                prev_tx_bc = curr_tx_bc;
 
                 // Data-plane is live if any node reports active, or its packet
                 // counters grew since the last poll. This flips within the poll
@@ -376,34 +380,38 @@ pub fn spawn_telemetry_ice(telemetry_tx: Sender<TMLiveStats>, iface_name: String
                 // BURST LOGIC (The State Machine)
                 // ==========================================
                 let any_activity = dp_active
-                    || delta_rx_uc > 0 || delta_rx_mc > 0 || delta_rx_bc > 0
-                    || delta_sw_drops > 0 || delta_hw_drops > 0
-                    || delta_tx_uc > 0 || delta_tx_mc > 0 || delta_tx_bc > 0;
+                    || delta_rx_uc > 0
+                    || delta_rx_mc > 0
+                    || delta_rx_bc > 0
+                    || delta_sw_drops > 0
+                    || delta_hw_drops > 0
+                    || delta_tx_uc > 0
+                    || delta_tx_mc > 0
+                    || delta_tx_bc > 0;
 
                 if any_activity {
                     if !in_run {
                         // We just woke up! Reset the burst counters
                         in_run = true;
-                        run_rx_uc    = 0;
-                        run_rx_mc    = 0;
-                        run_rx_bc    = 0;
+                        run_rx_uc = 0;
+                        run_rx_mc = 0;
+                        run_rx_bc = 0;
                         run_sw_drops = 0;
                         run_hw_drops = 0;
-                        run_tx_uc    = 0;
-                        run_tx_mc    = 0;
-                        run_tx_bc    = 0;
+                        run_tx_uc = 0;
+                        run_tx_mc = 0;
+                        run_tx_bc = 0;
                     }
 
-                    run_rx_uc    += delta_rx_uc;
-                    run_rx_mc    += delta_rx_mc;
-                    run_rx_bc    += delta_rx_bc;
+                    run_rx_uc += delta_rx_uc;
+                    run_rx_mc += delta_rx_mc;
+                    run_rx_bc += delta_rx_bc;
                     run_sw_drops += delta_sw_drops;
                     run_hw_drops += delta_hw_drops;
-                    run_tx_uc    += delta_tx_uc;
-                    run_tx_mc    += delta_tx_mc;
-                    run_tx_bc    += delta_tx_bc;
+                    run_tx_uc += delta_tx_uc;
+                    run_tx_mc += delta_tx_mc;
+                    run_tx_bc += delta_tx_bc;
                     idle_ticks = 0;
-
                 } else if in_run {
                     idle_ticks += 1;
                     // If 50 ticks (500ms) pass with 0 packets, the burst is officially over
@@ -421,14 +429,24 @@ pub fn spawn_telemetry_ice(telemetry_tx: Sender<TMLiveStats>, iface_name: String
                     let stats = TMLiveStats {
                         tmstats_name: iface_name.clone(),
                         labels: vec![
-                            "rx_uc_pkts".to_string(), "rx_mc_pkts".to_string(), "rx_bc_pkts".to_string(),
-                            "sw_drops".to_string(), "hw_drops".to_string(),
-                            "tx_uc_pkts".to_string(), "tx_mc_pkts".to_string(), "tx_bc_pkts".to_string(),
+                            "rx_uc_pkts".to_string(),
+                            "rx_mc_pkts".to_string(),
+                            "rx_bc_pkts".to_string(),
+                            "sw_drops".to_string(),
+                            "hw_drops".to_string(),
+                            "tx_uc_pkts".to_string(),
+                            "tx_mc_pkts".to_string(),
+                            "tx_bc_pkts".to_string(),
                         ],
                         counters_pkts: vec![
-                            run_rx_uc, run_rx_mc, run_rx_bc,
-                            run_sw_drops, run_hw_drops,
-                            run_tx_uc, run_tx_mc, run_tx_bc,
+                            run_rx_uc,
+                            run_rx_mc,
+                            run_rx_bc,
+                            run_sw_drops,
+                            run_hw_drops,
+                            run_tx_uc,
+                            run_tx_mc,
+                            run_tx_bc,
                         ],
                         counters_bytes: vec![],
                         rates_pkts: vec![],

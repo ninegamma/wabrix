@@ -24,7 +24,7 @@ thread_local! {
 /// access to its mailbox, other instances' scratchpads above it, and all AF_XDP frames.
 ///
 /// Memory layout (host-side byte offsets from Umem base):
-/// ```
+/// ```text
 /// [0 .. reserved_bytes - control_block_bytes)            per-instance scratchpad partitions
 ///   partition_start_bytes_0 = 0
 ///   partition_start_bytes_1 = partition_size
@@ -34,7 +34,7 @@ thread_local! {
 /// [reserved_bytes .. total_size)                           AF_XDP payload frames
 /// ```
 /// For instance N (`partition_start_bytes = N * partition_size`):
-/// ```
+/// ```text
 /// WASM addr 0                              == host offset partition_start_bytes_N
 /// WASM addr mailbox_offset_N - start_N     == instance N's BatchMetadata (positive, in-bounds)
 /// WASM addr desc_addr        - start_N     == AF_XDP frame payload   (positive, in-bounds)
@@ -105,8 +105,12 @@ unsafe impl Sync for UmemHandle {}
 
 unsafe impl LinearMemory for UmemHandle {
     /// The visible window starts at `partition_start_bytes` and reaches the end of the Umem.
-    fn byte_size(&self) -> usize { self.window_size_bytes() }
-    fn byte_capacity(&self) -> usize { self.window_size_bytes() }
+    fn byte_size(&self) -> usize {
+        self.window_size_bytes()
+    }
+    fn byte_capacity(&self) -> usize {
+        self.window_size_bytes()
+    }
     fn grow_to(&mut self, _new_size: usize) -> Result<()> {
         Err(wasmtime::Error::msg("XBricks: Memory growth disabled for zero-copy UMEM"))
     }
@@ -131,9 +135,9 @@ unsafe impl MemoryCreator for XdpMemoryCreator {
         _guard_size: usize,
     ) -> std::result::Result<Box<dyn LinearMemory>, String> {
         // Read and instantly consume the handle from THIS specific thread
-        let handle = CURRENT_INSTANTIATION_HANDLE.with(|slot| {
-            slot.borrow_mut().take()
-        }).ok_or_else(|| "XdpMemoryCreator: No UmemHandle was set for this thread prior to instantiation!".to_string())?;
+        let handle = CURRENT_INSTANTIATION_HANDLE
+            .with(|slot| slot.borrow_mut().take())
+            .ok_or_else(|| "XdpMemoryCreator: No UmemHandle was set for this thread prior to instantiation!".to_string())?;
 
         Ok(Box::new((*handle).clone()))
     }
@@ -149,7 +153,10 @@ pub struct MyHostState {
 
 impl WasiView for MyHostState {
     fn ctx(&mut self) -> WasiCtxView<'_> {
-        WasiCtxView { ctx: &mut self.ctx, table: &mut self.table }
+        WasiCtxView {
+            ctx: &mut self.ctx,
+            table: &mut self.table,
+        }
     }
 }
 
@@ -177,7 +184,13 @@ pub struct WasmManager {
 }
 
 impl WasmManager {
-    pub fn new(frame_size: u32, reserved_frames: u32, frame_count: u32, umem: Arc<Umem>, instance_count: u32) -> Result<Self> {
+    pub fn new(
+        frame_size: u32,
+        reserved_frames: u32,
+        frame_count: u32,
+        umem: Arc<Umem>,
+        instance_count: u32,
+    ) -> Result<Self> {
         let min_ctrl = control_block_frames(instance_count, frame_size);
         // Reserved region must hold both the Control Block (at the end) and at least
         // one scratchpad frame per instance (at the start).
@@ -213,13 +226,11 @@ impl WasmManager {
             .memory_init_cow(false);
 
         let engine = Engine::new(&config)?;
-        let mut linker: Linker<MyHostState>  = Linker::new(&engine);
+        let mut linker: Linker<MyHostState> = Linker::new(&engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
 
-        wasm_engine::EnginePlugin::add_to_linker::<MyHostState, HasSelf<MyHostState>>(
-            &mut linker,
-            |state| state
-        ).expect("Failed to link EnginePlugin world");
+        wasm_engine::EnginePlugin::add_to_linker::<MyHostState, HasSelf<MyHostState>>(&mut linker, |state| state)
+            .expect("Failed to link EnginePlugin world");
 
         Ok(Self {
             engine,
@@ -305,9 +316,15 @@ impl WasmManager {
         Some(cache_dir.join(format!("{}-{}.cwasm", stem, mtime)))
     }
 
-    pub fn engine(&self) -> &Engine { &self.engine }
-    pub fn linker(&self) -> &Linker<MyHostState> { &self.linker }
-    pub fn umem(&self) -> Arc<UmemHandle> { self.umem.clone() }
+    pub fn engine(&self) -> &Engine {
+        &self.engine
+    }
+    pub fn linker(&self) -> &Linker<MyHostState> {
+        &self.linker
+    }
+    pub fn umem(&self) -> Arc<UmemHandle> {
+        self.umem.clone()
+    }
 
     /// Pre-load the partition handle that `XdpMemoryCreator::new_memory()` will
     /// hand to Wasmtime during the next `FilterPlugin::instantiate()` call.

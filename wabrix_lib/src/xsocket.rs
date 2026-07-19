@@ -67,8 +67,8 @@ pub struct XSocketRx {
     empty_spins: usize,
     #[allow(dead_code)]
     last_logged_block: usize, // helper for logging
-    fill_deficit: usize,      // for more targeted replenishing
-    fd: RawFd,                  // file descriptor of the AF_XDP socket
+    fill_deficit: usize, // for more targeted replenishing
+    fd: RawFd,           // file descriptor of the AF_XDP socket
     // Profiling fields
     pub prof_reclaim_replenish_cycles: u64,
     pub prof_replenish_cycles: u64,
@@ -95,9 +95,9 @@ pub struct XSocketTx {
     config: Arc<XdpSocketConfig>,
     total_consumed: usize,
     #[allow(dead_code)]
-    last_logged_block: usize,  // helper for logging
+    last_logged_block: usize, // helper for logging
     total_sent_packets: usize, // helper for logging
-    fd: RawFd,                   // file descriptor of the AF_XDP socket
+    fd: RawFd,                 // file descriptor of the AF_XDP socket
 }
 
 impl XSocket {
@@ -111,8 +111,6 @@ impl XSocket {
         shared_rings: Option<(Arc<Mutex<FillQueue>>, Arc<Mutex<CompQueue>>)>,
         initial_descs: Vec<FrameDesc>,
     ) -> Result<(Self, Arc<Mutex<FillQueue>>, Arc<Mutex<CompQueue>>), Box<dyn std::error::Error>> {
-
-
         let mut bind_flags = BindFlags::XDP_USE_NEED_WAKEUP;
         if config.zerocopy {
             bind_flags |= BindFlags::XDP_ZEROCOPY;
@@ -163,8 +161,7 @@ impl XSocket {
         let iface_handle = Interface::new(c_iface);
 
         probe_kernel_fds("PRE Socket::new");
-        let (tx_q, rx_q, queues_opt) =
-            unsafe { Socket::new(socket_config, &umem, &iface_handle, config.queue_id)? };
+        let (tx_q, rx_q, queues_opt) = unsafe { Socket::new(socket_config, &umem, &iface_handle, config.queue_id)? };
         probe_kernel_fds("POST Socket::new");
 
         // 3. Resolve Fill/Comp Queues
@@ -201,7 +198,7 @@ impl XSocket {
             }
         }
 
-        let fd=rx_q.fd().as_raw_fd();
+        let fd = rx_q.fd().as_raw_fd();
         let xdp_fm = Self {
             umem,
             rx_queue: Arc::new(Mutex::new(rx_q)),
@@ -210,7 +207,7 @@ impl XSocket {
             comp_queue: cq.clone(),
             fd,
             bus,
-            config: Arc::new(config)
+            config: Arc::new(config),
         };
 
         debug!(
@@ -431,18 +428,18 @@ impl XSocketRx {
         let frame_registry = unsafe { &mut *registry_ptr };
 
         let available = requested_count;
-/*        let available_count = frame_registry.total_free_frames();
-        let available = std::cmp::min(requested_count, available_count);
-        if available == 0 {
-            log::trace!(
-                "Worker {}: Cannot replenish {} queue {}, no free frames available!",
-                self.config.worker_id,
-                &self.config.interface,
-                self.config.queue_id
-            );
-            return 0;
-        }
-*/
+        /*        let available_count = frame_registry.total_free_frames();
+                let available = std::cmp::min(requested_count, available_count);
+                if available == 0 {
+                    log::trace!(
+                        "Worker {}: Cannot replenish {} queue {}, no free frames available!",
+                        self.config.worker_id,
+                        &self.config.interface,
+                        self.config.queue_id
+                    );
+                    return 0;
+                }
+        */
 
         let t0 = unsafe { std::arch::x86_64::_rdtsc() };
 
@@ -555,41 +552,41 @@ impl XSocketRx {
 
         // Log the breakdown (only occasionally to avoid log spam)
         /*if self.prof_replenish_calls % 10000 == 0 {
-            log::info!(
-                "\n=== Replenish X-Ray (Cycles) ===\n\
-                 Lock      : {}\n\
-                 Allocator : {}\n\
-                 Math Loop : {}\n\
-                 FQ Produce: {}\n\
-                 Syscall   : {}\n\
-                 Release   : {}",
-                 t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4, t6 - t5
-            );
-        }
+                    log::info!(
+                        "\n=== Replenish X-Ray (Cycles) ===\n\
+                         Lock      : {}\n\
+                         Allocator : {}\n\
+                         Math Loop : {}\n\
+                         FQ Produce: {}\n\
+                         Syscall   : {}\n\
+                         Release   : {}",
+                         t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4, t6 - t5
+                    );
+                }
 
-        let current_block = self.total_produced / threshold;
+                let current_block = self.total_produced / threshold;
 
-        if current_block > self.last_logged_block {
-            log::trace!(
-                "Worker {}, I/f {}, Queue {}: Replenished in total {} frames to fill queue, free frames remaining: {}",
-                self.config.worker_id,
-                self.config.interface,
-                self.config.queue_id,
-                &self.total_produced,
-                frame_registry.total_free_frames()
-            );
+                if current_block > self.last_logged_block {
+                    log::trace!(
+                        "Worker {}, I/f {}, Queue {}: Replenished in total {} frames to fill queue, free frames remaining: {}",
+                        self.config.worker_id,
+                        self.config.interface,
+                        self.config.queue_id,
+                        &self.total_produced,
+                        frame_registry.total_free_frames()
+                    );
 
-            self.last_logged_block = current_block;
-        }
-        trace!(
-            "Worker {}: Replenished {} frames to {} queue {} Fill Ring, free frames remaining: {}",
-            self.config.worker_id,
-            produced,
-            &self.config.interface,
-            self.config.queue_id,
-            frame_registry.total_free_frames(),
-        );
-*/
+                    self.last_logged_block = current_block;
+                }
+                trace!(
+                    "Worker {}: Replenished {} frames to {} queue {} Fill Ring, free frames remaining: {}",
+                    self.config.worker_id,
+                    produced,
+                    &self.config.interface,
+                    self.config.queue_id,
+                    frame_registry.total_free_frames(),
+                );
+        */
         #[cfg(feature = "profiling")]
         {
             let end_cycles = unsafe { std::arch::x86_64::_rdtsc() };
@@ -606,15 +603,20 @@ impl XSocketRx {
                 if duration > 50_000 {
                     log::warn!("MONSTER SPIKE DETECTED: Replenish took {} cycles!", duration);
                     log::info!(
-                "\n=== Replenish X-Ray (Cycles) ===\n\
+                        "\n=== Replenish X-Ray (Cycles) ===\n\
                  Lock      : {}\n\
                  Allocator : {}\n\
                  Math Loop : {}\n\
                  FQ Produce: {}\n\
                  Syscall   : {}\n\
                  Release   : {}",
-                 t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4, t6 - t5
-            );
+                        t1 - t0,
+                        t2 - t1,
+                        t3 - t2,
+                        t4 - t3,
+                        t5 - t4,
+                        t6 - t5
+                    );
                 }
             }
         }
@@ -715,17 +717,16 @@ impl BatchRx for XSocketRx {
 
         if rcvd == 0 {
             self.empty_spins += 1;
-            if self.prof_started
-                && self.empty_spins >= 51200 {
-                    self.prof_started = false;
-                    let now = unsafe { core::arch::x86_64::_rdtsc() };
-                    log::debug!(
-                        "**** Traffic burst ended after ~ {} cycles ({} us)",
-                        (now - self.prof_burst_start).separated_string(),
-                        (((now - self.prof_burst_start) as f64 * (1_000_000.0 / get_tsc_frequency() as f64)) as u64)
-                            .separated_string()
-                    );
-                }
+            if self.prof_started && self.empty_spins >= 51200 {
+                self.prof_started = false;
+                let now = unsafe { core::arch::x86_64::_rdtsc() };
+                log::debug!(
+                    "**** Traffic burst ended after ~ {} cycles ({} us)",
+                    (now - self.prof_burst_start).separated_string(),
+                    (((now - self.prof_burst_start) as f64 * (1_000_000.0 / get_tsc_frequency() as f64)) as u64)
+                        .separated_string()
+                );
+            }
 
             // LOCKLESS/FAST-PATH WAKEUP CHECK
             // We only attempt to lock and check the Fill Queue if we've been spinning empty for a while.
@@ -924,7 +925,6 @@ impl BatchRx for XSocketRx {
 
 // Implement BatchTx for XSocketTx
 impl BatchTx for XSocketTx {
-
     fn transmit_batch(&mut self, batch: &mut Batch) -> anyhow::Result<usize> {
         self.drain_completion_queue()?;
 
@@ -949,7 +949,10 @@ impl BatchTx for XSocketTx {
         } else if free_slots < original_batch_len {
             log::info!(
                 "⚠️ [TX BACKPRESSURE] Worker {} Queue {}: Batch of {} packets, but only {} TX slots free.",
-                self.config.worker_id, self.config.queue_id, original_batch_len, free_slots
+                self.config.worker_id,
+                self.config.queue_id,
+                original_batch_len,
+                free_slots
             );
         }
 
@@ -997,11 +1000,11 @@ impl BatchTx for XSocketTx {
                             std::ptr::copy_nonoverlapping(
                                 pdu_ref.w.data_ptr(foreign_umem_addr),
                                 new_pdu.w.data_ptr(my_umem_addr),
-                                len as usize
+                                len as usize,
                             );
                         }
                         new_pdu.w.set_data_length(len);
-                        
+
                         descs[valid_to_send] = new_pdu.to_frame_desc();
                         // MAGIC SWAP: Put the UMEM 1 packet into the batch,
                         // and take ownership of the old UMEM 0 packet!
@@ -1009,7 +1012,7 @@ impl BatchTx for XSocketTx {
 
                         // Drop the old packet immediately (returns it to UMEM 0)
                         drop(old_pdu);
-                        
+
                         valid_to_send += 1;
                     } else {
                         // UMEM 1 is exhausted. Stop processing this batch.
@@ -1085,26 +1088,26 @@ impl BatchTx for XSocketTx {
 
 // Add helper methods for XSocketTx
 impl XSocketTx {
-/*
-    /// Explicitly wakes up the kernel TX driver if it went to sleep
-    #[inline]
-    pub fn wakeup_tx_queue(&self) -> anyhow::Result<()> {
-        // Note: This requires access to the TX queue status
-        // In libxdp/xsk-rs, checking needs_wakeup usually happens on the ring struct.
-        // If the flag is set:
-        unsafe {
-            if self.tx_queue.needs_wakeup() {
-                //trace!("Worker {}: TX Queue needs wakeup! Triggering syscall...", self.config.worker_id);
-                // The sendto call with MSG_DONTWAIT and 0 len is the standard wakeup trigger
-                let ret = libc::sendto(self.fd, std::ptr::null(), 0, libc::MSG_DONTWAIT, std::ptr::null_mut(), 0);
-                if ret < 0 {
-                    return Err(std::io::Error::last_os_error().into());
+    /*
+        /// Explicitly wakes up the kernel TX driver if it went to sleep
+        #[inline]
+        pub fn wakeup_tx_queue(&self) -> anyhow::Result<()> {
+            // Note: This requires access to the TX queue status
+            // In libxdp/xsk-rs, checking needs_wakeup usually happens on the ring struct.
+            // If the flag is set:
+            unsafe {
+                if self.tx_queue.needs_wakeup() {
+                    //trace!("Worker {}: TX Queue needs wakeup! Triggering syscall...", self.config.worker_id);
+                    // The sendto call with MSG_DONTWAIT and 0 len is the standard wakeup trigger
+                    let ret = libc::sendto(self.fd, std::ptr::null(), 0, libc::MSG_DONTWAIT, std::ptr::null_mut(), 0);
+                    if ret < 0 {
+                        return Err(std::io::Error::last_os_error().into());
+                    }
                 }
             }
+            Ok(())
         }
-        Ok(())
-    }
-*/
+    */
     /// Consumes frames that the NIC has finished transmitting.
     fn drain_completion_queue(&mut self) -> anyhow::Result<usize> {
         let threshold = LOG_INTERVAL_C_F_QUEUE_PACKETS;
@@ -1142,12 +1145,16 @@ impl XSocketTx {
 
                 // 2. Encode to the global frame index (umem_id << 24 | local_idx)
                 let global_idx = encode_global_frame(self.config.umem_config.group_id, local_idx);
-                trace!("drain_completion_queue: Worker {}: Releasing frame_idx={} (local_idx={}, umem_group_id={})",
-                    self.config.worker_id, global_idx, local_idx, self.config.umem_config.group_id);
+                trace!(
+                    "drain_completion_queue: Worker {}: Releasing frame_idx={} (local_idx={}, umem_group_id={})",
+                    self.config.worker_id,
+                    global_idx,
+                    local_idx,
+                    self.config.umem_config.group_id
+                );
                 self.release_frame(global_idx);
             }
-        }
-        else {
+        } else {
             if self.total_sent_packets > self.total_consumed {
                 let pending_in_hardware = self.total_sent_packets - self.total_consumed;
 
@@ -1211,7 +1218,10 @@ impl XSocketTx {
             }
         }
         // Fallback: should never happen with a correctly configured system
-        log::warn!("determine_owner: no partition owns frame_idx={}, defaulting to worker 0", frame_idx);
+        log::warn!(
+            "determine_owner: no partition owns frame_idx={}, defaulting to worker 0",
+            frame_idx
+        );
         0
     }
 }

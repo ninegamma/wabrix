@@ -33,7 +33,7 @@ bindgen!({
     world: "generator-plugin", // Tells bindgen to generate the generator code
 });
 
-/// A packet generator node that creates packets 
+/// A packet generator node that creates packets
 /// This is a source node that generates synthetic traffic.
 pub struct GeneratorNode {
     id: NodeId,
@@ -92,7 +92,7 @@ pub struct GeneratorNode {
     bindings: Option<GeneratorPlugin>,
     #[cfg(feature = "wasm")]
     partition_start_bytes: u32,
-    platform_data: PlatformData
+    platform_data: PlatformData,
 }
 
 #[derive(PartialEq, Debug, Clone, Serialize, Deserialize)]
@@ -102,7 +102,6 @@ pub enum GenState {
     Finished,
 }
 
-
 impl GeneratorNode {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -111,7 +110,7 @@ impl GeneratorNode {
         umem_group_id: usize,
         worker_id: usize,
         batch_size: u32,
-        min_interbatch_gap: u64,    // minimum interbatch_gap in tsc cycles
+        min_interbatch_gap: u64,  // minimum interbatch_gap in tsc cycles
         packets_to_generate: u64, // 0: no limit
         src_mac: MacAddr6,
         dst_ip: Ipv4Addr,
@@ -130,7 +129,6 @@ impl GeneratorNode {
         #[cfg(feature = "wasm")] wasm_data: std::collections::HashMap<String, String>,
         platform_data: PlatformData,
     ) -> Self {
-
         #[cfg(feature = "wasm")]
         let (store, bindings) = if let (Some(manager), Some(path)) = (wasm_manager, wasm_file_path) {
             let component = manager.get_component(path).expect("Failed to load Gen Wasm");
@@ -151,7 +149,8 @@ impl GeneratorNode {
                 .expect("Failed to instantiate Generator Wasm");
 
             let data: Vec<(String, String)> = wasm_data.into_iter().collect();
-            bindings.wabrix_plugins_generator()
+            bindings
+                .wabrix_plugins_generator()
                 .call_init_data(&mut store, &data, worker_id as u32)
                 .expect("Failed to call init-data on WASM generator");
 
@@ -200,7 +199,7 @@ impl GeneratorNode {
             bindings,
             #[cfg(feature = "wasm")]
             partition_start_bytes,
-            platform_data
+            platform_data,
         }
     }
 
@@ -252,7 +251,6 @@ impl GeneratorNode {
             // Write TCP header
             let tcp_ptr = data_ptr.add(mac_size + ip_size) as *mut TcpHeader;
             std::ptr::copy_nonoverlapping(&tcp as *const TcpHeader, tcp_ptr, 1);
-
 
             // Initialize HeaderStack with the correct offsets
             pdu.headers_mut().push(umem_addr, Header::Mac(&mut *mac_ptr));
@@ -306,20 +304,27 @@ impl Node for GeneratorNode {
     }
 
     fn process(&mut self, batch: &mut Batch) -> Directive {
-
         #[cfg(feature = "profiling")]
         let start_cycles = unsafe { _rdtsc() };
 
         // =========================================================
         // 1. DYNAMIC HOT-CONFIG (GUI CONTROL)
         // =========================================================
-        let b_dst_changed=false;
+        let b_dst_changed = false;
         if let Some(rcu) = self.shared_state.pipelines.get(&self.pipeline_name) {
             let hot_config = rcu.load();
             if let Some(idx) = hot_config.name_to_index.get(&self.id.id) {
                 let dynamic_state = &hot_config.fast_nodes[*idx].dynamic_state;
                 // Match cleanly on our specific node state
-                if let NodeDynamicState::Generator { state, pps_limit, packet_limit, batch_size, dst_ip, dst_mac } = dynamic_state {
+                if let NodeDynamicState::Generator {
+                    state,
+                    pps_limit,
+                    packet_limit,
+                    batch_size,
+                    dst_ip,
+                    dst_mac,
+                } = dynamic_state
+                {
                     self.batch_size = *batch_size;
                     let b_dst_changed = self.dst_ip != *dst_ip || self.dst_mac != *dst_mac;
                     if b_dst_changed {
@@ -328,7 +333,13 @@ impl Node for GeneratorNode {
                     }
                     // Instantly apply hot updates!
                     if self.state != *state {
-                        log::info!("Generator {} state changed to {:?}, pps_limit: {}, packet_limit: {}", self.id, state, pps_limit, packet_limit);
+                        log::info!(
+                            "Generator {} state changed to {:?}, pps_limit: {}, packet_limit: {}",
+                            self.id,
+                            state,
+                            pps_limit,
+                            packet_limit
+                        );
                         if *state == GenState::Generating && self.state == GenState::Idle {
                             self.packets_generated_this_run = 0;
                             self.tm_this_run.store(0, Ordering::Relaxed);
@@ -355,14 +366,13 @@ impl Node for GeneratorNode {
                     }
 
                     // If the user changed the PPS in the GUI, recalculate the gap
-                    let new_gap = (self.platform_data.tsc_frequency / *pps_limit * self.batch_size as u64).saturating_sub(2000);
+                    let new_gap =
+                        (self.platform_data.tsc_frequency / *pps_limit * self.batch_size as u64).saturating_sub(2000);
                     if new_gap != self.min_interbatch_gap {
                         self.min_interbatch_gap = new_gap;
                     }
                     self.packets_to_generate = *packet_limit;
                 }
-                
-
             }
         }
 
@@ -404,7 +414,8 @@ impl Node for GeneratorNode {
 
         if !is_first_batch {
             // Only enforce interbatch timing AFTER the first batch has fired
-            if !((now - self.lastbatch_timestamp) >= self.min_interbatch_gap && (now - self.start_time) >= self.start_delay) {
+            if !((now - self.lastbatch_timestamp) >= self.min_interbatch_gap && (now - self.start_time) >= self.start_delay)
+            {
                 batch.clear();
                 return Directive::Next(self.next_node.clone());
             }
@@ -437,7 +448,8 @@ impl Node for GeneratorNode {
             return Directive::Next(self.next_node.clone());
         }
 
-        let allocated = frame_registry.allocate_pdus_into(self.umem_group_id, &mut self.scratch_pdus[..frames_to_generate as usize]);
+        let allocated =
+            frame_registry.allocate_pdus_into(self.umem_group_id, &mut self.scratch_pdus[..frames_to_generate as usize]);
 
         if allocated == 0 {
             // We are temporarily out of frames (RX socket is hoarding, or TX ring is full).
@@ -468,9 +480,8 @@ impl Node for GeneratorNode {
             }
 
             let active_bytes = allocated * size_of::<Pdu>();
-            let batch_bytes: &[u8] = unsafe {
-                std::slice::from_raw_parts(self.scratch_pdus.as_ptr() as *const u8, active_bytes)
-            };
+            let batch_bytes: &[u8] =
+                unsafe { std::slice::from_raw_parts(self.scratch_pdus.as_ptr() as *const u8, active_bytes) };
 
             // Just pass the bytes and the offset. The plugin handles the rest!
             let lengths = bindings
@@ -495,7 +506,6 @@ impl Node for GeneratorNode {
         for i in 0..allocated {
             let mut pdu = unsafe { self.scratch_pdus[i].assume_init_read() };
 
-
             // we must update the data length of the pdu here, because the pdu cannot be changed by the plugin
             #[cfg(feature = "wasm")]
             if self.bindings.is_some() {
@@ -504,7 +514,9 @@ impl Node for GeneratorNode {
                     pdu.w.set_data_length(pkt_len);
                     if batch.push(pdu).is_ok() {
                         generated += 1;
-                    } else { break; }
+                    } else {
+                        break;
+                    }
                 }
                 continue;
             }
@@ -521,7 +533,6 @@ impl Node for GeneratorNode {
             } else {
                 break;
             }
-
         }
 
         self.lastbatch_timestamp = now;
@@ -541,10 +552,8 @@ impl Node for GeneratorNode {
             if let Some(first) = self.first_burst_instant {
                 let elapsed = first.elapsed().as_secs_f64();
                 if elapsed > 0.001 {
-                    self.tm_pps.store(
-                        (self.packets_generated_this_run as f64 / elapsed) as u64,
-                        Ordering::Relaxed,
-                    );
+                    self.tm_pps
+                        .store((self.packets_generated_this_run as f64 / elapsed) as u64, Ordering::Relaxed);
                 }
             }
             #[cfg(feature = "profiling")]

@@ -30,9 +30,8 @@ impl XBricksSystem {
         mut self,
         shutdown: Arc<AtomicBool>,
         workers_completed: Arc<AtomicUsize>,
-        is_one_shot: bool,  // ipblower's one-shot mode
-    ) -> anyhow::Result<Vec<JoinHandle<Result<Vec<PipelineStats>, String>>>> 
-    {
+        is_one_shot: bool, // ipblower's one-shot mode
+    ) -> anyhow::Result<Vec<JoinHandle<Result<Vec<PipelineStats>, String>>>> {
         // --- SPAWN WORKER THREADS ---
 
         info!("Spawning pipeline worker threads...");
@@ -48,8 +47,7 @@ impl XBricksSystem {
             let workers_completed_clone = Arc::clone(&workers_completed);
 
             // Get the frame registry for this worker
-            let frame_registry = self
-                .frame_registries[worker_id]
+            let frame_registry = self.frame_registries[worker_id]
                 .take()
                 .unwrap_or_else(|| panic!("Frame registry for worker {} not found", worker_id));
 

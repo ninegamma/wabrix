@@ -13,7 +13,7 @@ use core::mem::size_of;
 /// plugins never read/write the last 8 bytes, so the cast is safe.
 #[repr(C)]
 struct HostBatch {
-    pdus:    [Pdu; MAX_BATCH_SIZE],
+    pdus: [Pdu; MAX_BATCH_SIZE],
     actions: [u32; MAX_BATCH_SIZE],
 }
 const _: () = assert!(size_of::<HostBatch>() == size_of::<BatchMetadata>());
@@ -113,7 +113,8 @@ impl WasmEngine {
 
         if !wasm_data.is_empty() {
             let data: Vec<(String, String)> = wasm_data.into_iter().collect();
-            bindings.wabrix_plugins_packet_engine()
+            bindings
+                .wabrix_plugins_packet_engine()
                 .call_init_data(&mut store, &data, platform_data.tsc_frequency)
                 .unwrap_or_else(|e| {
                     log::error!("Failed to call init-data on packet-engine: {}", e);
@@ -178,9 +179,8 @@ impl WasmEngine {
             }
         }
 
-
-
-        let status = self.bindings
+        let status = self
+            .bindings
             .wabrix_plugins_packet_engine()
             .call_process_batch(&mut self.store, len as u32, self.partition_start_bytes, self.mailbox_offset)
             .unwrap_or_else(|e| {
@@ -205,12 +205,16 @@ impl WasmEngine {
         };
 
         let is_telemetry_tick = control_plane_wants_sync;
-        if control_plane_wants_sync { log::debug!("NODE {}: TELEMETRY SYNC REQUESTED", self.id); }
+        if control_plane_wants_sync {
+            log::debug!("NODE {}: TELEMETRY SYNC REQUESTED", self.id);
+        }
         if is_telemetry_tick {
             if let Some(flag) = &self.telemetry_metrics.force_sync_flag {
                 flag.store(false, Ordering::Relaxed);
             }
-            let out_of_band_stats = self.bindings.wabrix_plugins_packet_engine()
+            let out_of_band_stats = self
+                .bindings
+                .wabrix_plugins_packet_engine()
                 .call_get_telemetry(&mut self.store)
                 .unwrap_or_else(|e| {
                     log::error!("Failed to call get-telemetry on packet-engine: {}", e);
@@ -219,7 +223,11 @@ impl WasmEngine {
 
             if !out_of_band_stats.is_empty() {
                 self.supports_oob_telemetry = true;
-                log::debug!("NODE {}: Extracted {} OOB telemetry packets", self.id, out_of_band_stats.len());
+                log::debug!(
+                    "NODE {}: Extracted {} OOB telemetry packets",
+                    self.id,
+                    out_of_band_stats.len()
+                );
                 for (idx, &count) in out_of_band_stats.iter().enumerate() {
                     if idx < self.telemetry_metrics.counters_pkts.len() {
                         self.telemetry_metrics.counters_pkts[idx].store(count, Ordering::Relaxed);
@@ -260,7 +268,8 @@ impl WasmEngine {
                 let telemetry_bucket = ((action >> 16) & 0xFF) as usize;
                 if telemetry_bucket < self.telemetry_metrics.counters_pkts.len() {
                     self.telemetry_metrics.counters_pkts[telemetry_bucket].fetch_add(1, Ordering::Relaxed);
-                    self.telemetry_metrics.counters_bytes[telemetry_bucket].fetch_add(pdu.w.data_len() as u64, Ordering::Relaxed);
+                    self.telemetry_metrics.counters_bytes[telemetry_bucket]
+                        .fetch_add(pdu.w.data_len() as u64, Ordering::Relaxed);
                 }
             }
 
@@ -310,7 +319,8 @@ impl Node for WasmEngine {
 
         debug_assert!(
             batch.iter().all(|pdu| pdu.w.umem_id() == self.umem_id),
-            "NODE {}: PDU from wrong Umem arrived", self.id
+            "NODE {}: PDU from wrong Umem arrived",
+            self.id
         );
 
         self.processed_packets += batch.len() as u64;
@@ -325,7 +335,6 @@ impl Node for WasmEngine {
 
         directive
     }
-
 
     fn requires_timers(&self) -> bool {
         true
@@ -344,7 +353,8 @@ impl Node for WasmEngine {
 
         // Evaluate the core logic into a single variable using a block expression
         let directive = {
-            let n_requested_frames = self.bindings
+            let n_requested_frames = self
+                .bindings
                 .wabrix_plugins_packet_engine()
                 .call_process_timers(&mut self.store, current_tsc)
                 .unwrap_or_else(|err| {
@@ -355,7 +365,9 @@ impl Node for WasmEngine {
             if n_requested_frames == 0 {
                 // Service force_sync_flag even when idle so final WASM state is
                 // captured in host AtomicU64 counters at run end.
-                let control_plane_wants_sync = self.telemetry_metrics.force_sync_flag
+                let control_plane_wants_sync = self
+                    .telemetry_metrics
+                    .force_sync_flag
                     .as_ref()
                     .map(|f| f.load(Ordering::Relaxed))
                     .unwrap_or(false);
@@ -364,7 +376,9 @@ impl Node for WasmEngine {
                     if let Some(flag) = &self.telemetry_metrics.force_sync_flag {
                         flag.store(false, Ordering::Relaxed);
                     }
-                    let oob = self.bindings.wabrix_plugins_packet_engine()
+                    let oob = self
+                        .bindings
+                        .wabrix_plugins_packet_engine()
                         .call_get_telemetry(&mut self.store)
                         .unwrap_or_default();
                     if !oob.is_empty() {
@@ -383,10 +397,7 @@ impl Node for WasmEngine {
                 let mut scratch: [MaybeUninit<Pdu>; MAX_BATCH_SIZE] = core::array::from_fn(|_| MaybeUninit::uninit());
                 let frames_to_allocate = std::cmp::min(n_requested_frames as usize, MAX_BATCH_SIZE);
 
-                let allocated = registry.allocate_pdus_into(
-                    self.umem_id as usize,
-                    &mut scratch[..frames_to_allocate]
-                );
+                let allocated = registry.allocate_pdus_into(self.umem_id as usize, &mut scratch[..frames_to_allocate]);
 
                 if allocated == 0 {
                     log::warn!("NODE {}: Timer starved of UMEM frames!", self.id);
@@ -437,9 +448,11 @@ impl Node for WasmEngine {
         }
         // We only get here if the PipelineRunner already verified the wildcard matched us!
         tokio::task::block_in_place(|| {
-            let _ = self.bindings
-                .wabrix_plugins_packet_engine()
-                .call_on_control_event(&mut self.store, event.opcode, &event.payload);
+            let _ = self.bindings.wabrix_plugins_packet_engine().call_on_control_event(
+                &mut self.store,
+                event.opcode,
+                &event.payload,
+            );
         });
     }
 

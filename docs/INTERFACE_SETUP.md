@@ -1,10 +1,10 @@
 # Interface Configuration
 
-XBricks automatically configures network interfaces based on the TOML configuration file.
+Wabrix automatically configures network interfaces based on the TOML configuration file.
 
 ## What Gets Configured
 
-When you run xbricks, it automatically:
+When you run wabrix, it automatically:
 
 1. **Checks interface exists** - Verifies the interface is present in the system
 2. **Brings interface UP** - Ensures the interface is in UP state
@@ -26,7 +26,7 @@ Load Config → Configure Interfaces → Load BPF → Attach XDP → Start Worke
 From the TOML file:
 
 ```toml
-[xbricks]
+[wabrix]
 ifaces = [
     { name = "enp114s0f0", rxd = 4096, txd = 4096, queues = 2 }
 ]
@@ -39,7 +39,7 @@ ifaces = [
 
 ## Automatic Configuration Commands
 
-XBricks executes the equivalent of these commands automatically:
+Wabrix executes the equivalent of these commands automatically:
 
 ```bash
 # Set interface UP
@@ -93,7 +93,7 @@ WARN: Failed to set queue count on eth0: Operation not supported
 
 **Solution:**
 - Configure queues at driver load time (via module parameters)
-- Or manually configure before running xbricks:
+- Or manually configure before running wabrix:
   ```bash
   sudo ethtool -L eth0 combined 4
   ```
@@ -109,7 +109,7 @@ WARN: Failed to set ring sizes on eth0: Operation not supported
 **Solution:**
 - Check maximum ring sizes: `ethtool -g eth0`
 - Adjust `rxd` and `txd` values in config to be within supported range
-- Or manually configure before running xbricks:
+- Or manually configure before running wabrix:
   ```bash
   sudo ethtool -G eth0 rx 4096 tx 4096
   ```
@@ -128,7 +128,7 @@ WARN: Interface enp114s0f0 has no link (no carrier)
 
 ## Manual Configuration
 
-If you prefer to configure interfaces manually before running xbricks:
+If you prefer to configure interfaces manually before running wabrix:
 
 ```bash
 # Bring interface up
@@ -146,7 +146,7 @@ ethtool -g enp114s0f0  # Check ring sizes
 ip link show enp114s0f0 # Check interface state
 ```
 
-XBricks will detect the existing configuration and skip redundant steps.
+Wabrix will detect the existing configuration and skip redundant steps.
 
 ```
 

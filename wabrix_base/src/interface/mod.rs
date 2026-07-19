@@ -8,7 +8,7 @@ pub use self::pdu::*;
 /// Generic trait for objects that can receive packets.
 pub trait PacketRx {
     fn recv(&mut self, pkts: &mut [FrameDesc]) -> anyhow::Result<(u32, i32)>; // (packets received, queue length (if >=0))
-    //fn rx_stats(&self) -> Arc<CacheAligned<PortStats>>;
+                                                                              //fn rx_stats(&self) -> Arc<CacheAligned<PortStats>>;
 }
 
 /// Generic trait for objects that can send packets.

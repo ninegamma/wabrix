@@ -82,9 +82,7 @@ pub fn setup_bpf(unique_ifaces: Vec<String>) -> Result<(HashMap<String, Arc<Xscr
 /// **synchronous** `sock_put()` in the kernel. If the socket fd was already closed by the
 /// workers, the refcount drops to 0 immediately, `xsk_destruct()` → `xsk_unbind_dev()` runs
 /// inline, and the hardware queue is released before this function returns.
-pub fn unregister_sockets_from_bpf(
-    interface_skels: &HashMap<String, Arc<XscrubberSkel<'static>>>,
-) {
+pub fn unregister_sockets_from_bpf(interface_skels: &HashMap<String, Arc<XscrubberSkel<'static>>>) {
     debug!("Clearing BPF XSKS_MAP entries to release hardware queue bindings...");
     for (iface_name, skel) in interface_skels {
         let sockets_map = &skel.maps.SOCKETS;

@@ -9,7 +9,6 @@ use crate::SystemBus;
 use crate::frame_registry::CMD_BIT;
 use wabrix_api::exports::WPdu;
 
-
 #[repr(C, align(64))]
 #[derive(Debug)]
 pub struct Pdu {
@@ -39,8 +38,6 @@ impl core::ops::DerefMut for Pdu {
     }
 }
 
-
-
 impl Default for Pdu {
     fn default() -> Self {
         Pdu {
@@ -55,7 +52,6 @@ impl Default for Pdu {
 // itself is thread-safe, and the pointer is never dereferenced across thread
 // boundaries in a way that would cause data races.
 unsafe impl Send for Pdu {}
-
 
 // Wasm cannot use the Drop trait because it doesn't have the SystemBus!
 // The Host will handle the dropping.
@@ -98,7 +94,10 @@ impl Drop for Pdu {
                 // If this Pdu is on the same core as owner_id, this is a local SPSC send.
                 // If on a different core, this is a cross-core SPSC send.
                 // We ignore SendError (e.g., if the channel is full or disconnected on shutdown).
-                if bus.bus_senders[self.owner_id() as usize].push(self.global_frame_idx()).is_err() {
+                if bus.bus_senders[self.owner_id() as usize]
+                    .push(self.global_frame_idx())
+                    .is_err()
+                {
                     log::error!("🔥 CRITICAL: return queue full, frame {} leaked!", self.global_frame_idx());
                 }
             }
@@ -129,7 +128,7 @@ impl Pdu {
         system_bus: *const SystemBus,
         frame_size_log2: u8,
     ) -> Self {
-        let w= WPdu::new(
+        let w = WPdu::new(
             desc.addr() as u64,
             desc.lengths().data() as u32,
             desc.options(),
@@ -137,10 +136,7 @@ impl Pdu {
             frame_size_log2,
             owner_id,
         );
-        Pdu {
-            w,
-            system_bus,
-        }
+        Pdu { w, system_bus }
     }
 
     /// Reconstruct the FrameDesc for transmission
@@ -152,7 +148,7 @@ impl Pdu {
         // This is simply the difference between where the data starts now (desc_addr)
         // and where the frame starts (frame_base).
         // Example: If base is 4096 and data starts at 4352 (256 bytes offset), headroom is 256.
-        let headroom = self.w.desc_addr as usize- local_frame_base;
+        let headroom = self.w.desc_addr as usize - local_frame_base;
         FrameDesc {
             addr: self.w.desc_addr as usize,
             options: self.w.desc_options,
@@ -204,10 +200,7 @@ impl Pdu {
         // .get() returns Option<&Option<usize>>
         // .copied() turns it into Option<Option<usize>>
         // .flatten() turns it into Option<usize>
-        bus.umem_addr
-            .get(self.umem_id() as usize)
-            .copied()
-            .flatten()
+        bus.umem_addr.get(self.umem_id() as usize).copied().flatten()
     }
 
     /// returns pointer to the first byte of the frame this Pdu represents
@@ -221,8 +214,7 @@ impl Pdu {
     pub fn base_addr(&self) -> usize {
         self.umem_addr().add(self.local_frame_offset())
     }
-    
-    
+
     /// Prepares a freshly allocated PDU for transmission.
     /// Locks the descriptor to the physical frame boundary + headroom.
     #[inline(always)]
@@ -231,7 +223,7 @@ impl Pdu {
         self.desc_len = 0;
         self.headers_mut().clear();
     }
-    
+
     /// Creates a lightweight copy of the Pdu.
     ///
     /// increments the reference count in the SystemBus for this frame_idx.
@@ -241,8 +233,14 @@ impl Pdu {
             // 1. Notify the central logic that this frame has a new reference
             if !self.system_bus.is_null() {
                 let bus = &*self.system_bus;
-                if bus.bus_senders[self.owner_id() as usize].push(CMD_BIT | self.global_frame_idx()).is_err() {
-                    log::error!("🔥 CRITICAL: return queue full, retain for frame {} dropped!", self.global_frame_idx());
+                if bus.bus_senders[self.owner_id() as usize]
+                    .push(CMD_BIT | self.global_frame_idx())
+                    .is_err()
+                {
+                    log::error!(
+                        "🔥 CRITICAL: return queue full, retain for frame {} dropped!",
+                        self.global_frame_idx()
+                    );
                 }
             }
         }
@@ -254,7 +252,6 @@ impl Pdu {
             system_bus: self.system_bus, // Both PDUs point to the same bus
         }
     }
-
 }
 
 impl Pdu {
@@ -277,14 +274,13 @@ impl Pdu {
         let headers = self.headers().count();
         match which {
             x if x + 1 < headers => self.headers().get(self.base_addr(), x + 1).as_ptr_u8(),
-            x if x == headers - 1 =>
-                Some(unsafe {
-                    self.headers()
-                        .get(self.base_addr(), x)
-                        .as_ptr_u8()
-                        .unwrap()
-                        .add(self.headers().get(self.base_addr(), x).offset().unwrap())
-                }),
+            x if x == headers - 1 => Some(unsafe {
+                self.headers()
+                    .get(self.base_addr(), x)
+                    .as_ptr_u8()
+                    .unwrap()
+                    .add(self.headers().get(self.base_addr(), x).offset().unwrap())
+            }),
             _ => None,
         }
     }
@@ -316,7 +312,11 @@ impl Pdu {
                 sum += len;
             }
         }
-        if sum > self.w.data_len() as usize { 0 } else { self.w.data_len() as usize - sum }
+        if sum > self.w.data_len() as usize {
+            0
+        } else {
+            self.w.data_len() as usize - sum
+        }
     }
 
     // Helper for payload management
@@ -372,11 +372,10 @@ impl Pdu {
 
     #[inline]
     pub fn parse_fast(&mut self) -> usize {
-        let umem_addr= self.umem_addr();
+        let umem_addr = self.umem_addr();
         self.w.parse_fast(umem_addr)
     }
-    
-    
+
     /// Returns a mutable pointer to the start of the packet data plus the offset argument.
     #[inline(always)]
     pub fn data_address(&self, offset: usize) -> *mut u8 {
@@ -384,18 +383,21 @@ impl Pdu {
         // Add offset to the virtual memory pointer of the frame
         (umem_addr + self.desc_addr as usize + offset) as *mut u8
     }
-    
-    
+
     pub fn ether_type(&self) -> u16 {
         if let Some(umem_addr) = unsafe { self.try_umem_addr() } {
             self.w.ether_type(umem_addr)
-        } else { 0 }
+        } else {
+            0
+        }
     }
 
     pub fn ipv4_src(&self) -> Option<u32> {
         if let Some(umem_addr) = unsafe { self.try_umem_addr() } {
             self.w.ipv4_src(umem_addr)
-        } else { None }
+        } else {
+            None
+        }
     }
 }
 
@@ -408,94 +410,94 @@ mod tests {
     use wabrix_api::exports::Pdu0;
     use wabrix_api::packet::Packet;
     /*
-            // A dummy header to simulate an Ethernet header or similar
-            #[repr(C, packed)]
-            #[derive(Clone, Copy, Debug, PartialEq)]
-            struct TestHeader {
-                src: u32,
-                dst: u32,
-                etype: u16,
-            }
-
-            #[test]
-            fn test_push_header_success() {
-                // 1. Setup Mock UMEM
-                // Allocate a buffer representing a 2KB frame
-                let mut umem_buffer: Vec<u8> = vec![0; 2048];
-                let buffer_base = umem_buffer.as_mut_ptr();
-
-                // 2. Define Initial State
-                // Simulate a packet that starts at offset 256 (leaving 256 bytes of headroom)
-                const HEADROOM: usize = 256;
-                const INITIAL_PAYLOAD_LEN: usize = 100;
-
-                let initial_start_ptr = unsafe { buffer_base.add(HEADROOM) };
-
-                // Fill the payload area with some known data (0xAA)
-                unsafe {
-                    ptr::write_bytes(initial_start_ptr, 0xAA, INITIAL_PAYLOAD_LEN);
-                }
-
-                // 3. Construct the PDU
-                // (Assuming Pdu struct structure based on your files)
-                let mut pdu = Pdu {
-                    header_stack: HeaderStack::new(initial_start_ptr),
-                    desc_addr: HEADROOM,
-                    desc_len: INITIAL_PAYLOAD_LEN as u32,
-                    desc_options: 0u32,
-                    frame_idx: 0u32,
-                    frame_size_log2: 11,
-                    owner_id: 0u8,
-                    flags: 0u8,
-                    _padding: 0u8,
-                    system_bus: 0u64 as *const SystemBus,
-                    timestamp: 0u64,
-                };
-
-                // Simulate that we have parsed something (hc > 0) to ensure clear() works
-                // (We are manually tweaking internal state for the test)
-                pdu.header_stack.hc = 1;
-
-                // 4. Define the Header to Push
-                let new_header = TestHeader {
-                    src: 0xAABBCCDD,
-                    dst: 0x11223344,
-                    etype: 0x0800,
-                };
-                let header_size = std::mem::size_of::<TestHeader>(); // 10 bytes
-
-                // 5. Perform the Push
-                let result = pdu.prepend_header(&new_header);
-
-                // 6. Assertions
-                assert!(result.is_ok(), "push_header should succeed");
-
-                unsafe {
-                    // A. Check Pointer Movement
-                    // The new pointer should be (initial - header_size)
-                    let expected_ptr = initial_start_ptr.sub(header_size);
-                    assert_eq!(pdu.header_stack.base_ptr(), expected_ptr, "Base pointer did not move backwards correctly");
-
-                    // B. Check Length Update
-                    assert_eq!(pdu.desc_len as usize, INITIAL_PAYLOAD_LEN + header_size, "PDU length did not increase by header size");
-
-                    // C. Check Header Data Integrity
-                    // Cast the new pointer location back to a TestHeader to verify contents
-                    let written_header = *(expected_ptr as *const TestHeader);
-                    assert_eq!(written_header, new_header, "Header data written to memory does not match");
-
-                    // D. Check Payload Integrity
-                    // The byte immediately after the header should still be our payload (0xAA)
-                    let payload_start = expected_ptr.add(header_size);
-                    assert_eq!(*payload_start, 0xAA, "Original payload was corrupted");
-
-                    // E. Check Stack Invalidated
-                    assert_eq!(pdu.header_stack.hc, 0, "Header stack count should be reset to 0");
-                }
-            }
+        // A dummy header to simulate an Ethernet header or similar
+        #[repr(C, packed)]
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        struct TestHeader {
+            src: u32,
+            dst: u32,
+            etype: u16,
         }
 
-        */
+        #[test]
+        fn test_push_header_success() {
+            // 1. Setup Mock UMEM
+            // Allocate a buffer representing a 2KB frame
+            let mut umem_buffer: Vec<u8> = vec![0; 2048];
+            let buffer_base = umem_buffer.as_mut_ptr();
+
+            // 2. Define Initial State
+            // Simulate a packet that starts at offset 256 (leaving 256 bytes of headroom)
+            const HEADROOM: usize = 256;
+            const INITIAL_PAYLOAD_LEN: usize = 100;
+
+            let initial_start_ptr = unsafe { buffer_base.add(HEADROOM) };
+
+            // Fill the payload area with some known data (0xAA)
+            unsafe {
+                ptr::write_bytes(initial_start_ptr, 0xAA, INITIAL_PAYLOAD_LEN);
+            }
+
+            // 3. Construct the PDU
+            // (Assuming Pdu struct structure based on your files)
+            let mut pdu = Pdu {
+                header_stack: HeaderStack::new(initial_start_ptr),
+                desc_addr: HEADROOM,
+                desc_len: INITIAL_PAYLOAD_LEN as u32,
+                desc_options: 0u32,
+                frame_idx: 0u32,
+                frame_size_log2: 11,
+                owner_id: 0u8,
+                flags: 0u8,
+                _padding: 0u8,
+                system_bus: 0u64 as *const SystemBus,
+                timestamp: 0u64,
+            };
+
+            // Simulate that we have parsed something (hc > 0) to ensure clear() works
+            // (We are manually tweaking internal state for the test)
+            pdu.header_stack.hc = 1;
+
+            // 4. Define the Header to Push
+            let new_header = TestHeader {
+                src: 0xAABBCCDD,
+                dst: 0x11223344,
+                etype: 0x0800,
+            };
+            let header_size = std::mem::size_of::<TestHeader>(); // 10 bytes
+
+            // 5. Perform the Push
+            let result = pdu.prepend_header(&new_header);
+
+            // 6. Assertions
+            assert!(result.is_ok(), "push_header should succeed");
+
+            unsafe {
+                // A. Check Pointer Movement
+                // The new pointer should be (initial - header_size)
+                let expected_ptr = initial_start_ptr.sub(header_size);
+                assert_eq!(pdu.header_stack.base_ptr(), expected_ptr, "Base pointer did not move backwards correctly");
+
+                // B. Check Length Update
+                assert_eq!(pdu.desc_len as usize, INITIAL_PAYLOAD_LEN + header_size, "PDU length did not increase by header size");
+
+                // C. Check Header Data Integrity
+                // Cast the new pointer location back to a TestHeader to verify contents
+                let written_header = *(expected_ptr as *const TestHeader);
+                assert_eq!(written_header, new_header, "Header data written to memory does not match");
+
+                // D. Check Payload Integrity
+                // The byte immediately after the header should still be our payload (0xAA)
+                let payload_start = expected_ptr.add(header_size);
+                assert_eq!(*payload_start, 0xAA, "Original payload was corrupted");
+
+                // E. Check Stack Invalidated
+                assert_eq!(pdu.header_stack.hc, 0, "Header stack count should be reset to 0");
+            }
+        }
+    }
+
+    */
 
     // A dummy header struct for testing purposes
     #[repr(C, packed)]
@@ -534,8 +536,8 @@ mod tests {
         // We pass a null pointer for SystemBus as we won't trigger bus operations
         let mut pdu = Pdu::new(
             desc,
-            0, // frame_idx
-            0, // owner_id
+            0,                 // frame_idx
+            0,                 // owner_id
             core::ptr::null(), // system_bus
             frame_size_log2,
         );
@@ -582,7 +584,7 @@ mod tests {
             initial_desc_addr - header_size,
             "Descriptor address did not move backwards"
         );
-        
+
         // SAFETY: same layout as above.
         let packet = Packet::new(unsafe { &mut *(&mut pdu as *mut Pdu as *mut Pdu0) }, umem_base as usize);
         // C. Verify Memory Content

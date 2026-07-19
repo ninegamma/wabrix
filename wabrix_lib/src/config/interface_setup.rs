@@ -108,7 +108,12 @@ impl InterfaceSetup {
         if check_output.status.success() {
             // Check if the existing interface has the required number of queues
             let existing_queues = std::fs::read_dir(format!("/sys/class/net/{}/queues", self.name))
-                .map(|entries| entries.filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().starts_with("rx-")).count() as u32)
+                .map(|entries| {
+                    entries
+                        .filter_map(|e| e.ok())
+                        .filter(|e| e.file_name().to_string_lossy().starts_with("rx-"))
+                        .count() as u32
+                })
                 .unwrap_or(1);
 
             if existing_queues == self.queues {
@@ -126,7 +131,12 @@ impl InterfaceSetup {
                     if out.status.success() {
                         info!("✓ Set IP address {} on {}", ipnet, peer_name);
                     } else {
-                        warn!("Failed to set IP {} on {}: {}", ipnet, peer_name, String::from_utf8_lossy(&out.stderr));
+                        warn!(
+                            "Failed to set IP {} on {}: {}",
+                            ipnet,
+                            peer_name,
+                            String::from_utf8_lossy(&out.stderr)
+                        );
                     }
                 }
                 return Ok(());
@@ -194,18 +204,29 @@ impl InterfaceSetup {
         }
 
         // Create veth pair with the required number of queues
-        info!("Creating veth pair: {} <-> {} ({} queues)...", self.name, peer_name, self.queues);
+        info!(
+            "Creating veth pair: {} <-> {} ({} queues)...",
+            self.name, peer_name, self.queues
+        );
         let queues_str = self.queues.to_string();
         let output = Command::new("ip")
             .args([
-                "link", "add",
+                "link",
+                "add",
                 &self.name,
-                "numtxqueues", &queues_str,
-                "numrxqueues", &queues_str,
-                "type", "veth",
-                "peer", "name", peer_name,
-                "numtxqueues", &queues_str,
-                "numrxqueues", &queues_str,
+                "numtxqueues",
+                &queues_str,
+                "numrxqueues",
+                &queues_str,
+                "type",
+                "veth",
+                "peer",
+                "name",
+                peer_name,
+                "numtxqueues",
+                &queues_str,
+                "numrxqueues",
+                &queues_str,
             ])
             .output()?;
 
@@ -319,7 +340,10 @@ impl InterfaceSetup {
             let master_ok = peer_master.as_deref() == Some(master);
 
             if existing_queues == self.queues && master_ok {
-                info!("✓ Veth pair {} already exists with {} queues and correct master", self.name, existing_queues);
+                info!(
+                    "✓ Veth pair {} already exists with {} queues and correct master",
+                    self.name, existing_queues
+                );
                 return Ok(());
             }
 
@@ -344,18 +368,29 @@ impl InterfaceSetup {
         }
 
         // Create veth pair
-        info!("Creating veth pair: {} <-> {} ({} queues)...", self.name, peer_name, self.queues);
+        info!(
+            "Creating veth pair: {} <-> {} ({} queues)...",
+            self.name, peer_name, self.queues
+        );
         let queues_str = self.queues.to_string();
         let output = Command::new("ip")
             .args([
-                "link", "add",
+                "link",
+                "add",
                 &self.name,
-                "numtxqueues", &queues_str,
-                "numrxqueues", &queues_str,
-                "type", "veth",
-                "peer", "name", peer_name,
-                "numtxqueues", &queues_str,
-                "numrxqueues", &queues_str,
+                "numtxqueues",
+                &queues_str,
+                "numrxqueues",
+                &queues_str,
+                "type",
+                "veth",
+                "peer",
+                "name",
+                peer_name,
+                "numtxqueues",
+                &queues_str,
+                "numrxqueues",
+                &queues_str,
             ])
             .output()?;
         if !output.status.success() {
@@ -377,9 +412,7 @@ impl InterfaceSetup {
 
         // Bring peer up
         info!("Bringing up {}...", peer_name);
-        let output = Command::new("ip")
-            .args(["link", "set", peer_name, "up"])
-            .output()?;
+        let output = Command::new("ip").args(["link", "set", peer_name, "up"]).output()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(anyhow!("Failed to bring up {}: {}", peer_name, stderr));
@@ -405,7 +438,10 @@ impl InterfaceSetup {
             match self.peer.as_deref() {
                 Some(p) => (p.to_string(), self.namespace.as_deref()),
                 None => {
-                    warn!("veth interface {} has no peer set; skipping checksum offload configuration", self.name);
+                    warn!(
+                        "veth interface {} has no peer set; skipping checksum offload configuration",
+                        self.name
+                    );
                     return Ok(());
                 }
             }
@@ -419,9 +455,7 @@ impl InterfaceSetup {
                 .args(["netns", "exec", ns, "ethtool", "-K", &target, "tx", onoff])
                 .output()?
         } else {
-            Command::new("sudo")
-                .args(["ethtool", "-K", &target, "tx", onoff])
-                .output()?
+            Command::new("sudo").args(["ethtool", "-K", &target, "tx", onoff]).output()?
         };
 
         if !output.status.success() {
