@@ -1,12 +1,12 @@
 // src/config/configure_bpf.rs
-use log::{debug, error, info, trace};
-use libbpf_rs::Link;
+use anyhow::Result;
 use libbpf_rs::skel::{OpenSkel, SkelBuilder};
+use libbpf_rs::Link;
 use libbpf_rs::MapCore;
+use log::{debug, error, info, trace};
+use std::collections::HashMap;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
-use std::collections::HashMap;
-use anyhow::Result;
 
 // Import the BPF skeleton type from the crate root
 use crate::xscrubber_skel::{XscrubberSkel, XscrubberSkelBuilder};
@@ -14,7 +14,9 @@ use crate::xscrubber_skel::{XscrubberSkel, XscrubberSkelBuilder};
 /// Set up BPF programs for the specified interfaces
 /// Returns a map of interface names to their BPF skeletons and the XDP links
 #[allow(clippy::type_complexity)]
-pub fn setup_bpf(unique_ifaces: Vec<String>) -> Result<(HashMap<String, Arc<XscrubberSkel<'static>>>, Vec<Link>)> {
+pub fn setup_bpf(
+    unique_ifaces: Vec<String>,
+) -> Result<(HashMap<String, Arc<XscrubberSkel<'static>>>, Vec<Link>)> {
     // Instead of one global skeleton, we store one per interface.
     // Key: Interface Name -> Value: Arc<Skeleton>
     let mut interface_skels: HashMap<String, Arc<XscrubberSkel<'static>>> = HashMap::new();
@@ -33,7 +35,10 @@ pub fn setup_bpf(unique_ifaces: Vec<String>) -> Result<(HashMap<String, Arc<Xscr
 
     // Iterate over UNIQUE interfaces from the config
     for iface_name in unique_ifaces {
-        info!("Loading dedicated BPF skeleton for interface: {}", iface_name);
+        info!(
+            "Loading dedicated BPF skeleton for interface: {}",
+            iface_name
+        );
 
         // Load a FRESH skeleton instance for this interface
         let builder = XscrubberSkelBuilder::default();
@@ -46,7 +51,10 @@ pub fn setup_bpf(unique_ifaces: Vec<String>) -> Result<(HashMap<String, Arc<Xscr
             let c_name = std::ffi::CString::new(iface_name.as_str())?;
             let idx = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
             if idx == 0 {
-                return Err(anyhow::anyhow!("Failed to get interface index for {}", iface_name));
+                return Err(anyhow::anyhow!(
+                    "Failed to get interface index for {}",
+                    iface_name
+                ));
             }
             idx as u32
         };
@@ -57,7 +65,10 @@ pub fn setup_bpf(unique_ifaces: Vec<String>) -> Result<(HashMap<String, Arc<Xscr
             e
         })?;
 
-        info!("✓ XDP program attached to {} (Index {})", iface_name, ifindex);
+        info!(
+            "✓ XDP program attached to {} (Index {})",
+            iface_name, ifindex
+        );
 
         // Store the Link and the Skeleton
         xdp_links.push(link_xdp);
@@ -124,9 +135,19 @@ pub fn register_sockets_in_bpf(
 
         sockets_map
             .update(&key, &value, libbpf_rs::MapFlags::ANY)
-            .map_err(|e| anyhow::anyhow!("Failed to register socket for {}:Queue {} in BPF map: {}", iface_name, qid, e))?;
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to register socket for {}:Queue {} in BPF map: {}",
+                    iface_name,
+                    qid,
+                    e
+                )
+            })?;
 
-        debug!("✓ Registered {}:Queue {} (FD={}) in BPF map", iface_name, qid, sock_fd);
+        debug!(
+            "✓ Registered {}:Queue {} (FD={}) in BPF map",
+            iface_name, qid, sock_fd
+        );
     }
 
     info!("✓ All sockets registered successfully.");

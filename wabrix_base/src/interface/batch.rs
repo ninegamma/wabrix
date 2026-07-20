@@ -1,10 +1,10 @@
+use crate::frame_registry::get_worker_frame_registry;
+use crate::interface::Pdu;
 use core::mem::MaybeUninit;
 use core::ops::{Bound, RangeBounds};
 use core::ptr;
 use log::trace;
 use wabrix_api::MAX_BATCH_SIZE;
-use crate::frame_registry::get_worker_frame_registry;
-use crate::interface::Pdu;
 
 pub struct Batch {
     /// A dense array of uninitialized memory.
@@ -183,7 +183,8 @@ impl Batch {
 
     #[inline]
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Pdu> {
-        let slice = unsafe { std::slice::from_raw_parts_mut(self.packets[0].as_mut_ptr(), self.count) };
+        let slice =
+            unsafe { std::slice::from_raw_parts_mut(self.packets[0].as_mut_ptr(), self.count) };
         slice.iter_mut()
     }
 
@@ -233,7 +234,10 @@ impl Batch {
             Bound::Unbounded => self.count,
         };
 
-        assert!(start <= end && end <= self.count, "Batch::drain range out of bounds");
+        assert!(
+            start <= end && end <= self.count,
+            "Batch::drain range out of bounds"
+        );
 
         let tail_start = end;
         let tail_len = self.count - end;
@@ -314,7 +318,10 @@ impl Batch {
                 for i in 0..self.count {
                     let pdu = &*self.packets[i].as_ptr();
                     if registry.worker_id == pdu.owner_id() as usize {
-                        trace!("bulk_drop: Returning frame {} to local stash", pdu.w.global_frame_idx());
+                        trace!(
+                            "bulk_drop: Returning frame {} to local stash",
+                            pdu.w.global_frame_idx()
+                        );
                         registry.release_local(pdu.w.global_frame_idx());
                     } else {
                         // Slow path: Individual cross-thread release

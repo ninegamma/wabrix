@@ -59,7 +59,11 @@ impl InterfaceSetup {
         }
 
         // Get current ring sizes and warn if too small (skip for veth interfaces)
-        let is_veth = self.iface_type.as_ref().map(|t| t == "veth").unwrap_or(false);
+        let is_veth = self
+            .iface_type
+            .as_ref()
+            .map(|t| t == "veth")
+            .unwrap_or(false);
         if !is_veth {
             if let Ok((current_rx, current_tx)) = self.get_current_ring_sizes() {
                 if current_rx < 2048 || current_tx < 2048 {
@@ -92,10 +96,12 @@ impl InterfaceSetup {
             return self.setup_veth_pair_bridge(peer_name, master);
         }
 
-        let namespace = self
-            .namespace
-            .as_ref()
-            .ok_or_else(|| anyhow!("Veth interface {} requires 'namespace' or 'master' field", self.name))?;
+        let namespace = self.namespace.as_ref().ok_or_else(|| {
+            anyhow!(
+                "Veth interface {} requires 'namespace' or 'master' field",
+                self.name
+            )
+        })?;
 
         info!(
             "Setting up veth pair: {} <-> {} (namespace: {})",
@@ -103,7 +109,9 @@ impl InterfaceSetup {
         );
 
         // Check if veth pair already exists
-        let check_output = Command::new("ip").args(["link", "show", &self.name]).output()?;
+        let check_output = Command::new("ip")
+            .args(["link", "show", &self.name])
+            .output()?;
 
         if check_output.status.success() {
             // Check if the existing interface has the required number of queues
@@ -117,16 +125,24 @@ impl InterfaceSetup {
                 .unwrap_or(1);
 
             if existing_queues == self.queues {
-                info!("✓ Veth pair {} already exists with {} queues", self.name, existing_queues);
+                info!(
+                    "✓ Veth pair {} already exists with {} queues",
+                    self.name, existing_queues
+                );
                 // Still apply ipnet: flush stale addresses and re-assign the configured one.
                 if let (Some(ref ipnet), Some(ref peer_name), Some(ref namespace)) =
                     (&self.ipnet, &self.peer, &self.namespace)
                 {
                     let _ = Command::new("ip")
-                        .args(["netns", "exec", namespace, "ip", "addr", "flush", "dev", peer_name])
+                        .args([
+                            "netns", "exec", namespace, "ip", "addr", "flush", "dev", peer_name,
+                        ])
                         .output();
                     let out = Command::new("ip")
-                        .args(["netns", "exec", namespace, "ip", "addr", "add", ipnet, "dev", peer_name])
+                        .args([
+                            "netns", "exec", namespace, "ip", "addr", "add", ipnet, "dev",
+                            peer_name,
+                        ])
                         .output()?;
                     if out.status.success() {
                         info!("✓ Set IP address {} on {}", ipnet, peer_name);
@@ -146,10 +162,16 @@ impl InterfaceSetup {
                 "Veth pair {} exists with {} queue(s) but {} required — deleting and recreating",
                 self.name, existing_queues, self.queues
             );
-            let del_output = Command::new("ip").args(["link", "del", &self.name]).output()?;
+            let del_output = Command::new("ip")
+                .args(["link", "del", &self.name])
+                .output()?;
             if !del_output.status.success() {
                 let stderr = String::from_utf8_lossy(&del_output.stderr);
-                return Err(anyhow!("Failed to delete existing veth {}: {}", self.name, stderr));
+                return Err(anyhow!(
+                    "Failed to delete existing veth {}: {}",
+                    self.name,
+                    stderr
+                ));
             }
             info!("✓ Deleted existing veth pair {}", self.name);
         }
@@ -159,7 +181,10 @@ impl InterfaceSetup {
             let output = Command::new("ip").args(["link", "show", mac_if]).output()?;
 
             if !output.status.success() {
-                return Err(anyhow!("Failed to get MAC address from interface {}", mac_if));
+                return Err(anyhow!(
+                    "Failed to get MAC address from interface {}",
+                    mac_if
+                ));
             }
 
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -192,11 +217,17 @@ impl InterfaceSetup {
             .any(|line| line.trim().starts_with(namespace));
 
         if !ns_exists {
-            let output = Command::new("ip").args(["netns", "add", namespace]).output()?;
+            let output = Command::new("ip")
+                .args(["netns", "add", namespace])
+                .output()?;
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(anyhow!("Failed to create namespace {}: {}", namespace, stderr));
+                return Err(anyhow!(
+                    "Failed to create namespace {}: {}",
+                    namespace,
+                    stderr
+                ));
             }
             info!("✓ Created namespace {}", namespace);
         } else {
@@ -244,7 +275,11 @@ impl InterfaceSetup {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!("Failed to move {} to namespace: {}", peer_name, stderr));
+            return Err(anyhow!(
+                "Failed to move {} to namespace: {}",
+                peer_name,
+                stderr
+            ));
         }
         info!("✓ Moved {} into namespace", peer_name);
 
@@ -252,12 +287,18 @@ impl InterfaceSetup {
         if let Some(mac) = mac_addr {
             info!("Setting MAC address {} on {}...", mac, peer_name);
             let output = Command::new("ip")
-                .args(["netns", "exec", namespace, "ip", "link", "set", peer_name, "address", &mac])
+                .args([
+                    "netns", "exec", namespace, "ip", "link", "set", peer_name, "address", &mac,
+                ])
                 .output()?;
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(anyhow!("Failed to set MAC address on {}: {}", peer_name, stderr));
+                return Err(anyhow!(
+                    "Failed to set MAC address on {}: {}",
+                    peer_name,
+                    stderr
+                ));
             }
             info!("✓ Set MAC address on {}", peer_name);
         }
@@ -266,12 +307,18 @@ impl InterfaceSetup {
         if let Some(ref ipnet) = self.ipnet {
             info!("Setting IP address {} on {}...", ipnet, peer_name);
             let output = Command::new("ip")
-                .args(["netns", "exec", namespace, "ip", "addr", "add", ipnet, "dev", peer_name])
+                .args([
+                    "netns", "exec", namespace, "ip", "addr", "add", ipnet, "dev", peer_name,
+                ])
                 .output()?;
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(anyhow!("Failed to set IP address on {}: {}", peer_name, stderr));
+                return Err(anyhow!(
+                    "Failed to set IP address on {}: {}",
+                    peer_name,
+                    stderr
+                ));
             }
             info!("✓ Set IP address {} on {}", ipnet, peer_name);
         }
@@ -289,12 +336,18 @@ impl InterfaceSetup {
         // Bring up peer interface in namespace
         info!("Bringing up {} in namespace...", peer_name);
         let output = Command::new("ip")
-            .args(["netns", "exec", namespace, "ip", "link", "set", peer_name, "up"])
+            .args([
+                "netns", "exec", namespace, "ip", "link", "set", peer_name, "up",
+            ])
             .output()?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!("Failed to bring up {} in namespace: {}", peer_name, stderr));
+            return Err(anyhow!(
+                "Failed to bring up {} in namespace: {}",
+                peer_name,
+                stderr
+            ));
         }
         info!("✓ Brought up {} in namespace", peer_name);
 
@@ -320,7 +373,9 @@ impl InterfaceSetup {
         }
 
         // Check if veth pair already exists
-        let check_output = Command::new("ip").args(["link", "show", &self.name]).output()?;
+        let check_output = Command::new("ip")
+            .args(["link", "show", &self.name])
+            .output()?;
         if check_output.status.success() {
             let existing_queues = std::fs::read_dir(format!("/sys/class/net/{}/queues", self.name))
                 .map(|entries| {
@@ -359,10 +414,16 @@ impl InterfaceSetup {
                 );
             }
 
-            let del = Command::new("ip").args(["link", "del", &self.name]).output()?;
+            let del = Command::new("ip")
+                .args(["link", "del", &self.name])
+                .output()?;
             if !del.status.success() {
                 let stderr = String::from_utf8_lossy(&del.stderr);
-                return Err(anyhow!("Failed to delete existing veth {}: {}", self.name, stderr));
+                return Err(anyhow!(
+                    "Failed to delete existing veth {}: {}",
+                    self.name,
+                    stderr
+                ));
             }
             info!("✓ Deleted existing veth pair {}", self.name);
         }
@@ -406,13 +467,20 @@ impl InterfaceSetup {
             .output()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!("Failed to add {} to bridge {}: {}", peer_name, master, stderr));
+            return Err(anyhow!(
+                "Failed to add {} to bridge {}: {}",
+                peer_name,
+                master,
+                stderr
+            ));
         }
         info!("✓ Added {} to bridge {}", peer_name, master);
 
         // Bring peer up
         info!("Bringing up {}...", peer_name);
-        let output = Command::new("ip").args(["link", "set", peer_name, "up"]).output()?;
+        let output = Command::new("ip")
+            .args(["link", "set", peer_name, "up"])
+            .output()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(anyhow!("Failed to bring up {}: {}", peer_name, stderr));
@@ -455,12 +523,17 @@ impl InterfaceSetup {
                 .args(["netns", "exec", ns, "ethtool", "-K", &target, "tx", onoff])
                 .output()?
         } else {
-            Command::new("sudo").args(["ethtool", "-K", &target, "tx", onoff]).output()?
+            Command::new("sudo")
+                .args(["ethtool", "-K", &target, "tx", onoff])
+                .output()?
         };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!("Failed to set TX checksum offload on {}: {}", target, stderr);
+            warn!(
+                "Failed to set TX checksum offload on {}: {}",
+                target, stderr
+            );
         } else {
             info!("✓ TX checksum offload {} on {}", onoff, target);
         }
@@ -470,7 +543,9 @@ impl InterfaceSetup {
 
     /// Check if interface exists
     fn check_exists(&self) -> Result<()> {
-        let output = Command::new("ip").args(["link", "show", &self.name]).output()?;
+        let output = Command::new("ip")
+            .args(["link", "show", &self.name])
+            .output()?;
 
         if !output.status.success() {
             return Err(anyhow!("Interface {} does not exist", self.name));
@@ -485,7 +560,9 @@ impl InterfaceSetup {
         debug!("Bringing interface {} up...", self.name);
 
         // Check if interface is already up
-        let check_output = Command::new("ip").args(["link", "show", &self.name]).output()?;
+        let check_output = Command::new("ip")
+            .args(["link", "show", &self.name])
+            .output()?;
 
         if check_output.status.success() {
             let stdout = String::from_utf8_lossy(&check_output.stdout);
@@ -495,11 +572,17 @@ impl InterfaceSetup {
             }
         }
 
-        let output = Command::new("ip").args(["link", "set", &self.name, "up"]).output()?;
+        let output = Command::new("ip")
+            .args(["link", "set", &self.name, "up"])
+            .output()?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!("Failed to bring interface {} up: {}", self.name, stderr));
+            return Err(anyhow!(
+                "Failed to bring interface {} up: {}",
+                self.name,
+                stderr
+            ));
         }
 
         // Wait a moment for interface to come up
@@ -519,7 +602,11 @@ impl InterfaceSetup {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!("Failed to enable promiscuous mode on {}: {}", self.name, stderr));
+            return Err(anyhow!(
+                "Failed to enable promiscuous mode on {}: {}",
+                self.name,
+                stderr
+            ));
         }
 
         info!("✓ Promiscuous mode enabled on {}", self.name);
@@ -531,7 +618,10 @@ impl InterfaceSetup {
         // Skip queue configuration for veth interfaces
         if let Some(ref iface_type) = self.iface_type {
             if iface_type == "veth" {
-                debug!("Skipping queue configuration for veth interface {}", self.name);
+                debug!(
+                    "Skipping queue configuration for veth interface {}",
+                    self.name
+                );
                 return Ok(());
             }
         }
@@ -542,7 +632,10 @@ impl InterfaceSetup {
         let current = self.get_current_queue_count()?;
 
         if current == self.queues {
-            info!("Interface {} already has {} queues configured", self.name, self.queues);
+            info!(
+                "Interface {} already has {} queues configured",
+                self.name, self.queues
+            );
             return Ok(());
         }
 
@@ -600,12 +693,18 @@ impl InterfaceSetup {
         // Skip ring size configuration for veth interfaces
         if let Some(ref iface_type) = self.iface_type {
             if iface_type == "veth" {
-                debug!("Skipping ring size configuration for veth interface {}", self.name);
+                debug!(
+                    "Skipping ring size configuration for veth interface {}",
+                    self.name
+                );
                 return Ok(());
             }
         }
 
-        debug!("Configuring ring sizes: RX={}, TX={} on {}...", self.rxd, self.txd, self.name);
+        debug!(
+            "Configuring ring sizes: RX={}, TX={} on {}...",
+            self.rxd, self.txd, self.name
+        );
 
         // Get current ring sizes
         let (current_rx, current_tx) = self.get_current_ring_sizes()?;
@@ -620,7 +719,14 @@ impl InterfaceSetup {
 
         // Set ring sizes using ethtool -G
         let output = Command::new("ethtool")
-            .args(["-G", &self.name, "rx", &self.rxd.to_string(), "tx", &self.txd.to_string()])
+            .args([
+                "-G",
+                &self.name,
+                "rx",
+                &self.rxd.to_string(),
+                "tx",
+                &self.txd.to_string(),
+            ])
             .output()?;
 
         if !output.status.success() {
@@ -633,7 +739,10 @@ impl InterfaceSetup {
             return Ok(());
         }
 
-        info!("✓ Set ring sizes on {}: RX={}, TX={}", self.name, self.rxd, self.txd);
+        info!(
+            "✓ Set ring sizes on {}: RX={}, TX={}",
+            self.name, self.rxd, self.txd
+        );
         Ok(())
     }
 
@@ -742,7 +851,9 @@ impl InterfaceSetup {
 
         match (rx_max, tx_max) {
             (Some(rx), Some(tx)) => Ok((rx, tx)),
-            _ => Err(anyhow!("Could not parse maximum ring sizes from ethtool output")),
+            _ => Err(anyhow!(
+                "Could not parse maximum ring sizes from ethtool output"
+            )),
         }
     }
 
@@ -783,10 +894,16 @@ impl InterfaceSetup {
     fn verify(&self) -> Result<()> {
         debug!("Verifying configuration for {}...", self.name);
 
-        let is_veth = self.iface_type.as_ref().map(|t| t == "veth").unwrap_or(false);
+        let is_veth = self
+            .iface_type
+            .as_ref()
+            .map(|t| t == "veth")
+            .unwrap_or(false);
 
         // 1. Check interface is UP and in promiscuous mode
-        let output = Command::new("ip").args(["link", "show", &self.name]).output()?;
+        let output = Command::new("ip")
+            .args(["link", "show", &self.name])
+            .output()?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         if !stdout.contains("UP") {
@@ -824,7 +941,10 @@ impl InterfaceSetup {
                     self.name, current_rx, self.rxd, current_tx, self.txd
                 );
             } else {
-                debug!("✓ Ring sizes verified: RX={}, TX={}", current_rx, current_tx);
+                debug!(
+                    "✓ Ring sizes verified: RX={}, TX={}",
+                    current_rx, current_tx
+                );
             }
         }
 
@@ -836,7 +956,9 @@ impl InterfaceSetup {
         let mut info = String::new();
 
         // Get link info
-        let output = Command::new("ip").args(["-d", "link", "show", &self.name]).output()?;
+        let output = Command::new("ip")
+            .args(["-d", "link", "show", &self.name])
+            .output()?;
 
         if output.status.success() {
             info.push_str(&format!("=== Interface {} ===\n", self.name));
@@ -864,7 +986,7 @@ pub fn validate_interfaces_exist(
     ifaces: &[crate::toml_parser::InterfaceConfig],
     xsk_mappings: &[crate::toml_parser::XskMapping],
 ) -> Result<()> {
-    use std::collections::{HashSet, HashMap};
+    use std::collections::{HashMap, HashSet};
 
     info!("Validating interface existence...");
 
@@ -903,7 +1025,9 @@ pub fn validate_interfaces_exist(
             continue;
         }
 
-        let output = Command::new("ip").args(["link", "show", iface_name]).output()?;
+        let output = Command::new("ip")
+            .args(["link", "show", iface_name])
+            .output()?;
 
         if !output.status.success() {
             return Err(anyhow!(
@@ -972,7 +1096,10 @@ pub fn check_or_configure_interfaces(
                                 iface_cfg.name, max_rx, max_tx
                             );
                         }
-                        (iface_cfg.rxd.unwrap_or(max_rx), iface_cfg.txd.unwrap_or(max_tx))
+                        (
+                            iface_cfg.rxd.unwrap_or(max_rx),
+                            iface_cfg.txd.unwrap_or(max_tx),
+                        )
                     }
                     Err(e) => {
                         if !b_just_check {

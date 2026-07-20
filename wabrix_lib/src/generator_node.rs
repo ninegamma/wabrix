@@ -1,31 +1,31 @@
-use std::arch::x86_64::_rdtsc;
-use std::mem::MaybeUninit;
-use std::net::Ipv4Addr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use crate::config::hot_config::{NodeDynamicState, SharedSystemState};
 use log::{info, warn};
-use serde::{Deserialize, Serialize};
 use macaddr::MacAddr6;
 use network_types::eth::EtherType;
 use rand::prelude::SmallRng;
 use rand::TryRng;
+use serde::{Deserialize, Serialize};
+use std::arch::x86_64::_rdtsc;
+use std::mem::MaybeUninit;
+use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use wabrix_api::headers::{EndOffset, Header, IpHeader, MacHeader, TcpHeader};
+use wabrix_base::frame_registry::get_worker_frame_registry;
+use wabrix_base::interface::batch::Batch;
 use wabrix_base::interface::Pdu;
 use wabrix_base::{Directive, Node, NodeId};
-use wabrix_base::frame_registry::get_worker_frame_registry;
-use wabrix_base::interface::batch::{Batch};
-use wabrix_api::headers::{EndOffset, Header, IpHeader, MacHeader, TcpHeader};
-use crate::config::hot_config::{NodeDynamicState, SharedSystemState};
 // WASM Imports
-#[cfg(feature = "wasm")]
-use wasmtime::Store;
-#[cfg(feature = "wasm")]
-use wasmtime::component::{bindgen, ResourceTable};
-#[cfg(feature = "wasm")]
-use wasmtime_wasi::WasiCtxBuilder;
 use wabrix_api::MAX_BATCH_SIZE;
 use wabrix_base::system::PlatformData;
 #[cfg(feature = "wasm")]
 use wabrix_wasm::wasm_manager::{MyHostState, WasmManager};
+#[cfg(feature = "wasm")]
+use wasmtime::component::{bindgen, ResourceTable};
+#[cfg(feature = "wasm")]
+use wasmtime::Store;
+#[cfg(feature = "wasm")]
+use wasmtime_wasi::WasiCtxBuilder;
 
 #[cfg(feature = "wasm")]
 bindgen!({
@@ -130,12 +130,18 @@ impl GeneratorNode {
         platform_data: PlatformData,
     ) -> Self {
         #[cfg(feature = "wasm")]
-        let (store, bindings) = if let (Some(manager), Some(path)) = (wasm_manager, wasm_file_path) {
-            let component = manager.get_component(path).expect("Failed to load Gen Wasm");
+        let (store, bindings) = if let (Some(manager), Some(path)) = (wasm_manager, wasm_file_path)
+        {
+            let component = manager
+                .get_component(path)
+                .expect("Failed to load Gen Wasm");
             let partition_handle = manager.make_partition_handle(partition_start_bytes);
             manager.set_instantiation_handle(partition_handle.clone());
 
-            let wasi_ctx = WasiCtxBuilder::new().inherit_stdout().inherit_stderr().build();
+            let wasi_ctx = WasiCtxBuilder::new()
+                .inherit_stdout()
+                .inherit_stderr()
+                .build();
             let mut store = Store::new(
                 manager.engine(),
                 MyHostState {
@@ -184,7 +190,11 @@ impl GeneratorNode {
             scratch_pdus: unsafe { MaybeUninit::uninit().assume_init() },
             #[cfg(feature = "profiling")]
             total_cycles: 0,
-            state: if autostart { GenState::Generating } else { GenState::Idle },
+            state: if autostart {
+                GenState::Generating
+            } else {
+                GenState::Idle
+            },
             packets_generated_this_run: 0,
             shared_state,
             pipeline_name,
@@ -253,9 +263,11 @@ impl GeneratorNode {
             std::ptr::copy_nonoverlapping(&tcp as *const TcpHeader, tcp_ptr, 1);
 
             // Initialize HeaderStack with the correct offsets
-            pdu.headers_mut().push(umem_addr, Header::Mac(&mut *mac_ptr));
+            pdu.headers_mut()
+                .push(umem_addr, Header::Mac(&mut *mac_ptr));
             pdu.headers_mut().push(umem_addr, Header::Ip(&mut *ip_ptr));
-            pdu.headers_mut().push(umem_addr, Header::Tcp(&mut *tcp_ptr));
+            pdu.headers_mut()
+                .push(umem_addr, Header::Tcp(&mut *tcp_ptr));
         }
 
         // Update PDU data length
@@ -285,7 +297,8 @@ impl GeneratorNode {
 
     /// Get the duration of actual packet burst generation in TSC cycles
     pub fn get_burst_duration_cycles(&self) -> u64 {
-        self.last_burst_timestamp.saturating_sub(self.first_burst_timestamp)
+        self.last_burst_timestamp
+            .saturating_sub(self.first_burst_timestamp)
     }
 
     /// Get the duration of actual packet burst generation using std::time
@@ -358,7 +371,10 @@ impl Node for GeneratorNode {
                         }
                         // RESET LATCH: Any time we receive 'stop', reset back to Idle
                         else if *state == GenState::Idle && self.state != GenState::Idle {
-                            log::info!("PacketGenNode {}: GUI triggered STOP! Reset to Idle.", self.id);
+                            log::info!(
+                                "PacketGenNode {}: GUI triggered STOP! Reset to Idle.",
+                                self.id
+                            );
                             self.tm_is_running.store(false, Ordering::Relaxed);
                             self.finished = false;
                         }
@@ -366,8 +382,9 @@ impl Node for GeneratorNode {
                     }
 
                     // If the user changed the PPS in the GUI, recalculate the gap
-                    let new_gap =
-                        (self.platform_data.tsc_frequency / *pps_limit * self.batch_size as u64).saturating_sub(2000);
+                    let new_gap = (self.platform_data.tsc_frequency / *pps_limit
+                        * self.batch_size as u64)
+                        .saturating_sub(2000);
                     if new_gap != self.min_interbatch_gap {
                         self.min_interbatch_gap = new_gap;
                     }
@@ -398,7 +415,9 @@ impl Node for GeneratorNode {
         }
 
         // Check if we've reached the packet limit FOR THIS SPECIFIC RUN
-        if self.packets_to_generate > 0 && self.packets_generated_this_run >= self.packets_to_generate {
+        if self.packets_to_generate > 0
+            && self.packets_generated_this_run >= self.packets_to_generate
+        {
             self.last_burst_instant = Some(std::time::Instant::now());
             info!(
                 "PacketGenerator {}: Finished generating {} packets this run. Resetting to Idle.",
@@ -414,7 +433,8 @@ impl Node for GeneratorNode {
 
         if !is_first_batch {
             // Only enforce interbatch timing AFTER the first batch has fired
-            if !((now - self.lastbatch_timestamp) >= self.min_interbatch_gap && (now - self.start_time) >= self.start_delay)
+            if !((now - self.lastbatch_timestamp) >= self.min_interbatch_gap
+                && (now - self.start_time) >= self.start_delay)
             {
                 batch.clear();
                 return Directive::Next(self.next_node.clone());
@@ -436,11 +456,15 @@ impl Node for GeneratorNode {
 
         // Calculate how many packets we can still generate THIS RUN to not exceed the limit
         let remaining = if self.packets_to_generate > 0 {
-            self.packets_to_generate.saturating_sub(self.packets_generated_this_run)
+            self.packets_to_generate
+                .saturating_sub(self.packets_generated_this_run)
         } else {
             u64::MAX
         };
-        let frames_to_generate = std::cmp::min(std::cmp::min(self.batch_size as u64, remaining), MAX_BATCH_SIZE as u64);
+        let frames_to_generate = std::cmp::min(
+            std::cmp::min(self.batch_size as u64, remaining),
+            MAX_BATCH_SIZE as u64,
+        );
 
         if frames_to_generate == 0 {
             self.reset_to_idle();
@@ -448,8 +472,10 @@ impl Node for GeneratorNode {
             return Directive::Next(self.next_node.clone());
         }
 
-        let allocated =
-            frame_registry.allocate_pdus_into(self.umem_group_id, &mut self.scratch_pdus[..frames_to_generate as usize]);
+        let allocated = frame_registry.allocate_pdus_into(
+            self.umem_group_id,
+            &mut self.scratch_pdus[..frames_to_generate as usize],
+        );
 
         if allocated == 0 {
             // We are temporarily out of frames (RX socket is hoarding, or TX ring is full).
@@ -463,7 +489,8 @@ impl Node for GeneratorNode {
         let dst_port = self.worker_id as u16;
 
         #[cfg(feature = "wasm")]
-        let wasm_lengths = if let (Some(store), Some(bindings)) = (&mut self.store, &self.bindings) {
+        let wasm_lengths = if let (Some(store), Some(bindings)) = (&mut self.store, &self.bindings)
+        {
             if b_dst_changed {
                 let [i0, i1, i2, i3] = self.dst_ip.octets();
                 let [m0, m1, m2, m3, m4, m5] = self.dst_mac.into_array();
@@ -480,8 +507,9 @@ impl Node for GeneratorNode {
             }
 
             let active_bytes = allocated * size_of::<Pdu>();
-            let batch_bytes: &[u8] =
-                unsafe { std::slice::from_raw_parts(self.scratch_pdus.as_ptr() as *const u8, active_bytes) };
+            let batch_bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(self.scratch_pdus.as_ptr() as *const u8, active_bytes)
+            };
 
             // Just pass the bytes and the offset. The plugin handles the rest!
             let lengths = bindings
@@ -493,7 +521,11 @@ impl Node for GeneratorNode {
                 });
 
             if lengths.len() != allocated {
-                log::error!("WASM returned {} lengths for {} pdus!", lengths.len(), allocated);
+                log::error!(
+                    "WASM returned {} lengths for {} pdus!",
+                    lengths.len(),
+                    allocated
+                );
                 vec![0; allocated]
             } else {
                 lengths
@@ -548,20 +580,28 @@ impl Node for GeneratorNode {
             self.total_generated += generated;
             self.packets_generated_this_run += generated;
             self.tm_total.store(self.total_generated, Ordering::Relaxed);
-            self.tm_this_run.store(self.packets_generated_this_run, Ordering::Relaxed);
+            self.tm_this_run
+                .store(self.packets_generated_this_run, Ordering::Relaxed);
             if let Some(first) = self.first_burst_instant {
                 let elapsed = first.elapsed().as_secs_f64();
                 if elapsed > 0.001 {
-                    self.tm_pps
-                        .store((self.packets_generated_this_run as f64 / elapsed) as u64, Ordering::Relaxed);
+                    self.tm_pps.store(
+                        (self.packets_generated_this_run as f64 / elapsed) as u64,
+                        Ordering::Relaxed,
+                    );
                 }
             }
             #[cfg(feature = "profiling")]
-            self.tm_avg_cycles.store(self.total_cycles, Ordering::Relaxed);
+            self.tm_avg_cycles
+                .store(self.total_cycles, Ordering::Relaxed);
 
             const LOG_INTERVAL: u64 = 1_000_000;
             if self.total_generated >= self.next_log_threshold {
-                log::trace!("PacketGenNode {}: Generated {} packets", self.id, self.total_generated);
+                log::trace!(
+                    "PacketGenNode {}: Generated {} packets",
+                    self.id,
+                    self.total_generated
+                );
                 self.next_log_threshold += LOG_INTERVAL;
             }
 

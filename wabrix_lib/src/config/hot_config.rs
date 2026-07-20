@@ -1,13 +1,13 @@
+use crate::generator_node::GenState;
 use arc_swap::ArcSwap;
+use macaddr::MacAddr6;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-use macaddr::{MacAddr6};
-use serde::{Deserialize, Serialize};
 use wabrix_api::helpers::parse_suffixed_number;
 use wabrix_api::MAX_BATCH_SIZE;
 use wabrix_base::NodeId;
-use crate::generator_node::GenState;
 
 /// Strongly typed states for specific node types
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -77,7 +77,11 @@ impl NodeDynamicState {
                             log::warn!("hot_args batch_size must be > 0");
                         }
                         Ok(v) => {
-                            log::warn!("hot_args batch_size {} exceeds MAX_BATCH_SIZE {}", v, MAX_BATCH_SIZE);
+                            log::warn!(
+                                "hot_args batch_size {} exceeds MAX_BATCH_SIZE {}",
+                                v,
+                                MAX_BATCH_SIZE
+                            );
                         }
                         Err(e) => {
                             log::warn!("hot_args batch_size parse error: {}", e);

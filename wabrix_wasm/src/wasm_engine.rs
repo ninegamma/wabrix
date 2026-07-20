@@ -1,12 +1,12 @@
+use crate::wasm_manager::{MyHostState, WasmManager};
+use core::mem::size_of;
 use std::collections::HashMap;
 use std::mem::MaybeUninit;
 use std::sync::atomic::Ordering;
-use crate::wasm_manager::{MyHostState, WasmManager};
-use wasmtime::Store;
-use wasmtime::component::{bindgen, ResourceTable};
-use wasmtime_wasi::WasiCtxBuilder;
 use wabrix_api::{BatchMetadata, MAX_BATCH_SIZE};
-use core::mem::size_of;
+use wasmtime::component::{bindgen, ResourceTable};
+use wasmtime::Store;
+use wasmtime_wasi::WasiCtxBuilder;
 
 /// Host-side view of `BatchMetadata` that uses `Pdu` instead of `Pdu0`.
 /// `Pdu` and `Pdu0` are layout-identical (64 bytes: 56-byte `WPdu` core + 8-byte tail);
@@ -17,12 +17,12 @@ struct HostBatch {
     actions: [u32; MAX_BATCH_SIZE],
 }
 const _: () = assert!(size_of::<HostBatch>() == size_of::<BatchMetadata>());
-use wabrix_base::{ControlEvent, Directive, Node, NodeId};
-use wabrix_base::interface::batch::{Batch};
-use wabrix_base::interface::Pdu;
-use wabrix_base::telemetry::TelemetryMetrics;
 use wabrix_base::frame_registry::get_worker_frame_registry;
+use wabrix_base::interface::batch::Batch;
+use wabrix_base::interface::Pdu;
 use wabrix_base::system::PlatformData;
+use wabrix_base::telemetry::TelemetryMetrics;
+use wabrix_base::{ControlEvent, Directive, Node, NodeId};
 
 // 1. Generate bindings.
 // Note: `async: true` is required to use `instantiate_async` and `call_async`
@@ -77,20 +77,29 @@ impl WasmEngine {
     ) -> Self {
         // 1. Fetch the Component from the Manager's DashMap cache
         // This takes nanoseconds if already loaded, avoiding disk I/O.
-        let component = manager.get_component(wasm_file_path).expect("Failed to load Wasm component");
+        let component = manager
+            .get_component(wasm_file_path)
+            .expect("Failed to load Wasm component");
 
         // 2. Build the partition-specific UmemHandle for this instance.
         //    WASM address 0 will map to `umem_base + partition_start_bytes`.
         //    The window extends to the end of the full Umem.
         let partition_handle = manager.make_partition_handle(partition_start_bytes);
-        log::info!("NODE {}: Partition start bytes: {}", id, partition_start_bytes);
+        log::info!(
+            "NODE {}: Partition start bytes: {}",
+            id,
+            partition_start_bytes
+        );
 
         // 3. Pre-load the partition handle into the shared XdpMemoryCreator so
         //    that Wasmtime picks it up when it calls new_memory() during instantiate().
         manager.set_instantiation_handle(partition_handle.clone());
 
         // 4. Initialize the WASI Context for THIS specific node
-        let wasi_ctx = WasiCtxBuilder::new().inherit_stdout().inherit_stderr().build();
+        let wasi_ctx = WasiCtxBuilder::new()
+            .inherit_stdout()
+            .inherit_stderr()
+            .build();
 
         // 5. Create the Store
         // This is where the magic happens: Wasmtime calls our `XdpMemoryCreator`
@@ -182,7 +191,12 @@ impl WasmEngine {
         let status = self
             .bindings
             .wabrix_plugins_packet_engine()
-            .call_process_batch(&mut self.store, len as u32, self.partition_start_bytes, self.mailbox_offset)
+            .call_process_batch(
+                &mut self.store,
+                len as u32,
+                self.partition_start_bytes,
+                self.mailbox_offset,
+            )
             .unwrap_or_else(|e| {
                 log::error!("NODE {}: Wasm execution failed: {}", self.id, e);
                 u32::MAX
@@ -256,7 +270,9 @@ impl WasmEngine {
         // 4. ROUTING PHASE — read actions from mailbox
         // ==========================================
         let num_routes = self.routing_table.len();
-        let mut outputs: Vec<Batch> = std::iter::repeat_with(Batch::new).take(num_routes).collect();
+        let mut outputs: Vec<Batch> = std::iter::repeat_with(Batch::new)
+            .take(num_routes)
+            .collect();
         let mut pdu_index = 0;
 
         batch.distribute(&mut outputs, |pdu| {
@@ -267,7 +283,8 @@ impl WasmEngine {
             if !self.supports_oob_telemetry {
                 let telemetry_bucket = ((action >> 16) & 0xFF) as usize;
                 if telemetry_bucket < self.telemetry_metrics.counters_pkts.len() {
-                    self.telemetry_metrics.counters_pkts[telemetry_bucket].fetch_add(1, Ordering::Relaxed);
+                    self.telemetry_metrics.counters_pkts[telemetry_bucket]
+                        .fetch_add(1, Ordering::Relaxed);
                     self.telemetry_metrics.counters_bytes[telemetry_bucket]
                         .fetch_add(pdu.w.data_len() as u64, Ordering::Relaxed);
                 }
@@ -385,7 +402,8 @@ impl Node for WasmEngine {
                         self.supports_oob_telemetry = true;
                         for (idx, &count) in oob.iter().enumerate() {
                             if idx < self.telemetry_metrics.counters_pkts.len() {
-                                self.telemetry_metrics.counters_pkts[idx].store(count, Ordering::Relaxed);
+                                self.telemetry_metrics.counters_pkts[idx]
+                                    .store(count, Ordering::Relaxed);
                             }
                         }
                     }
@@ -394,10 +412,12 @@ impl Node for WasmEngine {
             } else {
                 // 1. Allocate exact memory from the shared FrameRegistry
                 let registry = unsafe { &mut *get_worker_frame_registry() };
-                let mut scratch: [MaybeUninit<Pdu>; MAX_BATCH_SIZE] = core::array::from_fn(|_| MaybeUninit::uninit());
+                let mut scratch: [MaybeUninit<Pdu>; MAX_BATCH_SIZE] =
+                    core::array::from_fn(|_| MaybeUninit::uninit());
                 let frames_to_allocate = std::cmp::min(n_requested_frames as usize, MAX_BATCH_SIZE);
 
-                let allocated = registry.allocate_pdus_into(self.umem_id as usize, &mut scratch[..frames_to_allocate]);
+                let allocated = registry
+                    .allocate_pdus_into(self.umem_id as usize, &mut scratch[..frames_to_allocate]);
 
                 if allocated == 0 {
                     log::warn!("NODE {}: Timer starved of UMEM frames!", self.id);
@@ -448,11 +468,10 @@ impl Node for WasmEngine {
         }
         // We only get here if the PipelineRunner already verified the wildcard matched us!
         tokio::task::block_in_place(|| {
-            let _ = self.bindings.wabrix_plugins_packet_engine().call_on_control_event(
-                &mut self.store,
-                event.opcode,
-                &event.payload,
-            );
+            let _ = self
+                .bindings
+                .wabrix_plugins_packet_engine()
+                .call_on_control_event(&mut self.store, event.opcode, &event.payload);
         });
     }
 

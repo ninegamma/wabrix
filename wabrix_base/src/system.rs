@@ -1,9 +1,9 @@
+use crate::frame_registry::get_tsc_start;
+use macaddr::{MacAddr6 as MacAddress, ParseError};
 use std::arch::x86_64::__cpuid;
 use std::fs::File;
 use std::io::Read;
-use macaddr::{MacAddr6 as MacAddress, ParseError};
 use std::path::Path;
-use crate::frame_registry::get_tsc_start;
 
 const CPU_CLOCK_PATH: &str = "/sys/devices/system/cpu/cpu0/cpufreq/base_frequency";
 const PROC_CPUINFO_PATH: &str = "/proc/cpuinfo";
@@ -87,14 +87,18 @@ impl PlatformData {
 pub fn get_mac_from_ifname(ifname: &str) -> Result<MacAddress, ParseError> {
     let iface = Path::new("/sys/class/net").join(ifname).join("address");
     let mut macaddr = String::new();
-    File::open(iface).and_then(|mut f| f.read_to_string(&mut macaddr)).unwrap();
+    File::open(iface)
+        .and_then(|mut f| f.read_to_string(&mut macaddr))
+        .unwrap();
     macaddr.lines().next().unwrap_or("").parse::<MacAddress>()
 }
 
 pub fn get_mac_string_from_ifname(ifname: &str) -> Result<String, ParseError> {
     let iface = Path::new("/sys/class/net").join(ifname).join("address");
     let mut macaddr = String::new();
-    File::open(iface).and_then(|mut f| f.read_to_string(&mut macaddr)).unwrap();
+    File::open(iface)
+        .and_then(|mut f| f.read_to_string(&mut macaddr))
+        .unwrap();
     Ok(macaddr.lines().next().unwrap_or("").to_string())
 }
 
@@ -150,7 +154,11 @@ pub fn get_nic_packets(interface: &str, rx: bool) -> Option<u64> {
 /// Handles both standard drivers (tx_packets) and modern Intel 'ice' drivers
 /// (tx_unicast + tx_multicast + tx_broadcast).
 pub fn get_nic_packets_detailed(interface: &str, rx: bool) -> Option<PacketStats> {
-    let output = std::process::Command::new("ethtool").arg("-S").arg(interface).output().ok()?;
+    let output = std::process::Command::new("ethtool")
+        .arg("-S")
+        .arg(interface)
+        .output()
+        .ok()?;
 
     if !output.status.success() {
         return None;
@@ -254,7 +262,10 @@ pub fn get_nic_packets_detailed(interface: &str, rx: bool) -> Option<PacketStats
 /// Checks the carrier status via sysfs and waits up to 5 seconds
 pub async fn wait_for_physical_link(iface: &str) {
     let carrier_path = format!("/sys/class/net/{}/carrier", iface);
-    log::info!("Waiting for physical link training to complete on {}...", iface);
+    log::info!(
+        "Waiting for physical link training to complete on {}...",
+        iface
+    );
 
     let mut attempts = 0;
     while attempts < 50 {
@@ -272,7 +283,10 @@ pub async fn wait_for_physical_link(iface: &str) {
         attempts += 1;
     }
 
-    log::warn!("Physical link did not come up within 5 seconds on {}!", iface);
+    log::warn!(
+        "Physical link did not come up within 5 seconds on {}!",
+        iface
+    );
 }
 
 /// Read NIC tx_packets counter from ethtool statistics
@@ -299,8 +313,8 @@ pub fn get_nic_rx_packets_detailed(interface: &str) -> Option<PacketStats> {
     get_nic_packets_detailed(interface, true)
 }
 
+use log::{info, warn};
 use std::fs;
-use log::{warn, info};
 
 pub fn check_irqbalance_status() {
     if Path::new("/var/run/irqbalance.pid").exists() || process_exists("irqbalance") {
@@ -312,11 +326,17 @@ pub fn check_irqbalance_status() {
 }
 
 pub fn check_cpu_governor(worker_core: usize) {
-    let governor_path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_governor", worker_core);
+    let governor_path = format!(
+        "/sys/devices/system/cpu/cpu{}/cpufreq/scaling_governor",
+        worker_core
+    );
     if let Ok(governor) = fs::read_to_string(&governor_path) {
         let governor = governor.trim();
         if governor != "performance" {
-            warn!("⚠️  LATENCY WARNING: Core {} is set to '{}' mode.", worker_core, governor);
+            warn!(
+                "⚠️  LATENCY WARNING: Core {} is set to '{}' mode.",
+                worker_core, governor
+            );
             warn!("   Run 'cpupower frequency-set -g performance' for zero-drop stability.");
         } else {
             info!("✓ Core {} is in performance mode.", worker_core);
@@ -385,11 +405,17 @@ pub fn set_irq_affinity(interface: &str, core: usize) -> Result<(), std::io::Err
                 // Set the affinity using shell command to ensure proper permissions
                 let output = Command::new("sh")
                     .arg("-c")
-                    .arg(format!("echo {} | sudo tee {} > /dev/null", core, affinity_path))
+                    .arg(format!(
+                        "echo {} | sudo tee {} > /dev/null",
+                        core, affinity_path
+                    ))
                     .output()?;
 
                 if output.status.success() {
-                    info!("✓ Set IRQ {} ({}) affinity to core {}", irq_num, interface, core);
+                    info!(
+                        "✓ Set IRQ {} ({}) affinity to core {}",
+                        irq_num, interface, core
+                    );
                     irq_count += 1;
                 } else {
                     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -401,7 +427,10 @@ pub fn set_irq_affinity(interface: &str, core: usize) -> Result<(), std::io::Err
         if irq_count == 0 {
             warn!("No IRQs found for interface {}", interface);
         } else {
-            info!("✓ Set {} IRQ(s) for {} to core {}", irq_count, interface, core);
+            info!(
+                "✓ Set {} IRQ(s) for {} to core {}",
+                irq_count, interface, core
+            );
         }
     }
 
@@ -442,7 +471,9 @@ fn parse_cpu_list(list: &str) -> Vec<usize> {
             // Handle ranges (e.g., "4-8")
             let bounds: Vec<&str> = part.split('-').collect();
             if bounds.len() == 2 {
-                if let (Ok(start), Ok(end)) = (bounds[0].parse::<usize>(), bounds[1].parse::<usize>()) {
+                if let (Ok(start), Ok(end)) =
+                    (bounds[0].parse::<usize>(), bounds[1].parse::<usize>())
+                {
                     cpus.extend(start..=end);
                 }
             }
@@ -475,7 +506,10 @@ pub fn check_irdma_mod_unloaded() -> bool {
             }
         }
         Err(e) => {
-            warn!("Could not read /proc/modules to check for {}: {}", module_name, e);
+            warn!(
+                "Could not read /proc/modules to check for {}: {}",
+                module_name, e
+            );
             // We return true here to not block execution if /proc is weird,
             // but the warning is logged.
             true
@@ -549,7 +583,10 @@ pub fn query_xdp_ifaces() -> Vec<XdpIfaceCapabilities> {
         // Output format (kernel NETDEV_XDP_ACT flags):
         //   NETDEV_XDP_ACT_BASIC:           yes/no
         //   NETDEV_XDP_ACT_XSK_ZEROCOPY:    yes/no
-        if let Ok(out) = Command::new("xdp-loader").args(["features", iface]).output() {
+        if let Ok(out) = Command::new("xdp-loader")
+            .args(["features", iface])
+            .output()
+        {
             if out.status.success() {
                 for line in String::from_utf8_lossy(&out.stdout).lines() {
                     let is_yes = line.trim_end().ends_with("yes");
@@ -577,9 +614,11 @@ pub fn query_xdp_ifaces() -> Vec<XdpIfaceCapabilities> {
                             break;
                         }
                         if rx_ring_max.is_none() && line.trim_start().starts_with("RX:") {
-                            rx_ring_max = line.split(':').nth(1).and_then(|v| v.trim().parse().ok());
+                            rx_ring_max =
+                                line.split(':').nth(1).and_then(|v| v.trim().parse().ok());
                         } else if tx_ring_max.is_none() && line.trim_start().starts_with("TX:") {
-                            tx_ring_max = line.split(':').nth(1).and_then(|v| v.trim().parse().ok());
+                            tx_ring_max =
+                                line.split(':').nth(1).and_then(|v| v.trim().parse().ok());
                         }
                     }
                 }
@@ -643,8 +682,12 @@ pub fn probe_xdp_interfaces() {
             r.version,
             if r.xdp_native { "yes" } else { "no" },
             if r.xdp_zerocopy { "yes" } else { "no" },
-            r.rx_ring_max.map(|v| v.to_string()).unwrap_or_else(|| "?".to_string()),
-            r.tx_ring_max.map(|v| v.to_string()).unwrap_or_else(|| "?".to_string()),
+            r.rx_ring_max
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "?".to_string()),
+            r.tx_ring_max
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "?".to_string()),
             w0 = w[0],
             w1 = w[1],
             w2 = w[2],

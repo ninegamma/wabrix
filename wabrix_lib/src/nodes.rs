@@ -24,7 +24,12 @@ pub struct BatchRxNode {
 }
 
 impl BatchRxNode {
-    pub fn new(id: NodeId, next_node: NodeId, rx_source: Box<dyn BatchRx + Send>, batch_size: usize) -> Self {
+    pub fn new(
+        id: NodeId,
+        next_node: NodeId,
+        rx_source: Box<dyn BatchRx + Send>,
+        batch_size: usize,
+    ) -> Self {
         Self {
             id,
             next_node,
@@ -94,7 +99,12 @@ impl Node for BatchRxNode {
             Err(e) => {
                 // 5. Hardware/Polling error
                 // We log it but don't crash the thread. We just stop processing this batch.
-                warn!("Source Node {} [{}] error: {}", self.id, self.rx_source.source_id(), e);
+                warn!(
+                    "Source Node {} [{}] error: {}",
+                    self.id,
+                    self.rx_source.source_id(),
+                    e
+                );
 
                 #[cfg(feature = "profiling")]
                 {
@@ -225,7 +235,12 @@ impl Node for BatchTxNode {
             }
             Err(e) => {
                 // 4. Handle Errors (e.g., Driver down, Ring broken)
-                warn!("Node {}: TX Error on sink {}: {}", self.id, self.tx_sink.sink_id(), e);
+                warn!(
+                    "Node {}: TX Error on sink {}: {}",
+                    self.id,
+                    self.tx_sink.sink_id(),
+                    e
+                );
 
                 // Explicitly clear to ensure resources are returned immediately
                 // rather than waiting for Scheduler cleanup.

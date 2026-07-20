@@ -1,13 +1,13 @@
-use std::cell::RefCell;
+use crate::wasm_engine;
 use dashmap::DashMap;
+use std::cell::RefCell;
 use std::sync::Arc;
+use wabrix_api::BatchMetadata;
+use wabrix_base::mailbox::{control_block_frames, MAILBOX_STRIDE};
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, LinearMemory, MemoryCreator, MemoryType, OptLevel, Result};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
-use wabrix_api::BatchMetadata;
 use xsk_rs::Umem;
-use wabrix_base::mailbox::{control_block_frames, MAILBOX_STRIDE};
-use crate::wasm_engine;
 
 // A thread-local slot to securely hold the partition handle during instantiation
 thread_local! {
@@ -112,7 +112,9 @@ unsafe impl LinearMemory for UmemHandle {
         self.window_size_bytes()
     }
     fn grow_to(&mut self, _new_size: usize) -> Result<()> {
-        Err(wasmtime::Error::msg("XBricks: Memory growth disabled for zero-copy UMEM"))
+        Err(wasmtime::Error::msg(
+            "XBricks: Memory growth disabled for zero-copy UMEM",
+        ))
     }
 
     /// WASM address 0 maps to `ptr + partition_start_bytes`.
@@ -137,7 +139,10 @@ unsafe impl MemoryCreator for XdpMemoryCreator {
         // Read and instantly consume the handle from THIS specific thread
         let handle = CURRENT_INSTANTIATION_HANDLE
             .with(|slot| slot.borrow_mut().take())
-            .ok_or_else(|| "XdpMemoryCreator: No UmemHandle was set for this thread prior to instantiation!".to_string())?;
+            .ok_or_else(|| {
+                "XdpMemoryCreator: No UmemHandle was set for this thread prior to instantiation!"
+                    .to_string()
+            })?;
 
         Ok(Box::new((*handle).clone()))
     }
@@ -229,8 +234,11 @@ impl WasmManager {
         let mut linker: Linker<MyHostState> = Linker::new(&engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
 
-        wasm_engine::EnginePlugin::add_to_linker::<MyHostState, HasSelf<MyHostState>>(&mut linker, |state| state)
-            .expect("Failed to link EnginePlugin world");
+        wasm_engine::EnginePlugin::add_to_linker::<MyHostState, HasSelf<MyHostState>>(
+            &mut linker,
+            |state| state,
+        )
+        .expect("Failed to link EnginePlugin world");
 
         Ok(Self {
             engine,
@@ -277,10 +285,15 @@ impl WasmManager {
                 }
             }
 
-            log::info!("Compiling WASM component (this may take a few seconds): {}", wasm_path);
+            log::info!(
+                "Compiling WASM component (this may take a few seconds): {}",
+                wasm_path
+            );
             let component = Component::from_file(engine, wasm_path)?;
 
-            let dir = cache_path.parent().unwrap_or_else(|| std::path::Path::new("/tmp"));
+            let dir = cache_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("/tmp"));
             let _ = std::fs::create_dir_all(dir);
             match component.serialize() {
                 Ok(bytes) => {

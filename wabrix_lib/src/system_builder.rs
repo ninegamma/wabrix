@@ -1,26 +1,26 @@
 // src/system_builder.rs
 
-use std::sync::Arc;
-use std::collections::HashMap;
 use core_affinity::CoreId;
 use crossbeam_queue::ArrayQueue;
-use wabrix_base::frame_registry::RETURN_QUEUE_CAPACITY;
-use xsk_rs::{Umem};
-use log::{warn, debug, info, error};
+use log::{debug, error, info, warn};
+use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::broadcast::Sender;
+use wabrix_base::frame_registry::RETURN_QUEUE_CAPACITY;
 use xsk_rs::config::{FrameSize, QueueSize};
+use xsk_rs::Umem;
 //use wabrix_wasm::wasm_manager::WasmManager;
-use wabrix_base::{ControlEvent, RuntimeUmemConfig, SystemBus, UmemPartition};
-use wabrix_base::frame_registry::{FrameRegistry, MAX_UMEM};
-use crate::xsocket::{XSocket, XSocketRx, XSocketTx, XdpSocketConfig};
-use crate::{BatchRx, BatchTx};
-use wabrix_base::system::PlatformData;
-#[cfg(feature = "wasm")]
-use wabrix_wasm::wasm_manager::WasmManager;
 use crate::system_runner::XBricksSystem;
-use wabrix_base::telemetry::TelemetryRegistry;
 use crate::toml_parser::{PartitionRequest, WorkerBuilderConfig};
 use crate::xscrubber_skel::XscrubberSkel;
+use crate::xsocket::{XSocket, XSocketRx, XSocketTx, XdpSocketConfig};
+use crate::{BatchRx, BatchTx};
+use wabrix_base::frame_registry::{FrameRegistry, MAX_UMEM};
+use wabrix_base::system::PlatformData;
+use wabrix_base::telemetry::TelemetryRegistry;
+use wabrix_base::{ControlEvent, RuntimeUmemConfig, SystemBus, UmemPartition};
+#[cfg(feature = "wasm")]
+use wabrix_wasm::wasm_manager::WasmManager;
 
 pub struct SystemBuilder {
     pub(crate) workers: Vec<WorkerBuilderConfig>,
@@ -107,9 +107,14 @@ impl SystemBuilder {
                 if let Some(umem_conf_arc) = self.runtime_umems[uid].as_ref() {
                     let orig = umem_conf_arc.reserved_frames;
                     let frame_size = umem_conf_arc.frame_size;
-                    let cb_frames = wabrix_base::mailbox::control_block_frames(count as u32, frame_size);
+                    let cb_frames =
+                        wabrix_base::mailbox::control_block_frames(count as u32, frame_size);
                     let scratchpad = orig.saturating_sub(cb_frames);
-                    let per_instance = if count > 0 { scratchpad / count as u32 } else { 0 };
+                    let per_instance = if count > 0 {
+                        scratchpad / count as u32
+                    } else {
+                        0
+                    };
                     let adjusted = cb_frames + per_instance * count as u32;
                     if adjusted != orig {
                         let mut new_conf = (**umem_conf_arc).clone();
@@ -146,7 +151,9 @@ impl SystemBuilder {
         let mut umem_partition_counters: Vec<usize> = vec![0; MAX_UMEM];
 
         // Process workers in order of their IDs for deterministic allocation
-        let sorted_worker_ids: Vec<usize> = (0..num_workers).filter(|&id| self.worker_partitions[id].is_some()).collect();
+        let sorted_worker_ids: Vec<usize> = (0..num_workers)
+            .filter(|&id| self.worker_partitions[id].is_some())
+            .collect();
 
         for worker_id in &sorted_worker_ids {
             let mut worker_parts = Vec::new();
@@ -217,7 +224,8 @@ impl SystemBuilder {
 
         // Initialize UMEMs and Fill/Comp Queues
         // Indexed by group_id (0..MAX_UMEM). None = this group_id not configured.
-        let mut initialized_umems: Vec<Option<(Arc<Umem>, Vec<xsk_rs::FrameDesc>)>> = vec![None; MAX_UMEM];
+        let mut initialized_umems: Vec<Option<(Arc<Umem>, Vec<xsk_rs::FrameDesc>)>> =
+            vec![None; MAX_UMEM];
 
         for (group_id, umem_conf_opt) in self.runtime_umems.iter().enumerate() {
             let umem_conf = match umem_conf_opt {
@@ -301,12 +309,15 @@ impl SystemBuilder {
 
                 let mut initial_descs = Vec::new();
                 if shared_rings.is_none() {
-                    if let Some(registry) = xbricks_system.frame_registries[config.worker_id].as_mut() {
+                    if let Some(registry) =
+                        xbricks_system.frame_registries[config.worker_id].as_mut()
+                    {
                         let mut global_frames = vec![0u32; umem_conf.fq_size as usize];
                         let allocated = registry.allocate_batch_into(group_id, &mut global_frames);
 
                         for &frame in &global_frames[..allocated] {
-                            let (_umem_id, local_idx) = wabrix_base::frame_registry::decode_global_frame(frame);
+                            let (_umem_id, local_idx) =
+                                wabrix_base::frame_registry::decode_global_frame(frame);
                             initial_descs.push(umem_descs[local_idx as usize]);
                         }
                     }
@@ -341,7 +352,11 @@ impl SystemBuilder {
 
                         log::error!("========================================================");
                         log::error!("🔥 FATAL: Kernel rejected AF_XDP Socket Creation!");
-                        log::error!("Interface: {}, Queue: {}", config.interface, config.queue_id);
+                        log::error!(
+                            "Interface: {}, Queue: {}",
+                            config.interface,
+                            config.queue_id
+                        );
                         log::error!("xsk-rs error : {}", e);
                         log::error!("OS Error     : {} (Errno: {})", os_err, raw_code);
 
@@ -376,7 +391,10 @@ impl SystemBuilder {
                             wasm_counts[umem_id] as u32,
                         )?));
                     } else {
-                        log::error!("🔥 Failed to initialize WASM Manager for UMEM {}. Umem not found.", umem_id);
+                        log::error!(
+                            "🔥 Failed to initialize WASM Manager for UMEM {}. Umem not found.",
+                            umem_id
+                        );
                     }
                 }
             }
@@ -390,7 +408,11 @@ impl SystemBuilder {
         }
 
         let num_sockets = xsockets.len();
-        let num_active_workers = xbricks_system.frame_registries.iter().filter(|e| e.is_some()).count();
+        let num_active_workers = xbricks_system
+            .frame_registries
+            .iter()
+            .filter(|e| e.is_some())
+            .count();
         info!(
             "Initialized {} XDP sockets and {} worker frame registries from configuration",
             num_sockets, num_active_workers
@@ -442,16 +464,20 @@ impl SystemBuilder {
             let core_id = CoreId {
                 id: worker.core_id as usize,
             };
-            debug!("Worker {}: creating {} pipeline runners", worker_id, num_pipelines);
+            debug!(
+                "Worker {}: creating {} pipeline runners",
+                worker_id, num_pipelines
+            );
 
             let mut runners = Vec::new();
             for pipeline_instance_cfg in &worker.pipelines {
                 // --- Extract the Node Identities from the blueprint ---
-                let node_identities: Vec<wabrix_base::node_instance_id::NodeInstanceId> = pipeline_instance_cfg
-                    .node_instances
-                    .iter()
-                    .map(|n| n.node_instance_id.clone())
-                    .collect();
+                let node_identities: Vec<wabrix_base::node_instance_id::NodeInstanceId> =
+                    pipeline_instance_cfg
+                        .node_instances
+                        .iter()
+                        .map(|n| n.node_instance_id.clone())
+                        .collect();
 
                 // --- Create a dedicated receiver for this Runner ---
                 let runner_control_rx = ctrl_tx.as_ref().map(|tx| tx.subscribe());
@@ -522,7 +548,10 @@ impl XSocketRegistry {
         let mut map = HashMap::new();
 
         for socket in sockets {
-            let key = (socket.config.interface.clone(), socket.config.queue_id as usize);
+            let key = (
+                socket.config.interface.clone(),
+                socket.config.queue_id as usize,
+            );
             if map.contains_key(&key) {
                 warn!(
                     "Duplicate socket for interface {} queue {}",
@@ -538,7 +567,11 @@ impl XSocketRegistry {
 }
 
 impl crate::pipeline::XSocketRxTxProvider for XSocketRegistry {
-    fn take_rx_socket(&mut self, queue_id: usize, interface: &str) -> Option<Box<dyn BatchRx + Send>> {
+    fn take_rx_socket(
+        &mut self,
+        queue_id: usize,
+        interface: &str,
+    ) -> Option<Box<dyn BatchRx + Send>> {
         let key = (interface.to_string(), queue_id);
         self.sockets
             .get_mut(&key)
@@ -546,7 +579,11 @@ impl crate::pipeline::XSocketRxTxProvider for XSocketRegistry {
             .map(|rx| Box::new(rx) as Box<dyn BatchRx + Send>)
     }
 
-    fn take_tx_socket(&mut self, queue_id: usize, interface: &str) -> Option<Box<dyn BatchTx + Send>> {
+    fn take_tx_socket(
+        &mut self,
+        queue_id: usize,
+        interface: &str,
+    ) -> Option<Box<dyn BatchTx + Send>> {
         let key = (interface.to_string(), queue_id);
         self.sockets
             .get_mut(&key)
@@ -610,7 +647,11 @@ mod tests {
         let frames = registry.allocate_batch(0, 100);
         assert_eq!(frames.len(), 100);
         for &f in &frames {
-            assert_eq!(decode_global_frame(f).0, 0, "frame {f:#010x} must belong to UMEM 0");
+            assert_eq!(
+                decode_global_frame(f).0,
+                0,
+                "frame {f:#010x} must belong to UMEM 0"
+            );
         }
     }
 
@@ -666,7 +707,13 @@ mod tests {
             reserved_frames: 0,
         }));
 
-        let mut registry = FrameRegistry::new(0, vec![(0, partition0), (1, partition1)], queue, bus, configs);
+        let mut registry = FrameRegistry::new(
+            0,
+            vec![(0, partition0), (1, partition1)],
+            queue,
+            bus,
+            configs,
+        );
 
         assert_eq!(registry.total_free_frames(), 6144);
 
@@ -674,14 +721,22 @@ mod tests {
         let frames0 = registry.allocate_batch(0, 4096);
         assert_eq!(frames0.len(), 4096);
         for &f in &frames0 {
-            assert_eq!(decode_global_frame(f).0, 0, "frame {f:#010x} must belong to UMEM 0");
+            assert_eq!(
+                decode_global_frame(f).0,
+                0,
+                "frame {f:#010x} must belong to UMEM 0"
+            );
         }
 
         // All frames from UMEM 1 must decode to umem_id 1
         let frames1 = registry.allocate_batch(1, 2048);
         assert_eq!(frames1.len(), 2048);
         for &f in &frames1 {
-            assert_eq!(decode_global_frame(f).0, 1, "frame {f:#010x} must belong to UMEM 1");
+            assert_eq!(
+                decode_global_frame(f).0,
+                1,
+                "frame {f:#010x} must belong to UMEM 1"
+            );
         }
     }
 
@@ -724,20 +779,34 @@ mod tests {
             reserved_frames: 0,
         }));
 
-        let mut registry = FrameRegistry::new(0, vec![(0, partition0), (1, partition1)], queue, bus, configs);
+        let mut registry = FrameRegistry::new(
+            0,
+            vec![(0, partition0), (1, partition1)],
+            queue,
+            bus,
+            configs,
+        );
 
         // Allocate 10 frames from UMEM 0 — must all decode to umem_id 0
         let frames = registry.allocate_batch(0, 10);
         assert_eq!(frames.len(), 10);
         for &f in &frames {
-            assert_eq!(decode_global_frame(f).0, 0, "frame {f:#010x} must be from UMEM 0");
+            assert_eq!(
+                decode_global_frame(f).0,
+                0,
+                "frame {f:#010x} must be from UMEM 0"
+            );
         }
 
         // Allocate 5 frames from UMEM 1 — must all decode to umem_id 1
         let frames = registry.allocate_batch(1, 5);
         assert_eq!(frames.len(), 5);
         for &f in &frames {
-            assert_eq!(decode_global_frame(f).0, 1, "frame {f:#010x} must be from UMEM 1");
+            assert_eq!(
+                decode_global_frame(f).0,
+                1,
+                "frame {f:#010x} must be from UMEM 1"
+            );
         }
 
         assert_eq!(registry.total_free_frames(), 185); // 200 - 15
@@ -758,7 +827,8 @@ mod tests {
             local_end: 100,
         };
 
-        let mut registry = FrameRegistry::new(0, vec![(0, partition)], queue, bus.clone(), configs.clone());
+        let mut registry =
+            FrameRegistry::new(0, vec![(0, partition)], queue, bus.clone(), configs.clone());
 
         let frames = registry.allocate_batch(0, 10);
         assert_eq!(frames.len(), 10);
@@ -793,7 +863,13 @@ mod tests {
             local_end: 1024,
         };
 
-        let mut registry = FrameRegistry::new(0, vec![(0, merged_partition)], queue, bus.clone(), configs.clone());
+        let mut registry = FrameRegistry::new(
+            0,
+            vec![(0, merged_partition)],
+            queue,
+            bus.clone(),
+            configs.clone(),
+        );
 
         assert_eq!(registry.total_free_frames(), 1024);
 
@@ -820,7 +896,8 @@ mod tests {
             local_end: 10,
         };
 
-        let mut registry = FrameRegistry::new(0, vec![(0, partition)], queue, bus.clone(), configs.clone());
+        let mut registry =
+            FrameRegistry::new(0, vec![(0, partition)], queue, bus.clone(), configs.clone());
 
         let frames = registry.allocate_batch(0, 20); // request more than available
         assert_eq!(frames.len(), 10);
@@ -846,7 +923,8 @@ mod tests {
             local_end: 1024,
         };
 
-        let mut registry = FrameRegistry::new(1, vec![(0, partition)], queue, bus.clone(), configs.clone());
+        let mut registry =
+            FrameRegistry::new(1, vec![(0, partition)], queue, bus.clone(), configs.clone());
 
         assert_eq!(registry.total_free_frames(), 512);
 
@@ -856,7 +934,10 @@ mod tests {
         for &f in &frames {
             let (uid, lidx) = decode_global_frame(f);
             assert_eq!(uid, 0, "frame {f:#010x} must be from UMEM 0");
-            assert!((512..1024).contains(&lidx), "local_idx {lidx} must be in [512, 1024)");
+            assert!(
+                (512..1024).contains(&lidx),
+                "local_idx {lidx} must be in [512, 1024)"
+            );
         }
     }
 }

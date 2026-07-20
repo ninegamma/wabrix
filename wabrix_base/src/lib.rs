@@ -1,19 +1,19 @@
 extern crate alloc;
 extern crate core;
 
-pub mod interface;
-pub mod frame_registry;
-pub mod mailbox;
-pub mod system;
 pub mod common;
-pub mod telemetry;
+pub mod frame_registry;
+pub mod interface;
+pub mod mailbox;
 pub mod node_instance_id;
+pub mod system;
+pub mod telemetry;
 
-use core::fmt::Display;
-use std::sync::Arc;
-use crossbeam_queue::ArrayQueue;
 use crate::frame_registry::MAX_UMEM;
 use crate::interface::batch::Batch;
+use core::fmt::Display;
+use crossbeam_queue::ArrayQueue;
+use std::sync::Arc;
 
 /// Configuration specific to the shared memory region (UMEM).
 /// All sockets in the same group MUST use identical values here.
@@ -51,7 +51,7 @@ impl Drop for RuntimeUmemConfig {
 pub struct UmemPartition {
     pub worker_id: usize,     // Worker thread that owns this partition
     pub umem_group_id: usize, // Memory domain (UMEM group)
-    pub start_idx: u32,       // Absolute global frame index (used by system_builder for layout math)
+    pub start_idx: u32, // Absolute global frame index (used by system_builder for layout math)
     // end_idx is non-inclusive: [start_idx, end_idx)
     pub end_idx: u32, // Absolute global frame index
     /// UMEM-relative start: local_start = start_idx - group_start_frame_idx

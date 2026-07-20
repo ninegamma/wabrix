@@ -1,20 +1,22 @@
 mod metrics_server; // Added the new metrics server module
 
-use std::collections::HashMap;
 use anyhow::Context;
 use clap::Parser;
 use log::{debug, error, info};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use separator::Separatable;
-use tokio::sync::{mpsc, RwLock};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::sync::{mpsc, RwLock};
 
-use wabrix_lib::config::hot_config::SharedSystemState;
-use wabrix_base::ControlEvent;
-use wabrix_lib::probe_kernel_fds;
-use wabrix_base::telemetry::{spawn_telemetry_ice_for_ifaces, spawn_pipeline_telemetry, TMLiveStats};
 use wabrix_base::system::PlatformData;
+use wabrix_base::telemetry::{
+    spawn_pipeline_telemetry, spawn_telemetry_ice_for_ifaces, TMLiveStats,
+};
+use wabrix_base::ControlEvent;
+use wabrix_lib::config::hot_config::SharedSystemState;
+use wabrix_lib::probe_kernel_fds;
 
 #[derive(Debug, Parser)]
 struct Opt {
@@ -50,7 +52,10 @@ async fn main() -> anyhow::Result<()> {
     log::info!("Starting Wabrix Open Source Engine...");
     let opt = Opt::parse();
     let platform_data = PlatformData::detect();
-    info!("TSC frequency: {} Hz", platform_data.tsc_frequency.separated_string());
+    info!(
+        "TSC frequency: {} Hz",
+        platform_data.tsc_frequency.separated_string()
+    );
     wabrix_base::system::probe_xdp_interfaces();
 
     // --- LOAD CONFIGURATION ---
@@ -81,7 +86,9 @@ async fn main() -> anyhow::Result<()> {
         println!("=========================================");
         println!("Wabrix CLI Ready.");
         println!("Prometheus Exporter: http://localhost:9090/metrics");
-        println!("Commands: start, stop, restart, check, run, ctrl <address_pattern> <opcode>, shutdown");
+        println!(
+            "Commands: start, stop, restart, check, run, ctrl <address_pattern> <opcode>, shutdown"
+        );
         println!("=========================================");
 
         while let Ok(Some(line)) = reader.next_line().await {
@@ -153,24 +160,36 @@ async fn main() -> anyhow::Result<()> {
                 };
 
                 // 2. System Checks
-                let worker_cores: Vec<usize> = current_config.wabrix.workers.iter().map(|w| w.core).collect();
-                let interfaces: Vec<String> = current_config.wabrix.ifaces.iter().map(|i| i.name.clone()).collect();
+                let worker_cores: Vec<usize> = current_config
+                    .wabrix
+                    .workers
+                    .iter()
+                    .map(|w| w.core)
+                    .collect();
+                let interfaces: Vec<String> = current_config
+                    .wabrix
+                    .ifaces
+                    .iter()
+                    .map(|i| i.name.clone())
+                    .collect();
                 wabrix_base::system::check_system(&worker_cores, &interfaces);
 
                 // 3. Configure Network Interfaces
                 info!("Configuring network interfaces...");
-                let _configured_ifaces = wabrix_lib::config::interface_setup::check_or_configure_interfaces(
-                    &current_config.wabrix.ifaces,
-                    &current_config.wabrix.xsk,
-                    false,
-                )
-                .context("Failed to configure network interfaces")
-                .unwrap();
+                let _configured_ifaces =
+                    wabrix_lib::config::interface_setup::check_or_configure_interfaces(
+                        &current_config.wabrix.ifaces,
+                        &current_config.wabrix.xsk,
+                        false,
+                    )
+                    .context("Failed to configure network interfaces")
+                    .unwrap();
 
                 // 4. Setup BPF
-                let (interface_skels, _xdp_links) = wabrix_lib::config::configure_bpf::setup_bpf(interfaces.clone())
-                    .context("Failed to setup BPF programs")
-                    .unwrap();
+                let (interface_skels, _xdp_links) =
+                    wabrix_lib::config::configure_bpf::setup_bpf(interfaces.clone())
+                        .context("Failed to setup BPF programs")
+                        .unwrap();
 
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
@@ -185,7 +204,11 @@ async fn main() -> anyhow::Result<()> {
 
                 let xbricks_system = tokio::task::block_in_place(|| {
                     sys_builder
-                        .build(Some(&interface_skels), platform_data.clone(), builder_ctrl_tx)
+                        .build(
+                            Some(&interface_skels),
+                            platform_data.clone(),
+                            builder_ctrl_tx,
+                        )
                         .map_err(|e| anyhow::anyhow!("Failed to build XDP system: {}", e))
                 })?;
 
@@ -206,7 +229,10 @@ async fn main() -> anyhow::Result<()> {
                     .spawn_workers(shutdown.clone(), workers_completed.clone(), false)
                     .context("Failed to spawn worker threads")?;
 
-                info!("All {} worker threads spawned. Data Plane is LIVE.", handles.len());
+                info!(
+                    "All {} worker threads spawned. Data Plane is LIVE.",
+                    handles.len()
+                );
 
                 spawn_telemetry_ice_for_ifaces(
                     telemetry_tx.clone(),
@@ -214,7 +240,11 @@ async fn main() -> anyhow::Result<()> {
                     pipeline_registry.clone(),
                     shutdown.clone(),
                 )?;
-                spawn_pipeline_telemetry(telemetry_tx.clone(), pipeline_registry, shutdown.clone())?;
+                spawn_pipeline_telemetry(
+                    telemetry_tx.clone(),
+                    pipeline_registry,
+                    shutdown.clone(),
+                )?;
 
                 // ==========================================================
                 // WAIT FOR CLI EVENTS OR WORKER COMPLETION WHILE RUNNING
@@ -312,8 +342,18 @@ async fn main() -> anyhow::Result<()> {
                     guard.clone()
                 };
 
-                let worker_cores: Vec<usize> = current_config.wabrix.workers.iter().map(|w| w.core).collect();
-                let interfaces: Vec<String> = current_config.wabrix.ifaces.iter().map(|i| i.name.clone()).collect();
+                let worker_cores: Vec<usize> = current_config
+                    .wabrix
+                    .workers
+                    .iter()
+                    .map(|w| w.core)
+                    .collect();
+                let interfaces: Vec<String> = current_config
+                    .wabrix
+                    .ifaces
+                    .iter()
+                    .map(|i| i.name.clone())
+                    .collect();
                 wabrix_base::system::check_system(&worker_cores, &interfaces);
 
                 info!("Validating pipeline topology...");

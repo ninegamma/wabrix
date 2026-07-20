@@ -1,12 +1,12 @@
-use std::sync::Arc;
+use crate::interface::Pdu;
+use crate::{RuntimeUmemConfig, SystemBus, UmemPartition};
 use core::cell::Cell;
 use core::mem::MaybeUninit;
 use crossbeam_queue::ArrayQueue;
-use xsk_rs::Umem;
 use log::debug;
+use std::sync::Arc;
 use wabrix_api::MAX_BATCH_SIZE;
-use crate::{RuntimeUmemConfig, SystemBus, UmemPartition};
-use crate::interface::Pdu;
+use xsk_rs::Umem;
 
 // Thread-local storage for the worker's frame registry pointer
 // This allows XSocketRx/Tx to access the worker's registry without storing it in each socket
@@ -201,10 +201,14 @@ impl FrameRegistry {
                     // O(1): decode umem_id and local_idx directly
                     let (umem_id, local_idx) = decode_global_frame(global_idx);
 
-                    if let Some(partition_data) = self.registry_map.get_mut(umem_id).and_then(|p| p.as_mut()) {
+                    if let Some(partition_data) =
+                        self.registry_map.get_mut(umem_id).and_then(|p| p.as_mut())
+                    {
                         unsafe {
                             // SAFETY: local_idx is bounds-checked by the stash initializer
-                            *partition_data.refcounts.get_unchecked_mut(local_idx as usize) += 1;
+                            *partition_data
+                                .refcounts
+                                .get_unchecked_mut(local_idx as usize) += 1;
                         }
                     }
                 } else {
@@ -314,7 +318,11 @@ impl FrameRegistry {
 
             to_take
         } else {
-            log::error!("Worker {} tried to alloc from unassigned UMEM {}", self.worker_id, umem_id);
+            log::error!(
+                "Worker {} tried to alloc from unassigned UMEM {}",
+                self.worker_id,
+                umem_id
+            );
             0
         }
     }
@@ -348,7 +356,11 @@ impl FrameRegistry {
 
             frames
         } else {
-            log::error!("Worker {} tried to alloc from unassigned UMEM {}", self.worker_id, umem_id);
+            log::error!(
+                "Worker {} tried to alloc from unassigned UMEM {}",
+                self.worker_id,
+                umem_id
+            );
             Vec::new()
         }
     }
@@ -371,8 +383,8 @@ impl FrameRegistry {
     /// # Returns
     /// A vector of PDUs ready to be filled with packet data
     pub fn allocate_pdus(&mut self, umem_id: usize, count: usize) -> Vec<crate::interface::Pdu> {
-        use xsk_rs::FrameDesc;
         use crate::interface::Pdu;
+        use xsk_rs::FrameDesc;
 
         let umem_config = if let Some(config) = self.umem_configs[umem_id].as_ref() {
             config.clone()
@@ -393,7 +405,11 @@ impl FrameRegistry {
         let active_umem = match self.active_umems[umem_id].as_ref() {
             Some(handle) => handle,
             None => {
-                log::error!("Worker {} lacks physical memory mapping for UMEM {}", self.worker_id, umem_id);
+                log::error!(
+                    "Worker {} lacks physical memory mapping for UMEM {}",
+                    self.worker_id,
+                    umem_id
+                );
                 return Vec::new();
             }
         };
@@ -411,7 +427,13 @@ impl FrameRegistry {
             let frame_addr = (local_idx as usize) << frame_size_log2;
             let desc = FrameDesc::new(frame_addr + headroom);
 
-            let pdu = Pdu::new(desc, frame_idx, self.worker_id as u8, system_bus, frame_size_log2);
+            let pdu = Pdu::new(
+                desc,
+                frame_idx,
+                self.worker_id as u8,
+                system_bus,
+                frame_size_log2,
+            );
 
             pdus.push(pdu);
         }
@@ -423,8 +445,8 @@ impl FrameRegistry {
     /// Writes the PDUs directly into the provided slice.
     /// Returns the number of PDUs successfully allocated.
     pub fn allocate_pdus_into(&mut self, umem_id: usize, dst: &mut [MaybeUninit<Pdu>]) -> usize {
-        use xsk_rs::FrameDesc;
         use crate::interface::Pdu;
+        use xsk_rs::FrameDesc;
 
         // Extract values before the mutable borrow in allocate_batch_into
         let (_umem_base_ptr, frame_size_log2, headroom) = {
@@ -442,7 +464,11 @@ impl FrameRegistry {
             let active_umem = match self.active_umems[umem_id].as_ref() {
                 Some(handle) => handle,
                 None => {
-                    log::error!("Worker {} lacks physical memory mapping for UMEM {}", self.worker_id, umem_id);
+                    log::error!(
+                        "Worker {} lacks physical memory mapping for UMEM {}",
+                        self.worker_id,
+                        umem_id
+                    );
                     return 0;
                 }
             };

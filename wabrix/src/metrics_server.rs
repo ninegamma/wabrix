@@ -58,7 +58,9 @@ pub fn spawn_metrics_server(mut tm_rx: Receiver<TMLiveStats>) {
                     let label_values = &[tmstats_name.as_str(), data_label.as_str()];
 
                     if let Some(&val) = stats.counters_pkts.get(i) {
-                        packets_total.with_label_values(label_values).set(val as i64);
+                        packets_total
+                            .with_label_values(label_values)
+                            .set(val as i64);
                     }
                     if let Some(&val) = stats.counters_bytes.get(i) {
                         bytes_total.with_label_values(label_values).set(val as i64);
@@ -88,7 +90,10 @@ pub fn spawn_metrics_server(mut tm_rx: Receiver<TMLiveStats>) {
         );
 
         let addr = SocketAddr::from(([0, 0, 0, 0], 9090));
-        log::info!("Prometheus Metrics Exporter listening on http://{}/metrics", addr);
+        log::info!(
+            "Prometheus Metrics Exporter listening on http://{}/metrics",
+            addr
+        );
 
         if let Ok(listener) = tokio::net::TcpListener::bind(addr).await {
             if let Err(e) = axum::serve(listener, app).await {

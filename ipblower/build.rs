@@ -1,6 +1,6 @@
+use libbpf_cargo::SkeletonBuilder;
 use std::env;
 use std::path::PathBuf;
-use libbpf_cargo::SkeletonBuilder;
 
 fn main() {
     let out = PathBuf::from(env::var("OUT_DIR").unwrap()).join("ipblower.skel.rs");

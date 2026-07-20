@@ -1,12 +1,12 @@
-use core::{cmp, fmt, slice};
 use core::ptr;
-use std::ops::Add;
+use core::{cmp, fmt, slice};
 use log::trace;
-use xsk_rs::FrameDesc;
+use std::ops::Add;
 use xsk_rs::umem::frame::SegmentLengths;
+use xsk_rs::FrameDesc;
 
-use crate::SystemBus;
 use crate::frame_registry::CMD_BIT;
+use crate::SystemBus;
 use wabrix_api::exports::WPdu;
 
 #[repr(C, align(64))]
@@ -74,7 +74,10 @@ impl Drop for Pdu {
                 if registry.worker_id == (self.owner_id() as usize) {
                     // We are on the owning thread! Bypass the return queue entirely.
                     // Return the memory instantly to the local stash.
-                    trace!("Drop for Pdu: Returning frame {} to local stash", self.global_frame_idx());
+                    trace!(
+                        "Drop for Pdu: Returning frame {} to local stash",
+                        self.global_frame_idx()
+                    );
                     registry.release_local(self.global_frame_idx());
                     return;
                 }
@@ -98,7 +101,10 @@ impl Drop for Pdu {
                     .push(self.global_frame_idx())
                     .is_err()
                 {
-                    log::error!("🔥 CRITICAL: return queue full, frame {} leaked!", self.global_frame_idx());
+                    log::error!(
+                        "🔥 CRITICAL: return queue full, frame {} leaked!",
+                        self.global_frame_idx()
+                    );
                 }
             }
         }
@@ -200,7 +206,10 @@ impl Pdu {
         // .get() returns Option<&Option<usize>>
         // .copied() turns it into Option<Option<usize>>
         // .flatten() turns it into Option<usize>
-        bus.umem_addr.get(self.umem_id() as usize).copied().flatten()
+        bus.umem_addr
+            .get(self.umem_id() as usize)
+            .copied()
+            .flatten()
     }
 
     /// returns pointer to the first byte of the frame this Pdu represents
@@ -403,9 +412,9 @@ impl Pdu {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use alloc::vec;
     use alloc::vec::Vec;
-    use super::*;
     use core::ptr;
     use wabrix_api::exports::Pdu0;
     use wabrix_api::packet::Packet;
@@ -546,7 +555,10 @@ mod tests {
         let header;
         {
             // SAFETY: Pdu and Pdu0 are both repr(C, align(64)) with identical layouts (WPdu + 8-byte pad).
-            let mut packet = Packet::new(unsafe { &mut *(&mut pdu as *mut Pdu as *mut Pdu0) }, umem_base as usize);
+            let mut packet = Packet::new(
+                unsafe { &mut *(&mut pdu as *mut Pdu as *mut Pdu0) },
+                umem_base as usize,
+            );
 
             // 4. Fill Payload with known pattern (0xAA) to verify it stays intact
             unsafe {
@@ -574,7 +586,11 @@ mod tests {
                 initial_payload_len + header_size,
                 "Data length should increase"
             );
-            assert_eq!(packet.headroom(), initial_headroom - header_size, "Headroom should decrease");
+            assert_eq!(
+                packet.headroom(),
+                initial_headroom - header_size,
+                "Headroom should decrease"
+            );
         }
         // B. Verify Address update
         // The new descriptor address should be 256 - 6 = 250
@@ -586,14 +602,20 @@ mod tests {
         );
 
         // SAFETY: same layout as above.
-        let packet = Packet::new(unsafe { &mut *(&mut pdu as *mut Pdu as *mut Pdu0) }, umem_base as usize);
+        let packet = Packet::new(
+            unsafe { &mut *(&mut pdu as *mut Pdu as *mut Pdu0) },
+            umem_base as usize,
+        );
         // C. Verify Memory Content
         unsafe {
             let current_data_ptr = packet.data_ptr();
 
             // 1. Check if Header is written at the new start
             let written_header = *(current_data_ptr as *const TestHeader);
-            assert_eq!(written_header, header, "Header data was not written correctly to memory");
+            assert_eq!(
+                written_header, header,
+                "Header data was not written correctly to memory"
+            );
 
             // 2. Check if original Payload is preserved immediately after the header
             let payload_check_ptr = current_data_ptr.add(header_size);
@@ -613,7 +635,10 @@ mod tests {
         // Create a PDU with ZERO headroom (addr = 0)
         let desc = FrameDesc {
             addr: 0,
-            lengths: SegmentLengths { headroom: 0, data: 100 },
+            lengths: SegmentLengths {
+                headroom: 0,
+                data: 100,
+            },
             options: 0,
         };
 
@@ -623,6 +648,9 @@ mod tests {
 
         // Should fail
         let result = pdu.w.push_header(umem_base as usize, &header);
-        assert!(result.is_err(), "Should return error when headroom is insufficient");
+        assert!(
+            result.is_err(),
+            "Should return error when headroom is insufficient"
+        );
     }
 }

@@ -13,7 +13,13 @@ pub struct NodeInstanceId {
 }
 
 impl NodeInstanceId {
-    pub fn new(index: u32, worker_id: u32, pipeline: String, node_name: String, node_type: String) -> Self {
+    pub fn new(
+        index: u32,
+        worker_id: u32,
+        pipeline: String,
+        node_name: String,
+        node_type: String,
+    ) -> Self {
         Self {
             index,
             worker_id,

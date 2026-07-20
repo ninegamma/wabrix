@@ -1,15 +1,15 @@
 extern crate alloc;
 pub mod allocators;
 pub mod config;
-pub mod xsocket;
-pub mod system_builder;
 pub mod nodes;
 pub mod pipeline;
+pub mod system_builder;
+pub mod xsocket;
 //pub(crate) mod telemetry_logger;
-pub mod toml_parser;
-pub(crate) mod system_runner;
 pub mod generator_node;
+pub(crate) mod system_runner;
 pub mod tcp_node;
+pub mod toml_parser;
 
 // Include the generated BPF skeleton code
 pub mod xscrubber_skel {
@@ -17,10 +17,10 @@ pub mod xscrubber_skel {
 }
 
 // Re-export commonly used types
-pub(crate) use xsocket::XSocket;
-pub use wabrix_base::interface::batch::Batch;
-pub(crate) use crate::system_builder::XSocketRegistry;
 pub use crate::pipeline::{spawn_worker_pipelines, PipelineFactory, PipelineRunner, PipelineStats};
+pub(crate) use crate::system_builder::XSocketRegistry;
+pub use wabrix_base::interface::batch::Batch;
+pub(crate) use xsocket::XSocket;
 
 /// Trait for any node that acts as a packet source (ingress) in the DAG.
 pub trait BatchRx {

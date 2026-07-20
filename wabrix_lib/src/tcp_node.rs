@@ -1,27 +1,28 @@
 use std::mem::{replace, size_of, MaybeUninit};
 use std::ptr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::vec::Vec;
 
-use network_types::eth::EtherType;
 use macaddr::MacAddr6;
+use network_types::eth::EtherType;
 
-use wabrix_base::{ControlEvent, Directive, Node, NodeId};
-use wabrix_base::interface::Pdu;
-use wabrix_base::interface::batch::Batch;
 use wabrix_base::frame_registry::get_worker_frame_registry;
+use wabrix_base::interface::batch::Batch;
+use wabrix_base::interface::Pdu;
+use wabrix_base::{ControlEvent, Directive, Node, NodeId};
 
+use wabrix_api::connections::{ConnectionNode, ConnectionPool, FlowKey, TcpState};
 use wabrix_api::headers::{IpHeader, MacHeader, TcpHeader};
 use wabrix_api::helpers::{parse_ip, parse_mac, parse_suffixed_number, update_tcp_checksum};
-use wabrix_api::{PluginOpcode, StandardOpcode};
-use wabrix_api::connections::{ConnectionNode, ConnectionPool, FlowKey, TcpState};
 use wabrix_api::MAX_BATCH_SIZE;
+use wabrix_api::{PluginOpcode, StandardOpcode};
 
 use wabrix_api::tcp_common::{
-    EngineConfig, SynGenerator, TimeoutStack, run_tcp_state_machine, write_tcp_reply, FLAG_ACK, FLAG_FIN, FLAG_RST,
-    FLAG_SYN, PORT_START_RANGE, PORT_END_RANGE, STAT_COUNT, STAT_DROP, STAT_RECV_RST, STAT_RECV_SYN, STAT_SENT_FIN,
-    STAT_SENT_RST, STAT_SENT_SYN, STAT_SENT_SYNACK, STAT_TO_LINUX, STAT_UNEXPECTED,
+    run_tcp_state_machine, write_tcp_reply, EngineConfig, SynGenerator, TimeoutStack, FLAG_ACK,
+    FLAG_FIN, FLAG_RST, FLAG_SYN, PORT_END_RANGE, PORT_START_RANGE, STAT_COUNT, STAT_DROP,
+    STAT_RECV_RST, STAT_RECV_SYN, STAT_SENT_FIN, STAT_SENT_RST, STAT_SENT_SYN, STAT_SENT_SYNACK,
+    STAT_TO_LINUX, STAT_UNEXPECTED,
 };
 
 const MAX_CONNECTIONS: usize = 524_288;
@@ -272,8 +273,13 @@ impl Node for TcpNode {
             }
 
             let current_tsc = self.current_tsc;
-            let route =
-                handle_tcp_packet(&mut pdu, &mut self.connections, &self.config, &mut self.stats, current_tsc) as usize;
+            let route = handle_tcp_packet(
+                &mut pdu,
+                &mut self.connections,
+                &self.config,
+                &mut self.stats,
+                current_tsc,
+            ) as usize;
 
             if route < num_routes {
                 self.output_batches[route].push(pdu).ok();
@@ -411,7 +417,8 @@ impl Node for TcpNode {
             return Directive::Stop;
         }
         let frame_registry = unsafe { &mut *registry_ptr };
-        let allocated = frame_registry.allocate_pdus_into(self.umem_group_id, &mut self.scratch_pdus[..frames_needed]);
+        let allocated = frame_registry
+            .allocate_pdus_into(self.umem_group_id, &mut self.scratch_pdus[..frames_needed]);
         if allocated == 0 {
             return Directive::Stop;
         }
@@ -503,7 +510,11 @@ impl Node for TcpNode {
             frame_idx += 1;
 
             self.syn_gen.syns_sent += 1;
-            self.syn_gen.prng_state = self.syn_gen.prng_state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            self.syn_gen.prng_state = self
+                .syn_gen
+                .prng_state
+                .wrapping_mul(1_664_525)
+                .wrapping_add(1_013_904_223);
             let isn = self.syn_gen.prng_state;
 
             let src_port = self.syn_gen.port_counter;
@@ -520,8 +531,13 @@ impl Node for TcpNode {
             let dst_port = 80u16;
             let their_ip = u32::from_be_bytes(self.config.dst_ip.unwrap_or([0, 0, 0, 0]));
             let flow_key = FlowKey(their_ip, dst_port, our_ip, src_port);
-            self.connections
-                .insert(flow_key, TcpState::SynSent, isn.wrapping_add(1), 0, current_tsc);
+            self.connections.insert(
+                flow_key,
+                TcpState::SynSent,
+                isn.wrapping_add(1),
+                0,
+                current_tsc,
+            );
 
             let data_ptr = pdu.data_address(0);
             let len = write_tcp_reply(
@@ -668,7 +684,11 @@ fn handle_tcp_packet(
             action_opt = Some((FLAG_SYN | FLAG_ACK, initial_snd_nxt, rcv_nxt));
         } else {
             inc_stat!(STAT_UNEXPECTED);
-            let reply_seq = if tcp_flags & FLAG_ACK != 0 { ack_num } else { 0 };
+            let reply_seq = if tcp_flags & FLAG_ACK != 0 {
+                ack_num
+            } else {
+                0
+            };
             let reply_ack = seq_num
                 .wrapping_add(payload_len)
                 .wrapping_add(if tcp_flags & FLAG_FIN != 0 { 1 } else { 0 });

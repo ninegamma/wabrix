@@ -1,13 +1,13 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
-use core_affinity::CoreId;
-use log::{info};
-use tokio::task::JoinHandle;
-use xsk_rs::Umem;
-use wabrix_base::frame_registry::FrameRegistry;
 use crate::{PipelineStats, XSocketRegistry};
+use core_affinity::CoreId;
+use log::info;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::Arc;
+use tokio::task::JoinHandle;
+use wabrix_base::frame_registry::FrameRegistry;
 use wabrix_base::system::PlatformData;
 use wabrix_base::telemetry::TelemetryRegistry;
+use xsk_rs::Umem;
 
 pub struct XBricksSystem {
     pub(crate) xsocket_registry: XSocketRegistry,

@@ -1,19 +1,19 @@
 // src/xsocket.rs
 
+use crate::{probe_kernel_fds, Batch, BatchRx, BatchTx};
+use core::mem::MaybeUninit;
+use log::{debug, trace, warn};
+use spin::Mutex;
 use std::ffi::CString;
+use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
+use std::sync::Arc;
 use wabrix_base::common::formatting::PreciseSeparator;
 use wabrix_base::interface::Pdu;
-use crate::{probe_kernel_fds, Batch, BatchRx, BatchTx};
-use log::{debug, trace, warn};
-use core::mem::MaybeUninit;
-use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
-use std::sync::{Arc};
 use xsk_rs::config::SocketConfig;
-use xsk_rs::socket::{XdpStatistics};
+use xsk_rs::config::{BindFlags, Interface, LibxdpFlags, QueueSize, XdpFlags};
+use xsk_rs::socket::XdpStatistics;
 use xsk_rs::umem::frame::Data;
 use xsk_rs::{CompQueue, FillQueue, FrameDesc, RxQueue, Socket, TxQueue, Umem};
-use xsk_rs::config::{BindFlags, Interface, LibxdpFlags, QueueSize, XdpFlags};
-use spin::Mutex;
 
 const LOG_INTERVAL_C_F_QUEUE_PACKETS: usize = 100;
 
@@ -110,7 +110,8 @@ impl XSocket {
         // these are only needed for sockets bound to the same interface and queue
         shared_rings: Option<(Arc<Mutex<FillQueue>>, Arc<Mutex<CompQueue>>)>,
         initial_descs: Vec<FrameDesc>,
-    ) -> Result<(Self, Arc<Mutex<FillQueue>>, Arc<Mutex<CompQueue>>), Box<dyn std::error::Error>> {
+    ) -> Result<(Self, Arc<Mutex<FillQueue>>, Arc<Mutex<CompQueue>>), Box<dyn std::error::Error>>
+    {
         let mut bind_flags = BindFlags::XDP_USE_NEED_WAKEUP;
         if config.zerocopy {
             bind_flags |= BindFlags::XDP_ZEROCOPY;
@@ -143,7 +144,10 @@ impl XSocket {
                 }
             }
             _ => {
-                log::warn!("Unknown XDP mode '{}', defaulting to native/driver mode", config.xdp_mode);
+                log::warn!(
+                    "Unknown XDP mode '{}', defaulting to native/driver mode",
+                    config.xdp_mode
+                );
                 XdpFlags::XDP_FLAGS_DRV_MODE
             }
         };
@@ -161,7 +165,8 @@ impl XSocket {
         let iface_handle = Interface::new(c_iface);
 
         probe_kernel_fds("PRE Socket::new");
-        let (tx_q, rx_q, queues_opt) = unsafe { Socket::new(socket_config, &umem, &iface_handle, config.queue_id)? };
+        let (tx_q, rx_q, queues_opt) =
+            unsafe { Socket::new(socket_config, &umem, &iface_handle, config.queue_id)? };
         probe_kernel_fds("POST Socket::new");
 
         // 3. Resolve Fill/Comp Queues
@@ -177,7 +182,8 @@ impl XSocket {
             }
             (existing_fq, existing_cq)
         } else {
-            let (raw_fq, raw_cq) = queues_opt.ok_or("Primary socket failed to return Fill/Comp queues")?;
+            let (raw_fq, raw_cq) =
+                queues_opt.ok_or("Primary socket failed to return Fill/Comp queues")?;
             (Arc::new(Mutex::new(raw_fq)), Arc::new(Mutex::new(raw_cq)))
         };
 
@@ -339,13 +345,15 @@ impl XSocket {
     }
 }
 
-use wabrix_base::system::rdtsc_us;
-use rustix::event::{PollFd, PollFlags, poll};
+use rustix::event::{poll, PollFd, PollFlags};
 use rustix::io::Errno;
 use separator::Separatable;
 use wabrix_api::MAX_BATCH_SIZE;
+use wabrix_base::frame_registry::{
+    decode_global_frame, encode_global_frame, get_tsc_frequency, get_worker_frame_registry,
+};
+use wabrix_base::system::rdtsc_us;
 use wabrix_base::{RuntimeUmemConfig, SystemBus};
-use wabrix_base::frame_registry::{get_tsc_frequency, get_worker_frame_registry, encode_global_frame, decode_global_frame};
 
 impl XSocketRx {
     /// Returns the UMEM group ID for this socket
@@ -356,7 +364,9 @@ impl XSocketRx {
 
     #[cfg(feature = "profiling")]
     pub fn get_replenish_avg_cycles(&self) -> u64 {
-        self.prof_replenish_cycles.checked_div(self.prof_replenish_calls).unwrap_or(0)
+        self.prof_replenish_cycles
+            .checked_div(self.prof_replenish_calls)
+            .unwrap_or(0)
     }
 
     #[cfg(feature = "profiling")]
@@ -391,7 +401,10 @@ impl XSocketRx {
         // Call poll with 0 timeout (non-blocking check).
         // This instantly kicks the kernel driver to check the Fill Queue.
         use rustix::time::Timespec;
-        let timeout = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let timeout = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         poll(&mut poll_fds, Some(&timeout))?;
 
         Ok(())
@@ -522,7 +535,8 @@ impl XSocketRx {
         if needs_wakeup {
             // NOTE: This syscall will still cost ~1,500 cycles when it triggers,
             // but it is legally required by the Intel driver to wake it up.
-            self.wakeup_fill_queue_force().expect("wakeup_fill_queue_force() failed");
+            self.wakeup_fill_queue_force()
+                .expect("wakeup_fill_queue_force() failed");
         }
 
         let t5 = unsafe { std::arch::x86_64::_rdtsc() };
@@ -532,7 +546,10 @@ impl XSocketRx {
             // CRITICAL FIX: Only release un-pushed frames up to `actual_batch`
             if produced < actual_batch {
                 for &frame_idx in &self.scratch_frames[produced..actual_batch] {
-                    trace!("replenish_fill_queue: Returning frame {} to local stash", frame_idx);
+                    trace!(
+                        "replenish_fill_queue: Returning frame {} to local stash",
+                        frame_idx
+                    );
                     frame_registry.release_local(frame_idx);
                 }
             }
@@ -601,7 +618,10 @@ impl XSocketRx {
 
                 // Only print if the spike is absurdly high (e.g., > 50,000 cycles)
                 if duration > 50_000 {
-                    log::warn!("MONSTER SPIKE DETECTED: Replenish took {} cycles!", duration);
+                    log::warn!(
+                        "MONSTER SPIKE DETECTED: Replenish took {} cycles!",
+                        duration
+                    );
                     log::info!(
                         "\n=== Replenish X-Ray (Cycles) ===\n\
                  Lock      : {}\n\
@@ -651,7 +671,10 @@ impl BatchRx for XSocketRx {
         // every 32 loops, OR if we are getting dangerously low on free frames.
         if self.empty_spins.is_multiple_of(32) || frame_registry.total_free_frames() < 8192 {
             if frame_registry.total_free_frames() < 8192 {
-                log::warn!("total_free_frames is too low: {}", frame_registry.total_free_frames());
+                log::warn!(
+                    "total_free_frames is too low: {}",
+                    frame_registry.total_free_frames()
+                );
             }
             frame_registry.process_returns();
         }
@@ -697,7 +720,8 @@ impl BatchRx for XSocketRx {
         // We slice into the buffer we already own. Zero memory allocation, zero memset overhead!
         // Lock the queue. It is uncontended, so it takes ~15 cycles.
         let mut rx_guard = self.rx_queue.lock();
-        let mut rcvd = unsafe { rx_guard.consume(&mut self.scratch_descriptors_recv_batch[..max_to_pull]) };
+        let mut rcvd =
+            unsafe { rx_guard.consume(&mut self.scratch_descriptors_recv_batch[..max_to_pull]) };
 
         #[cfg(feature = "profiling")]
         let t2 = unsafe { core::arch::x86_64::_rdtsc() };
@@ -723,7 +747,8 @@ impl BatchRx for XSocketRx {
                 log::debug!(
                     "**** Traffic burst ended after ~ {} cycles ({} us)",
                     (now - self.prof_burst_start).separated_string(),
-                    (((now - self.prof_burst_start) as f64 * (1_000_000.0 / get_tsc_frequency() as f64)) as u64)
+                    (((now - self.prof_burst_start) as f64
+                        * (1_000_000.0 / get_tsc_frequency() as f64)) as u64)
                         .separated_string()
                 );
             }
@@ -737,7 +762,10 @@ impl BatchRx for XSocketRx {
                 if let Some(fq) = self.fill_queue.try_lock() {
                     if fq.needs_wakeup() {
                         self.wakeup_rx_queue()?;
-                        rcvd = unsafe { rx_guard.consume(&mut self.scratch_descriptors_recv_batch[..max_to_pull]) };
+                        rcvd = unsafe {
+                            rx_guard
+                                .consume(&mut self.scratch_descriptors_recv_batch[..max_to_pull])
+                        };
                     }
                 }
             }
@@ -939,7 +967,14 @@ impl BatchTx for XSocketTx {
         if free_slots == 0 {
             // The ring is completely jammed. Force a kernel wakeup to try and clear it.
             unsafe {
-                libc::sendto(self.fd, core::ptr::null(), 0, libc::MSG_DONTWAIT, core::ptr::null_mut(), 0);
+                libc::sendto(
+                    self.fd,
+                    core::ptr::null(),
+                    0,
+                    libc::MSG_DONTWAIT,
+                    core::ptr::null_mut(),
+                    0,
+                );
             }
             log::warn!(
                 "🔥 [TX SATURATED] Worker {} Queue {}: TX Ring is 100% full! (Batch size: {}). Wasm engine is outrunning the hardware.",
@@ -1059,7 +1094,14 @@ impl BatchTx for XSocketTx {
             // silently go to sleep. We force a syscall to guarantee it transmits.
             if valid_to_send < 16 {
                 unsafe {
-                    libc::sendto(self.fd, core::ptr::null(), 0, libc::MSG_DONTWAIT, core::ptr::null_mut(), 0);
+                    libc::sendto(
+                        self.fd,
+                        core::ptr::null(),
+                        0,
+                        libc::MSG_DONTWAIT,
+                        core::ptr::null_mut(),
+                        0,
+                    );
                 }
             }
 
@@ -1194,7 +1236,10 @@ impl XSocketTx {
                     (*registry_ptr).release_local(frame_idx);
                     return;
                 } else {
-                    log::warn!("Worker {}: Frame registry ptr is null!", self.config.worker_id);
+                    log::warn!(
+                        "Worker {}: Frame registry ptr is null!",
+                        self.config.worker_id
+                    );
                 }
             }
         }
@@ -1207,7 +1252,10 @@ impl XSocketTx {
             owner
         );
         if self.bus.bus_senders[owner].push(frame_idx).is_err() {
-            log::error!("🔥 CRITICAL: return queue full, frame {} leaked!", frame_idx);
+            log::error!(
+                "🔥 CRITICAL: return queue full, frame {} leaked!",
+                frame_idx
+            );
         }
     }
 

@@ -1,15 +1,15 @@
+use crate::wasm_manager::{MyHostState, WasmManager}; // Assuming WasmManager is defined here
+use crossbeam_channel::Sender;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use crate::wasm_manager::{MyHostState, WasmManager}; // Assuming WasmManager is defined here
-use wasmtime::Store;
-use wasmtime::component::{bindgen, ResourceTable};
-use wasmtime_wasi::WasiCtxBuilder;
-use wabrix_base::{Directive, Node, NodeId};
+use wabrix_api::TELEMETRY_FLAG;
 use wabrix_base::interface::batch::Batch;
 use wabrix_base::interface::Pdu;
 use wabrix_base::telemetry::TelemetryMetrics;
-use crossbeam_channel::Sender;
-use wabrix_api::TELEMETRY_FLAG;
+use wabrix_base::{Directive, Node, NodeId};
+use wasmtime::component::{bindgen, ResourceTable};
+use wasmtime::Store;
+use wasmtime_wasi::WasiCtxBuilder;
 
 // 1. Generate bindings.
 // Note: `async: true` is required to use `instantiate_async` and `call_async`
@@ -58,7 +58,9 @@ impl WasmInspectorNode {
     ) -> Self {
         // 1. Fetch the Component from the Manager's DashMap cache
         // This takes nanoseconds if already loaded, avoiding disk I/O.
-        let component = manager.get_component(wasm_file_path).expect("Failed to load Wasm component");
+        let component = manager
+            .get_component(wasm_file_path)
+            .expect("Failed to load Wasm component");
 
         // 2. Build the partition-specific UmemHandle for this instance.
         //    WASM address 0 will map to `umem_base + partition_start_bytes`.
@@ -70,7 +72,10 @@ impl WasmInspectorNode {
         manager.set_instantiation_handle(partition_handle.clone());
 
         // 4. Initialize the WASI Context for THIS specific node
-        let wasi_ctx = WasiCtxBuilder::new().inherit_stdout().inherit_stderr().build();
+        let wasi_ctx = WasiCtxBuilder::new()
+            .inherit_stdout()
+            .inherit_stderr()
+            .build();
 
         // 5. Create the Store
         // This is where the magic happens: Wasmtime calls our `XdpMemoryCreator`
@@ -154,7 +159,8 @@ impl Node for WasmInspectorNode {
         // (a shared reference into `batch`) is dropped before we restore desc_addr.
         let action_vector = {
             // View the Host Batch as a raw byte slice
-            let batch_bytes: &[u8] = unsafe { std::slice::from_raw_parts(batch.as_ptr(), active_bytes) };
+            let batch_bytes: &[u8] =
+                unsafe { std::slice::from_raw_parts(batch.as_ptr(), active_bytes) };
 
             self.bindings
                 .wabrix_plugins_inspector()
@@ -175,8 +181,14 @@ impl Node for WasmInspectorNode {
 
         // PREPARE DYNAMIC OUTPUTS
         let num_routes = self.routing_table.len();
-        log::trace!("NODE {}: Routing table has {} available routes.", self.id, num_routes);
-        let mut outputs: Vec<Batch> = std::iter::repeat_with(Batch::new).take(num_routes).collect();
+        log::trace!(
+            "NODE {}: Routing table has {} available routes.",
+            self.id,
+            num_routes
+        );
+        let mut outputs: Vec<Batch> = std::iter::repeat_with(Batch::new)
+            .take(num_routes)
+            .collect();
 
         // We need an iterator index to match PDUs to the Wasm Action Vector
         let mut pdu_index = 0;
@@ -204,7 +216,8 @@ impl Node for WasmInspectorNode {
             // 1. HIGH VOLUME (Atomics) -> Cost: ~10 cycles
             // (Assuming telemetry_metrics is thread-local to this worker!)
             if telemetry_bucket < self.telemetry_metrics.counters_pkts.len() {
-                self.telemetry_metrics.counters_pkts[telemetry_bucket].fetch_add(1, Ordering::Relaxed);
+                self.telemetry_metrics.counters_pkts[telemetry_bucket]
+                    .fetch_add(1, Ordering::Relaxed);
                 self.telemetry_metrics.counters_bytes[telemetry_bucket]
                     .fetch_add(pdu.w.data_len() as u64, Ordering::Relaxed);
             }
@@ -221,7 +234,12 @@ impl Node for WasmInspectorNode {
             */
             // invalid route ID: pdu remains in batch, and maybe dropped later
             if route_id >= num_routes {
-                log::warn!("NODE {}: Invalid Route ID {} for Pkt [{}].", self.id, route_id, pdu_index);
+                log::warn!(
+                    "NODE {}: Invalid Route ID {} for Pkt [{}].",
+                    self.id,
+                    route_id,
+                    pdu_index
+                );
                 usize::MAX
             } else {
                 route_id

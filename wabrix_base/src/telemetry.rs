@@ -1,9 +1,9 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use serde::{Serialize, Deserialize};
-use tokio::sync::broadcast::Sender;
+use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::broadcast::Sender;
 use ts_rs::TS;
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
@@ -38,7 +38,9 @@ pub struct TelemetryRegistry {
 
 impl TelemetryRegistry {
     pub fn new() -> Self {
-        Self { metrics: Vec::new() }
+        Self {
+            metrics: Vec::new(),
+        }
     }
 
     pub fn register(
@@ -99,9 +101,20 @@ pub fn spawn_pipeline_telemetry(
         let aggregate = || {
             let mut seen: Vec<AggregatedMetric> = Vec::new();
             for metrics in registry.get_metrics() {
-                let pkts: Vec<u64> = metrics.counters_pkts.iter().map(|c| c.load(Ordering::Relaxed)).collect();
-                let bytes: Vec<u64> = metrics.counters_bytes.iter().map(|c| c.load(Ordering::Relaxed)).collect();
-                let active = metrics.active_flag.as_ref().map(|f| f.load(Ordering::Relaxed));
+                let pkts: Vec<u64> = metrics
+                    .counters_pkts
+                    .iter()
+                    .map(|c| c.load(Ordering::Relaxed))
+                    .collect();
+                let bytes: Vec<u64> = metrics
+                    .counters_bytes
+                    .iter()
+                    .map(|c| c.load(Ordering::Relaxed))
+                    .collect();
+                let active = metrics
+                    .active_flag
+                    .as_ref()
+                    .map(|f| f.load(Ordering::Relaxed));
 
                 if let Some(entry) = seen.iter_mut().find(|(id, ..)| id == &metrics.node_id) {
                     for (acc, v) in entry.1.iter_mut().zip(pkts.iter()) {
@@ -117,7 +130,13 @@ pub fn spawn_pipeline_telemetry(
                         (None, None) => None,
                     };
                 } else {
-                    seen.push((metrics.node_id.clone(), pkts, bytes, metrics.labels.clone(), active));
+                    seen.push((
+                        metrics.node_id.clone(),
+                        pkts,
+                        bytes,
+                        metrics.labels.clone(),
+                        active,
+                    ));
                 }
             }
             seen
@@ -188,10 +207,14 @@ pub fn spawn_pipeline_telemetry(
                 }
 
                 // Store current vectors for the next tick's delta calculation
-                rate_tracker.insert(node_id.clone(), (now, counters_pkts.clone(), counters_bytes.clone()));
+                rate_tracker.insert(
+                    node_id.clone(),
+                    (now, counters_pkts.clone(), counters_bytes.clone()),
+                );
                 // Use the explicit active flag when available; fall back to the
                 // "any pkt counter > 0" heuristic for nodes that don't register one.
-                let is_active_run = active_flag.unwrap_or_else(|| counters_pkts.iter().any(|&v| v > 0));
+                let is_active_run =
+                    active_flag.unwrap_or_else(|| counters_pkts.iter().any(|&v| v > 0));
                 let stats = TMLiveStats {
                     tmstats_name: node_id,
                     labels,
@@ -229,7 +252,12 @@ pub fn spawn_telemetry_ice_for_ifaces(
             .unwrap_or(false);
 
         if is_ice {
-            spawn_telemetry_ice(telemetry_tx.clone(), iface.clone(), registry.clone(), shutdown_signal.clone())?;
+            spawn_telemetry_ice(
+                telemetry_tx.clone(),
+                iface.clone(),
+                registry.clone(),
+                shutdown_signal.clone(),
+            )?;
         }
     }
     Ok(())
@@ -466,9 +494,9 @@ pub fn spawn_telemetry_ice(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use std::path::PathBuf;
     use ts_rs::Config;
-    use super::*;
 
     #[test]
     fn check_env() {

@@ -1,14 +1,18 @@
 mod configure_bpf;
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use clap::{Parser, ArgAction};
+use clap::{ArgAction, Parser};
 use log::info;
 use separator::Separatable;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use wabrix_base::system::{get_nic_tx_packets_detailed, PacketStats, PlatformData};
 
 #[derive(Debug, Parser)]
-#[command(author, version, about = "High-performance packet generator using AF_XDP")]
+#[command(
+    author,
+    version,
+    about = "High-performance packet generator using AF_XDP"
+)]
 struct Opt {
     /// Interface name (e.g., eth0 or enp114s0f1)
     #[arg(short = 'i', long)]
@@ -62,7 +66,10 @@ fn print_nic_stats_with_delta(interface: &str, initial_stats: Option<PacketStats
         // Show difference from initial values
         if let Some(initial) = initial_stats {
             let total_diff = final_stats.total.saturating_sub(initial.total);
-            println!("\nNIC tx_packets delta (from start): {}", total_diff.separated_string());
+            println!(
+                "\nNIC tx_packets delta (from start): {}",
+                total_diff.separated_string()
+            );
 
             if let (Some(final_u), Some(initial_u)) = (final_stats.unicast, initial.unicast) {
                 let diff = final_u.saturating_sub(initial_u);
@@ -89,8 +96,16 @@ fn parse_dst_config(dst: Option<&str>) -> (Option<&str>, Option<&str>) {
                 let ip_part = &s[..dash_pos];
                 let mac_part = &s[dash_pos + 1..];
 
-                let ip = if ip_part.is_empty() { None } else { Some(ip_part) };
-                let mac = if mac_part.is_empty() { None } else { Some(mac_part) };
+                let ip = if ip_part.is_empty() {
+                    None
+                } else {
+                    Some(ip_part)
+                };
+                let mac = if mac_part.is_empty() {
+                    None
+                } else {
+                    Some(mac_part)
+                };
 
                 (ip, mac)
             } else {
@@ -114,7 +129,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let platform_data = PlatformData::detect();
-    info!("TSC frequency: {} Hz", platform_data.tsc_frequency.separated_string());
+    info!(
+        "TSC frequency: {} Hz",
+        platform_data.tsc_frequency.separated_string()
+    );
     let toml_data = r#"
     [wabrix]
     ifaces = [ { name = "lo"} ]"#;
@@ -142,15 +160,28 @@ async fn main() -> anyhow::Result<()> {
 
     // --- SYSTEM CHECKS ---
     let worker_cores: Vec<usize> = config.wabrix.workers.iter().map(|w| w.core).collect();
-    let interfaces: Vec<String> = config.wabrix.ifaces.iter().map(|i| i.name.clone()).collect();
+    let interfaces: Vec<String> = config
+        .wabrix
+        .ifaces
+        .iter()
+        .map(|i| i.name.clone())
+        .collect();
     wabrix_base::system::check_system(&worker_cores, &interfaces);
 
     // --- CONFIGURE NETWORK INTERFACES ---
     info!("Configuring network interfaces...");
-    let _configured_ifaces =
-        wabrix_lib::config::interface_setup::check_or_configure_interfaces(&config.wabrix.ifaces, &config.wabrix.xsk, true)?;
+    let _configured_ifaces = wabrix_lib::config::interface_setup::check_or_configure_interfaces(
+        &config.wabrix.ifaces,
+        &config.wabrix.xsk,
+        true,
+    )?;
 
-    let unique_ifaces: Vec<String> = config.wabrix.ifaces.iter().map(|i| i.name.clone()).collect();
+    let unique_ifaces: Vec<String> = config
+        .wabrix
+        .ifaces
+        .iter()
+        .map(|i| i.name.clone())
+        .collect();
 
     // we must keep _xdp_links alive for the lifetime of the program
     let (_interface_skels, _xdp_links) = configure_bpf::setup_bpf(unique_ifaces)?;
@@ -185,7 +216,8 @@ async fn main() -> anyhow::Result<()> {
         total_workers, total_workers
     );
 
-    let handles = xbricks_system.spawn_workers(shutdown.clone(), workers_completed.clone(), true)?;
+    let handles =
+        xbricks_system.spawn_workers(shutdown.clone(), workers_completed.clone(), true)?;
 
     info!(
         "Spawned {} worker thread handles. Waiting for completion or Ctrl-C...",
@@ -206,7 +238,10 @@ async fn main() -> anyhow::Result<()> {
                 last_reported = completed;
             }
             if completed >= total_workers {
-                info!("All {} workers have finished generating packets", total_workers);
+                info!(
+                    "All {} workers have finished generating packets",
+                    total_workers
+                );
                 shutdown_clone.store(true, Ordering::Release);
                 // Give workers a moment to see the shutdown flag
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -256,13 +291,20 @@ async fn main() -> anyhow::Result<()> {
 
                         if let Some(burst_cycles) = node_stat.burst_duration_cycles {
                             if burst_cycles > 0 {
-                                max_burst_duration_cycles = max_burst_duration_cycles.max(burst_cycles);
-                                info!("      Burst duration (TSC): {} cycles", burst_cycles.separated_string());
+                                max_burst_duration_cycles =
+                                    max_burst_duration_cycles.max(burst_cycles);
+                                info!(
+                                    "      Burst duration (TSC): {} cycles",
+                                    burst_cycles.separated_string()
+                                );
                             }
                         }
                         if let Some(burst_dur) = node_stat.burst_duration {
                             max_burst_duration = max_burst_duration.max(burst_dur);
-                            info!("      Burst duration (time): {:.6} seconds", burst_dur.as_secs_f64());
+                            info!(
+                                "      Burst duration (time): {:.6} seconds",
+                                burst_dur.as_secs_f64()
+                            );
                         }
                     }
 
@@ -303,10 +345,14 @@ async fn main() -> anyhow::Result<()> {
     println!("Total packets: {}", total_packets.separated_string());
     println!("Runtime: {:.3} seconds", elapsed_secs);
     if max_burst_duration.as_secs_f64() > 0.0 {
-        println!("Burst duration (time): {:.6} seconds", max_burst_duration.as_secs_f64());
+        println!(
+            "Burst duration (time): {:.6} seconds",
+            max_burst_duration.as_secs_f64()
+        );
     }
     if max_burst_duration_cycles > 0 {
-        let burst_duration_cycles_secs = max_burst_duration_cycles as f64 / platform_data.tsc_frequency as f64;
+        let burst_duration_cycles_secs =
+            max_burst_duration_cycles as f64 / platform_data.tsc_frequency as f64;
         println!(
             "Burst duration (TSC): {:.6} seconds ({} cycles)",
             burst_duration_cycles_secs,

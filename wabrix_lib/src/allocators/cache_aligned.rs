@@ -1,4 +1,4 @@
-use std::alloc::{self, Layout, alloc_zeroed};
+use std::alloc::{self, alloc_zeroed, Layout};
 use std::fmt;
 use std::mem::{align_of, size_of};
 use std::ops::{Deref, DerefMut};
@@ -42,7 +42,10 @@ impl<T: Sized> Drop for CacheAligned<T> {
             // Drop the contained value first
             ptr::drop_in_place(self.ptr.as_ptr());
             // Then deallocate the memory with the same layout
-            alloc::dealloc(self.ptr.as_ptr() as *mut u8, cache_aligned_layout_for::<T>());
+            alloc::dealloc(
+                self.ptr.as_ptr() as *mut u8,
+                cache_aligned_layout_for::<T>(),
+            );
         }
     }
 }

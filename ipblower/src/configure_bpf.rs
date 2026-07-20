@@ -1,11 +1,11 @@
 // src/config/configure_bpf.rs
-use log::{debug, error, info};
-use libbpf_rs::Link;
+use anyhow::Result;
 use libbpf_rs::skel::{OpenSkel, SkelBuilder};
+use libbpf_rs::Link;
+use log::{debug, error, info};
+use std::collections::HashMap;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
-use std::collections::HashMap;
-use anyhow::Result;
 
 // Include the generated BPF skeleton code
 pub mod ipblower_skel {
@@ -18,7 +18,9 @@ use ipblower_skel::{IpblowerSkel, IpblowerSkelBuilder};
 /// Set up BPF programs for the specified interfaces
 /// Returns a map of interface names to their BPF skeletons and the XDP links
 #[allow(clippy::type_complexity)]
-pub fn setup_bpf(unique_ifaces: Vec<String>) -> Result<(HashMap<String, Arc<IpblowerSkel<'static>>>, Vec<Link>)> {
+pub fn setup_bpf(
+    unique_ifaces: Vec<String>,
+) -> Result<(HashMap<String, Arc<IpblowerSkel<'static>>>, Vec<Link>)> {
     // Instead of one global skeleton, we store one per interface.
     // Key: Interface Name -> Value: Arc<Skeleton>
     let mut interface_skels: HashMap<String, Arc<IpblowerSkel<'static>>> = HashMap::new();
@@ -37,7 +39,10 @@ pub fn setup_bpf(unique_ifaces: Vec<String>) -> Result<(HashMap<String, Arc<Ipbl
 
     // Iterate over UNIQUE interfaces from the config
     for iface_name in unique_ifaces {
-        info!("Loading dedicated BPF skeleton for interface: {}", iface_name);
+        info!(
+            "Loading dedicated BPF skeleton for interface: {}",
+            iface_name
+        );
 
         // Load a FRESH skeleton instance for this interface
         let builder = IpblowerSkelBuilder::default();
@@ -50,7 +55,10 @@ pub fn setup_bpf(unique_ifaces: Vec<String>) -> Result<(HashMap<String, Arc<Ipbl
             let c_name = std::ffi::CString::new(iface_name.as_str())?;
             let idx = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
             if idx == 0 {
-                return Err(anyhow::anyhow!("Failed to get interface index for {}", iface_name));
+                return Err(anyhow::anyhow!(
+                    "Failed to get interface index for {}",
+                    iface_name
+                ));
             }
             idx as u32
         };
@@ -61,7 +69,10 @@ pub fn setup_bpf(unique_ifaces: Vec<String>) -> Result<(HashMap<String, Arc<Ipbl
             e
         })?;
 
-        info!("✓ XDP program attached to {} (Index {})", iface_name, ifindex);
+        info!(
+            "✓ XDP program attached to {} (Index {})",
+            iface_name, ifindex
+        );
 
         // Store the Link and the Skeleton
         xdp_links.push(link_xdp);

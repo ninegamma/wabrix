@@ -45,12 +45,14 @@ impl PciAddress {
             ));
         }
 
-        let bus =
-            u8::from_str_radix(parts[0], 16).map_err(|_| PciError::InvalidFormat("Bus must be hexadecimal".to_string()))?;
+        let bus = u8::from_str_radix(parts[0], 16)
+            .map_err(|_| PciError::InvalidFormat("Bus must be hexadecimal".to_string()))?;
 
         let slot_func: Vec<&str> = parts[1].split('.').collect();
         if slot_func.len() != 2 {
-            return Err(PciError::InvalidFormat("Expected format 'Slot.Function'".to_string()));
+            return Err(PciError::InvalidFormat(
+                "Expected format 'Slot.Function'".to_string(),
+            ));
         }
 
         let slot = u8::from_str_radix(slot_func[0], 16)
@@ -59,7 +61,11 @@ impl PciAddress {
         let function = u8::from_str_radix(slot_func[1], 16)
             .map_err(|_| PciError::InvalidFormat("Function must be hexadecimal".to_string()))?;
 
-        Ok(PciAddress { bus, slot, function })
+        Ok(PciAddress {
+            bus,
+            slot,
+            function,
+        })
     }
 
     /// Converts to PCI address in the format "0000:BB:SS.F"

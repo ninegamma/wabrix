@@ -1,19 +1,19 @@
 // src/config/mod.rs
-use serde::{Deserialize, Deserializer, Serialize};
-use serde::de::{MapAccess, Visitor};
-use std::fmt;
-use std::path::Path;
-use std::sync::Arc;
-use anyhow::{anyhow, Result};
-use std::collections::{HashMap, HashSet};
-use ts_rs::TS;
-use wabrix_api::helpers::parse_suffixed_number;
-use wabrix_base::RuntimeUmemConfig;
-use wabrix_base::frame_registry::MAX_UMEM;
-use wabrix_base::node_instance_id::NodeInstanceId;
 use crate::config::hot_config::NodeDynamicState;
 use crate::system_builder::SystemBuilder;
 use crate::xsocket::XdpSocketConfig;
+use anyhow::{anyhow, Result};
+use serde::de::{MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::path::Path;
+use std::sync::Arc;
+use ts_rs::TS;
+use wabrix_api::helpers::parse_suffixed_number;
+use wabrix_base::frame_registry::MAX_UMEM;
+use wabrix_base::node_instance_id::NodeInstanceId;
+use wabrix_base::RuntimeUmemConfig;
 
 /// Persisted position of a single graph node, stored under [layout] in wabrix.toml.
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -229,7 +229,9 @@ where
     deserializer.deserialize_map(ArgsVisitor)
 }
 
-fn deserialize_wasm_data<'de, D>(deserializer: D) -> Result<Option<HashMap<String, String>>, D::Error>
+fn deserialize_wasm_data<'de, D>(
+    deserializer: D,
+) -> Result<Option<HashMap<String, String>>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -454,7 +456,10 @@ impl XBricksConfig {
                             let mut args = HashMap::new();
                             args.insert("umem".to_string(), "0".to_string());
                             args.insert("batch_size".to_string(), batch_sz.to_string());
-                            args.insert("no-packets".to_string(), packets_for_this_worker.to_string());
+                            args.insert(
+                                "no-packets".to_string(),
+                                packets_for_this_worker.to_string(),
+                            );
                             args.insert("pps".to_string(), pps_per_worker.to_string());
                             args.insert("autostart".to_string(), "true".to_string());
                             if let Some(ip) = dst_ip {
@@ -478,7 +483,10 @@ impl XBricksConfig {
                         args: {
                             let mut args = HashMap::new();
                             args.insert("sink_type".to_string(), "xsk".to_string());
-                            args.insert("interface".to_string(), self.wabrix.ifaces[0].name.clone());
+                            args.insert(
+                                "interface".to_string(),
+                                self.wabrix.ifaces[0].name.clone(),
+                            );
                             args
                         },
                         hot_args: HashMap::new(),
@@ -566,7 +574,9 @@ impl XBricksConfig {
             return Err(anyhow!("Configuration must define at least one UMEM"));
         }
         if section.xsk.is_empty() {
-            return Err(anyhow!("Configuration must define at least one XSK mapping"));
+            return Err(anyhow!(
+                "Configuration must define at least one XSK mapping"
+            ));
         }
 
         // 2. Validate UMEM configurations
@@ -588,7 +598,10 @@ impl XBricksConfig {
 
             // Validate UMEM parameters
             if umem_cfg.frame_size == 0 {
-                return Err(anyhow!("UMEM {}: frame_size must be > 0 and power of 2", umem_cfg.id));
+                return Err(anyhow!(
+                    "UMEM {}: frame_size must be > 0 and power of 2",
+                    umem_cfg.id
+                ));
             }
             if umem_cfg.frame_count == 0 {
                 return Err(anyhow!("UMEM {}: frame_count must be > 0", umem_cfg.id));
@@ -670,7 +683,11 @@ impl XBricksConfig {
             }
 
             // Check that interface exists on the system, unless it's a veth that will be created
-            let is_veth = iface_cfg.r#type.as_ref().map(|t| t == "veth").unwrap_or(false);
+            let is_veth = iface_cfg
+                .r#type
+                .as_ref()
+                .map(|t| t == "veth")
+                .unwrap_or(false);
 
             if !is_veth {
                 let output = std::process::Command::new("ip")
@@ -687,7 +704,10 @@ impl XBricksConfig {
             } else {
                 // Validate veth-specific fields
                 if iface_cfg.peer.is_none() {
-                    return Err(anyhow!("Veth interface '{}' requires 'peer' field", iface_cfg.name));
+                    return Err(anyhow!(
+                        "Veth interface '{}' requires 'peer' field",
+                        iface_cfg.name
+                    ));
                 }
                 if iface_cfg.namespace.is_none() && iface_cfg.master.is_none() {
                     return Err(anyhow!(
@@ -755,7 +775,8 @@ impl XBricksConfig {
         }
 
         let mut worker_ids = HashSet::new();
-        let core_ids = core_affinity::get_core_ids().ok_or_else(|| anyhow!("Failed to get CPU core IDs"))?;
+        let core_ids =
+            core_affinity::get_core_ids().ok_or_else(|| anyhow!("Failed to get CPU core IDs"))?;
         let max_core_id = core_ids.len();
 
         for worker_cfg in &section.workers {
@@ -795,7 +816,11 @@ impl XBricksConfig {
                 }
 
                 // Find the UMEM config to check partition count
-                let umem_cfg = section.umem.iter().find(|u| u.id == partition_req.umem).unwrap(); // Safe because we already checked umem_ids contains it
+                let umem_cfg = section
+                    .umem
+                    .iter()
+                    .find(|u| u.id == partition_req.umem)
+                    .unwrap(); // Safe because we already checked umem_ids contains it
 
                 // Check that requested count doesn't exceed available partitions
                 if partition_req.count > umem_cfg.partitions as usize {
@@ -835,7 +860,10 @@ impl XBricksConfig {
         for pipeline in &self.pipelines {
             // Validate pipeline has at least one worker
             if pipeline.workers.is_empty() {
-                return Err(anyhow!("Pipeline '{}': must have at least one worker", pipeline.name));
+                return Err(anyhow!(
+                    "Pipeline '{}': must have at least one worker",
+                    pipeline.name
+                ));
             }
 
             // Validate all referenced workers exist
@@ -851,14 +879,21 @@ impl XBricksConfig {
 
             // Validate pipeline has at least one node
             if pipeline.nodes.is_empty() {
-                return Err(anyhow!("Pipeline '{}': must have at least one node", pipeline.name));
+                return Err(anyhow!(
+                    "Pipeline '{}': must have at least one node",
+                    pipeline.name
+                ));
             }
 
             // Collect node IDs and validate uniqueness within pipeline
             let mut node_ids = HashSet::new();
             for node in &pipeline.nodes {
                 if !node_ids.insert(node.id.clone()) {
-                    return Err(anyhow!("Pipeline '{}': duplicate node id '{}'", pipeline.name, node.id));
+                    return Err(anyhow!(
+                        "Pipeline '{}': duplicate node id '{}'",
+                        pipeline.name,
+                        node.id
+                    ));
                 }
             }
 
@@ -936,10 +971,9 @@ impl XBricksConfig {
                         // Validate that each queue referenced has a corresponding XSK socket
                         if let Some(queues) = &node.queues {
                             for &queue_id in queues {
-                                let has_xsk_socket = section
-                                    .xsk
-                                    .iter()
-                                    .any(|xsk| xsk.iface == *iface && xsk.queues.contains(&queue_id));
+                                let has_xsk_socket = section.xsk.iter().any(|xsk| {
+                                    xsk.iface == *iface && xsk.queues.contains(&queue_id)
+                                });
 
                                 if !has_xsk_socket {
                                     return Err(anyhow!(
@@ -966,7 +1000,10 @@ impl XBricksConfig {
                 // Step A: Build interface -> umem mapping
                 let mut iface_umems: HashMap<&str, Vec<usize>> = HashMap::new();
                 for xsk in &section.xsk {
-                    iface_umems.entry(xsk.iface.as_str()).or_default().push(xsk.umem);
+                    iface_umems
+                        .entry(xsk.iface.as_str())
+                        .or_default()
+                        .push(xsk.umem);
                 }
 
                 // Step B: Build adjacency list (node -> targets)
@@ -1069,7 +1106,8 @@ impl XBricksConfig {
         // to detect conflicts where two different pipeline instances try to use the same queue
         use std::collections::HashMap;
         #[allow(clippy::type_complexity)]
-        let mut queue_assignments: HashMap<(String, u32), Vec<(String, String, usize)>> = HashMap::new();
+        let mut queue_assignments: HashMap<(String, u32), Vec<(String, String, usize)>> =
+            HashMap::new();
 
         for pipeline in &self.pipelines {
             for node in &pipeline.nodes {
@@ -1107,7 +1145,9 @@ impl XBricksConfig {
                     // Different workers trying to use the same queue - conflict!
                     let conflict_details: Vec<String> = assignments
                         .iter()
-                        .map(|(pipeline, node, worker)| format!("pipeline '{}' node '{}' worker {}", pipeline, node, worker))
+                        .map(|(pipeline, node, worker)| {
+                            format!("pipeline '{}' node '{}' worker {}", pipeline, node, worker)
+                        })
                         .collect();
 
                     return Err(anyhow!(
@@ -1141,16 +1181,25 @@ impl XBricksConfig {
                                     let worker_id = pipeline.workers[idx];
 
                                     // Get the UMEM assigned to this queue via XSK config
-                                    if let Some(&xsk_umem_id) = queue_umem_map.get(&(interface.clone(), queue_id)) {
+                                    if let Some(&xsk_umem_id) =
+                                        queue_umem_map.get(&(interface.clone(), queue_id))
+                                    {
                                         // Get the worker config to check its UMEM partition allocations
-                                        if let Some(worker_cfg) = section.workers.iter().find(|w| w.id == worker_id) {
+                                        if let Some(worker_cfg) =
+                                            section.workers.iter().find(|w| w.id == worker_id)
+                                        {
                                             // Check if worker has a partition from the same UMEM as the queue
-                                            let has_matching_umem =
-                                                worker_cfg.partitions.iter().any(|p| p.umem == xsk_umem_id);
+                                            let has_matching_umem = worker_cfg
+                                                .partitions
+                                                .iter()
+                                                .any(|p| p.umem == xsk_umem_id);
 
                                             if !has_matching_umem {
-                                                let worker_umems: Vec<usize> =
-                                                    worker_cfg.partitions.iter().map(|p| p.umem).collect();
+                                                let worker_umems: Vec<usize> = worker_cfg
+                                                    .partitions
+                                                    .iter()
+                                                    .map(|p| p.umem)
+                                                    .collect();
 
                                                 return Err(anyhow!(
                                                     "UMEM mismatch: Pipeline '{}', node '{}' assigns queue {} (interface '{}') to worker {}.\n\
@@ -1222,7 +1271,9 @@ impl XBricksConfig {
                             let worker_id = pipeline.workers[i];
 
                             // Detect conflicts: Two workers cannot own the same queue
-                            if let Some(&existing_owner) = queue_owner_map.get(&(iface.clone(), queue_id)) {
+                            if let Some(&existing_owner) =
+                                queue_owner_map.get(&(iface.clone(), queue_id))
+                            {
                                 if existing_owner != worker_id {
                                     return Err(anyhow!(
                                         "Configuration Conflict: Interface '{}' Queue {} is assigned to both Worker {} and Worker {}",
@@ -1271,9 +1322,9 @@ impl XBricksConfig {
 
         for xsk_map in &self.wabrix.xsk {
             // Get the UMEM config for this mapping
-            let umem_config = runtime_umems[xsk_map.umem]
-                .as_ref()
-                .ok_or_else(|| anyhow!("XSK mapping references unknown UMEM ID {}", xsk_map.umem))?;
+            let umem_config = runtime_umems[xsk_map.umem].as_ref().ok_or_else(|| {
+                anyhow!("XSK mapping references unknown UMEM ID {}", xsk_map.umem)
+            })?;
 
             for &queue_id in &xsk_map.queues {
                 // Find who owns this queue (Worker & Core)
@@ -1288,7 +1339,8 @@ impl XBricksConfig {
                     .and_then(|opt| *opt)
                     .ok_or_else(|| anyhow!("Worker ID {} not found in workers list", worker_id))?;
 
-                let id_string = format!("{} queue {} worker {}", xsk_map.iface, queue_id, worker_id);
+                let id_string =
+                    format!("{} queue {} worker {}", xsk_map.iface, queue_id, worker_id);
 
                 xdp_socket_configs.push(XdpSocketConfig {
                     id_string,
@@ -1306,7 +1358,8 @@ impl XBricksConfig {
         }
         // --- STEP 4: Extract worker partition requests ---
 
-        let mut worker_partitions: Vec<Option<Vec<PartitionRequest>>> = vec![None; max_worker_id + 1];
+        let mut worker_partitions: Vec<Option<Vec<PartitionRequest>>> =
+            vec![None; max_worker_id + 1];
         for worker_cfg in &self.wabrix.workers {
             worker_partitions[worker_cfg.id] = Some(worker_cfg.partitions.clone());
         }
@@ -1326,7 +1379,10 @@ impl XBricksConfig {
         for pipeline_conf in &self.pipelines {
             // Validate that we have workers to process this pipeline
             if pipeline_conf.workers.is_empty() {
-                return Err(anyhow!("Pipeline '{}' has no workers assigned", pipeline_conf.name));
+                return Err(anyhow!(
+                    "Pipeline '{}' has no workers assigned",
+                    pipeline_conf.name
+                ));
             }
 
             // Iterate over the workers assigned to this pipeline
@@ -1334,26 +1390,37 @@ impl XBricksConfig {
             for (worker_idx_in_pipeline, &worker_id) in pipeline_conf.workers.iter().enumerate() {
                 // 1. Resolve the Worker Configuration
                 // CRITICAL: Find by ID, do not assume index matches ID, do not search by core.
-                let worker_conf =
-                    self.wabrix.workers.iter().find(|w| w.id == worker_id).ok_or_else(|| {
-                        anyhow!("Pipeline '{}' references unknown worker {}", pipeline_conf.name, worker_id)
+                let worker_conf = self
+                    .wabrix
+                    .workers
+                    .iter()
+                    .find(|w| w.id == worker_id)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "Pipeline '{}' references unknown worker {}",
+                            pipeline_conf.name,
+                            worker_id
+                        )
                     })?;
 
                 // 2. Find OR Create the SystemWorkerBuilder
                 // CRITICAL: Check if we already created a builder for this worker_id
                 // (e.g. from a previous pipeline loop).
                 // We cannot use 'entry' API easily here because we are in a loop iterating over pipelines.
-                let worker_builder_index =
-                    if let Some(idx) = system_builder.workers.iter().position(|w| w.id == worker_id as u32) {
-                        idx
-                    } else {
-                        system_builder.workers.push(WorkerBuilderConfig {
-                            id: worker_id as u32,
-                            core_id: worker_conf.core as u32, // Set affinity here
-                            pipelines: Vec::new(),
-                        });
-                        system_builder.workers.len() - 1
-                    };
+                let worker_builder_index = if let Some(idx) = system_builder
+                    .workers
+                    .iter()
+                    .position(|w| w.id == worker_id as u32)
+                {
+                    idx
+                } else {
+                    system_builder.workers.push(WorkerBuilderConfig {
+                        id: worker_id as u32,
+                        core_id: worker_conf.core as u32, // Set affinity here
+                        pipelines: Vec::new(),
+                    });
+                    system_builder.workers.len() - 1
+                };
 
                 // 3. Construct the Pipeline Instance for this Worker
                 // This is where we handle the specific "slice" of the pipeline this worker runs.
@@ -1409,11 +1476,13 @@ impl XBricksConfig {
                 }
 
                 // Append this pipeline configuration to the worker's list
-                system_builder.workers[worker_builder_index].pipelines.push(PipelineInstance {
-                    name: pipeline_conf.name.clone(),
-                    node_instances: pipeline_instance_nodes,
-                    poll_frequency: pipeline_conf.poll_frequency,
-                });
+                system_builder.workers[worker_builder_index]
+                    .pipelines
+                    .push(PipelineInstance {
+                        name: pipeline_conf.name.clone(),
+                        node_instances: pipeline_instance_nodes,
+                        poll_frequency: pipeline_conf.poll_frequency,
+                    });
             }
         }
 
@@ -1423,9 +1492,9 @@ impl XBricksConfig {
 
 #[cfg(test)]
 mod tests {
+    use super::XBricksConfig;
     use std::path::PathBuf;
     use ts_rs::{Config, TS};
-    use super::XBricksConfig;
 
     #[test]
     fn check_env() {
@@ -1461,7 +1530,10 @@ mod tests {
         let config: XBricksConfig = toml::from_str(toml_str).unwrap();
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Duplicate UMEM id"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Duplicate UMEM id"));
     }
 
     #[test]
@@ -1511,7 +1583,10 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         // The error message changed to be more helpful
-        assert!(err_msg.contains("not defined in the ifaces array") || err_msg.contains("non-existent interface"));
+        assert!(
+            err_msg.contains("not defined in the ifaces array")
+                || err_msg.contains("non-existent interface")
+        );
     }
 
     #[test]
@@ -1535,7 +1610,10 @@ mod tests {
         let config: XBricksConfig = toml::from_str(toml_str).unwrap();
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("non-existent UMEM"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("non-existent UMEM"));
     }
 
     #[test]
@@ -1559,7 +1637,10 @@ mod tests {
         let config: XBricksConfig = toml::from_str(toml_str).unwrap();
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("rxq_size must be a power of 2"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("rxq_size must be a power of 2"));
     }
 
     #[test]
@@ -1639,7 +1720,10 @@ mod tests {
         let result = config.validate();
         assert!(result.is_err());
         // XSK validation happens before worker validation, so empty queues error comes first
-        assert!(result.unwrap_err().to_string().contains("queues list cannot be empty"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("queues list cannot be empty"));
     }
 
     #[test]
@@ -1661,7 +1745,10 @@ mod tests {
         let config: XBricksConfig = toml::from_str(toml_str).unwrap();
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("at least one worker"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("at least one worker"));
     }
 
     #[test]
@@ -1772,7 +1859,11 @@ mod tests {
     #[test]
     fn test_example_pipeline_test_0_toml() {
         let config = XBricksConfig::from_file("../wabrix/examples/pipeline_test_0.toml");
-        assert!(config.is_ok(), "pipeline_test_0.toml should be valid: {:?}", config.err());
+        assert!(
+            config.is_ok(),
+            "pipeline_test_0.toml should be valid: {:?}",
+            config.err()
+        );
 
         let config = config.unwrap();
 
@@ -1786,28 +1877,53 @@ mod tests {
 
         // Verify first pipeline has correct structure
         let l2_reflector = &config.pipelines[0];
-        assert_eq!(l2_reflector.workers, vec![0, 1], "l2_reflector should have workers [0, 1]");
-        assert_eq!(l2_reflector.nodes.len(), 5, "l2_reflector should have 5 nodes");
+        assert_eq!(
+            l2_reflector.workers,
+            vec![0, 1],
+            "l2_reflector should have workers [0, 1]"
+        );
+        assert_eq!(
+            l2_reflector.nodes.len(),
+            5,
+            "l2_reflector should have 5 nodes"
+        );
 
         // Verify RX node has queues at node level (not in args)
         let rx_node = &l2_reflector.nodes[0];
         assert_eq!(rx_node.id, "l2_reflector.rx_root");
         assert_eq!(rx_node.node_type, "BatchRxNode");
-        assert_eq!(rx_node.queues, Some(vec![0, 1]), "RX node should have queues [0, 1]");
-        assert_eq!(rx_node.args.get("interface"), Some(&"enp2s0f0np0".to_string()));
+        assert_eq!(
+            rx_node.queues,
+            Some(vec![0, 1]),
+            "RX node should have queues [0, 1]"
+        );
+        assert_eq!(
+            rx_node.args.get("interface"),
+            Some(&"enp2s0f0np0".to_string())
+        );
 
         // Verify TX node has queues at node level
         let tx_node = &l2_reflector.nodes[3];
         assert_eq!(tx_node.id, "l2_reflector.tx_sink");
         assert_eq!(tx_node.node_type, "BatchTxNode");
-        assert_eq!(tx_node.queues, Some(vec![0, 1]), "TX node should have queues [0, 1]");
-        assert_eq!(tx_node.args.get("interface"), Some(&"enp2s0f0np0".to_string()));
+        assert_eq!(
+            tx_node.queues,
+            Some(vec![0, 1]),
+            "TX node should have queues [0, 1]"
+        );
+        assert_eq!(
+            tx_node.args.get("interface"),
+            Some(&"enp2s0f0np0".to_string())
+        );
 
         // Verify classifier node has no queues (processing node)
         let classifier_node = &l2_reflector.nodes[1];
         assert_eq!(classifier_node.id, "l2_reflector.classifier");
         assert_eq!(classifier_node.node_type, "ClassifierNode");
-        assert!(classifier_node.queues.is_none(), "Classifier should have no queues");
+        assert!(
+            classifier_node.queues.is_none(),
+            "Classifier should have no queues"
+        );
 
         // Verify drop_if_1 pipeline with 4 workers
         let drop_if_1 = &config.pipelines[2];
@@ -1817,13 +1933,21 @@ mod tests {
             "drop_if_1 should have 4 instances on worker 2"
         );
         let rx_node = &drop_if_1.nodes[0];
-        assert_eq!(rx_node.queues, Some(vec![0, 1, 2, 3]), "drop_if_1 RX should have 4 queues");
+        assert_eq!(
+            rx_node.queues,
+            Some(vec![0, 1, 2, 3]),
+            "drop_if_1 RX should have 4 queues"
+        );
     }
 
     #[test]
     fn test_example_simple_pipeline_toml() {
         let config = XBricksConfig::from_file("../wabrix/examples/simple_pipeline.toml");
-        assert!(config.is_ok(), "simple_pipeline.toml should be valid: {:?}", config.err());
+        assert!(
+            config.is_ok(),
+            "simple_pipeline.toml should be valid: {:?}",
+            config.err()
+        );
 
         let config = config.unwrap();
 
@@ -1842,9 +1966,15 @@ mod tests {
         // Verify telemetry node configuration with HashMap args
         let telemetry_node = &pipeline1.nodes[1];
         assert_eq!(telemetry_node.node_type, "TelemetryNode");
-        assert_eq!(telemetry_node.args.get("algo"), Some(&"ethertype".to_string()));
+        assert_eq!(
+            telemetry_node.args.get("algo"),
+            Some(&"ethertype".to_string())
+        );
         assert_eq!(telemetry_node.args.get("buckets"), Some(&"4".to_string()));
-        assert_eq!(telemetry_node.args.get("labels"), Some(&"IPv4,IPv6,ARP,Other".to_string()));
+        assert_eq!(
+            telemetry_node.args.get("labels"),
+            Some(&"IPv4,IPv6,ARP,Other".to_string())
+        );
     }
 
     #[test]
@@ -1899,7 +2029,10 @@ mod tests {
         let config: XBricksConfig = toml::from_str(toml_str).unwrap();
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("requests 5 partitions"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requests 5 partitions"));
     }
 
     #[test]
@@ -1951,7 +2084,10 @@ mod tests {
         let config: XBricksConfig = toml::from_str(toml_str).unwrap();
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("references non-existent UMEM"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("references non-existent UMEM"));
     }
 
     #[test]
@@ -1981,7 +2117,11 @@ mod tests {
     #[test]
     fn test_example_mixed_umem_workers_toml() {
         let config = XBricksConfig::from_file("../wabrix/examples/mixed_umem_workers.toml");
-        assert!(config.is_ok(), "mixed_umem_workers.toml should be valid: {:?}", config.err());
+        assert!(
+            config.is_ok(),
+            "mixed_umem_workers.toml should be valid: {:?}",
+            config.err()
+        );
 
         let config = config.unwrap();
 
@@ -2024,7 +2164,10 @@ mod tests {
         let config: XBricksConfig = toml::from_str(toml_str).unwrap();
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("partitions must be a power of 2"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("partitions must be a power of 2"));
     }
 
     #[test]
@@ -2048,7 +2191,10 @@ mod tests {
         let config: XBricksConfig = toml::from_str(toml_str).unwrap();
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("partitions must be at least 1"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("partitions must be at least 1"));
     }
 
     #[test]
@@ -2166,7 +2312,10 @@ mod tests {
                 type = "DropNode"
         "#;
         let config: XBricksConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.validate().is_ok(), "matching umem via XSK lookup should be valid");
+        assert!(
+            config.validate().is_ok(),
+            "matching umem via XSK lookup should be valid"
+        );
     }
 
     #[test]
@@ -2237,13 +2386,18 @@ mod tests {
         let result = XBricksConfig::from_toml_str(toml_str);
 
         // Assert that the configuration failed validation
-        assert!(result.is_err(), "Configuration should have failed due to UMEM mismatch");
+        assert!(
+            result.is_err(),
+            "Configuration should have failed due to UMEM mismatch"
+        );
 
         let err_msg = result.unwrap_err().to_string();
 
         // Assert it threw the correct specific error
         assert!(
-            err_msg.contains("WasmInspectorNode 'wasm' is bound to umem 1, but can receive PDUs from umem 0"),
+            err_msg.contains(
+                "WasmInspectorNode 'wasm' is bound to umem 1, but can receive PDUs from umem 0"
+            ),
             "Error message did not match expected output. Got: {}",
             err_msg
         );
