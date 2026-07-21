@@ -1,20 +1,16 @@
 use std::mem::{replace, size_of, MaybeUninit};
-use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::vec::Vec;
-
-use macaddr::MacAddr6;
-use network_types::eth::EtherType;
 
 use wabrix_base::frame_registry::get_worker_frame_registry;
 use wabrix_base::interface::batch::Batch;
 use wabrix_base::interface::Pdu;
 use wabrix_base::{ControlEvent, Directive, Node, NodeId};
 
-use wabrix_api::connections::{ConnectionNode, ConnectionPool, FlowKey, TcpState};
+use wabrix_api::connections::{ConnectionPool, FlowKey, TcpState};
 use wabrix_api::headers::{IpHeader, MacHeader, TcpHeader};
-use wabrix_api::helpers::{parse_ip, parse_mac, parse_suffixed_number, update_tcp_checksum};
+use wabrix_api::helpers::{parse_ip, parse_mac, parse_suffixed_number};
 use wabrix_api::MAX_BATCH_SIZE;
 use wabrix_api::{PluginOpcode, StandardOpcode};
 

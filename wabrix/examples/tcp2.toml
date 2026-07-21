@@ -1,9 +1,9 @@
 [wabrix]
 ifaces= [
     { name = "enp2s0f0np0", rxd = 8160, txd = 8160, irq_core = 6 },
-    { name = "veth_xbricks", rxd = 1024, txd = 1024, type = "veth", namespace = "ns-xbricks", peer = "tap-veth-0", mac_if = "enp2s0f0np0", ipnet = "10.10.10.222/24", checksum_offload = false },
+    { name = "veth_wabrix", rxd = 1024, txd = 1024, type = "veth", namespace = "ns-wabrix", peer = "tap-veth-0", mac_if = "enp2s0f0np0", ipnet = "10.10.10.222/24", checksum_offload = false },
     { name = "enp2s0f1np1", rxd = 8160, txd = 8160, irq_core = 8 },
-    { name = "veth_xbricks_1", rxd = 1024, txd = 1024, type = "veth", namespace = "ns-xbricks_1", peer = "tap-veth-1", mac_if = "enp2s0f1np1", ipnet = "10.10.10.31/24", checksum_offload = false },
+    { name = "veth_wabrix_1", rxd = 1024, txd = 1024, type = "veth", namespace = "ns-wabrix_1", peer = "tap-veth-1", mac_if = "enp2s0f1np1", ipnet = "10.10.10.31/24", checksum_offload = false },
 ]
 umem= [
     { id = 0, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 2, reserved = 131072 },
@@ -12,9 +12,9 @@ umem= [
 ]
 xsk= [
     { iface = "enp2s0f0np0", queues = [0], umem = 0, rxq_size = 16384, txq_size = 16384, zerocopy = true, xdp_mode = "auto" },
-    { iface = "veth_xbricks", queues = [0], umem = 2, rxq_size = 4096, txq_size = 4096, zerocopy = false, xdp_mode = "auto" },
+    { iface = "veth_wabrix", queues = [0], umem = 2, rxq_size = 4096, txq_size = 4096, zerocopy = false, xdp_mode = "auto" },
     { iface = "enp2s0f1np1", queues = [0], umem = 1, rxq_size = 16384, txq_size = 16384, zerocopy = true, xdp_mode = "auto" },
-    { iface = "veth_xbricks_1", queues = [0], umem = 2, rxq_size = 4096, txq_size = 4096, zerocopy = false, xdp_mode = "auto" },
+    { iface = "veth_wabrix_1", queues = [0], umem = 2, rxq_size = 4096, txq_size = 4096, zerocopy = false, xdp_mode = "auto" },
 ]
 workers= [
     { id = 0, core = 7, partitions = [{ umem = 0, count = 1 }, { umem = 2, count = 1 }] },
@@ -22,10 +22,10 @@ workers= [
 ]
 
 # ===================================================================
-# PIPELINE: NIC0
+# PIPELINE: tcp_client
 # ===================================================================
 [[pipelines]]
-name = "nic0"
+name = "tcp_client"
 workers = [0]
 poll_frequency = 10000
 
@@ -72,16 +72,8 @@ syn_rate = "1800k"
 [[pipelines.nodes]]
 id = "nd_parser_veth"
 type = "FastParserNode"
-routes = ["nd_icmp_filter"]
+routes = ["shared_tx_sink"]
 args= {}
-hot_args= {}
-
-[[pipelines.nodes]]
-id = "nd_icmp_filter"
-type = "WasmInspectorNode"
-routes = ["shared_tx_sink", "drop"]
-labels = ["icmp ping", "icmp reply", "icmp other", "any other"]
-args= { umem = "2", wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/icmp_filter.wasm" }
 hot_args= {}
 
 [[pipelines.nodes]]
@@ -108,10 +100,10 @@ args= {}
 hot_args= {}
 
 # ===================================================================
-# PIPELINE: NIC1
+# PIPELINE: tcp_server
 # ===================================================================
 [[pipelines]]
-name = "nic1"
+name = "tcp_server"
 workers = [1]
 poll_frequency = 10000
 
@@ -154,16 +146,8 @@ dst_mac = "44:49:88:06:63:38"
 [[pipelines.nodes]]
 id = "nd_parser_veth"
 type = "FastParserNode"
-routes = ["nd_icmp_filter"]
+routes = ["shared_tx_sink"]
 args= {}
-hot_args= {}
-
-[[pipelines.nodes]]
-id = "nd_icmp_filter"
-type = "WasmInspectorNode"
-routes = ["shared_tx_sink", "drop"]
-labels = ["icmp ping", "icmp reply", "icmp other", "any other"]
-args= { umem = "2", wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/icmp_filter.wasm" }
 hot_args= {}
 
 [[pipelines.nodes]]
@@ -216,10 +200,6 @@ y = 398.23654
 [layout."unified_nic1/nd_parser"]
 x = 341.34558
 y = 249.28572
-
-[layout."unified_nic1/nd_icmp_filter"]
-x = 632.00653
-y = 442.7149
 
 [layout.iface_enp2s0f0np0]
 x = -119.40271
@@ -300,10 +280,6 @@ y = 227.56374
 [layout."unified_nic0/tcp_engine"]
 x = 593.80347
 y = 740.7365
-
-[layout."unified_nic0/nd_icmp_filter"]
-x = 642.961
-y = 583.6589
 
 [layout.iface_veth_wabrix]
 x = -122.77464

@@ -1,0 +1,10 @@
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    # This URL uses the internal Docker network.
+    # It must point to the internal container port (9090), not the host mapped port (9091).
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true

@@ -8,7 +8,7 @@ use wabrix_base::telemetry::TMLiveStats;
 /// It listens to the Wabrix telemetry broadcast and updates standard gauges.
 pub fn spawn_metrics_server(mut tm_rx: Receiver<TMLiveStats>) {
     tokio::spawn(async move {
-        // 1. Setup Prometheus Registry & Gauges
+        // Setup Prometheus Registry & Gauges
         let registry = Registry::new();
 
         // Create Gauge Vectors with labels for pipeline name and specific node/interface label
@@ -43,7 +43,7 @@ pub fn spawn_metrics_server(mut tm_rx: Receiver<TMLiveStats>) {
 
         let metrics_registry = registry.clone();
 
-        // 2. Background task to map Wabrix telemetry to Prometheus metrics
+        // Background task to map Wabrix telemetry to Prometheus metrics
         tokio::spawn(async move {
             while let Ok(stats) = tm_rx.recv().await {
                 // Skip updating gauges if the pipeline isn't actively running
@@ -75,7 +75,7 @@ pub fn spawn_metrics_server(mut tm_rx: Receiver<TMLiveStats>) {
             }
         });
 
-        // 3. Expose the registry over HTTP for Prometheus to scrape
+        // Expose the registry over HTTP for Prometheus to scrape
         let app = Router::new().route(
             "/metrics",
             get(move || async move {

@@ -11,10 +11,10 @@ wasmtime-wasi = { workspace = true }
 log = { workspace = true }
 xsk-rs = { workspace = true }
 dashmap = "6.1" # Using stable 6.1 instead of 7.0-rc2 for reliability
-wabrix_base = { path = "../wabrix_base" }
+wabrix_base = { workspace = true }
 wabrix_api = { workspace = true }
 crossbeam-channel = { workspace = true }
-tokio = "1.51.1"
+tokio = { workspace = true }
 
 [lib]
 name = "wabrix_wasm"

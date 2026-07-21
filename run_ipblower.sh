@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Default values
-IFACE="enp114s0f1np1"
+IFACE="enp2s0f1np1"
 PPS="max"
 BATCH="64"
 CORE="0"

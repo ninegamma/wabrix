@@ -4,7 +4,7 @@ edition.workspace = true
 version.workspace = true
 
 [dependencies]
-wabrix_base = { path = "../wabrix_base" }
+wabrix_base = { workspace = true }
 wabrix_api = { workspace = true }
 
 # Standard Tools
@@ -39,7 +39,7 @@ rand = "0.10"
 
 
 # Wasm
-wabrix_wasm = { path = "../wabrix_wasm", optional = true }
+wabrix_wasm = { workspace = true, optional = true }
 wasmtime = { workspace = true }
 wasmtime-wasi = { workspace = true }
 

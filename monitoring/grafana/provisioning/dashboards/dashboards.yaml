@@ -1,0 +1,11 @@
+apiVersion: 1
+providers:
+  - name: 'Wabrix Dashboards'
+    orgId: 1
+    folder: ''
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    options:
+      # Target path inside the container matching the docker-compose volume mount
+      path: /var/lib/grafana/dashboards

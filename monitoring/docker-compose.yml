@@ -1,0 +1,30 @@
+# docker-compose.yml
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9091:9090" # Exposing Prometheus UI on 9091 (to avoid clashing with Wabrix on 9090)
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000" # Exposing Grafana UI on 3000
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    depends_on:
+      - prometheus
+    volumes:
+      # Add a named volume for Grafana's internal database
+      - grafana-data:/var/lib/grafana
+      # Mount the entire provisioning directory tree
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      # Mount the directory containing the exported JSON models
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+# Declare the named volume at the bottom of the file
+volumes:
+  grafana-data:
