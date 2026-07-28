@@ -16,10 +16,10 @@ workers= [
 ]
 
 # ===================================================================
-# PIPELINE: UNIFIED_NIC0
+# PIPELINE: tcp_client
 # ===================================================================
 [[pipelines]]
-name = "unified_nic0"
+name = "tcp_client"
 workers = [0]
 poll_frequency = 1000
 
