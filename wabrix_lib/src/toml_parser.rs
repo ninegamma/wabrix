@@ -16,16 +16,16 @@ use wabrix_base::node_instance_id::NodeInstanceId;
 use wabrix_base::RuntimeUmemConfig;
 
 /// Persisted position of a single graph node, stored under [layout] in wabrix.toml.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct SavedPosition {
     pub x: f32,
     pub y: f32,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, TS)]
-#[ts(export_to = "XBricksConfig.ts")] // This "activates" the environment variable path
-pub struct XBricksConfig {
-    pub wabrix: XBricksSection,
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
+#[ts(export_to = "WabricksConfig.ts")] // This "activates" the environment variable path
+pub struct WabricksConfig {
+    pub wabrix: WabricksSection,
     #[serde(default)]
     pub pipelines: Vec<PipelineConfig>,
     /// UI layout positions — written by the frontend, ignored by the dataplane.
@@ -34,8 +34,18 @@ pub struct XBricksConfig {
     pub layout: HashMap<String, SavedPosition>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, TS)]
-pub struct XBricksSection {
+impl Default for WabricksConfig {
+    fn default() -> Self {
+        Self {
+            wabrix: WabricksSection::default(),
+            pipelines: Vec::new(),
+            layout: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
+pub struct WabricksSection {
     #[serde(default = "default_ifaces")]
     pub ifaces: Vec<InterfaceConfig>,
     #[serde(default = "default_umem_configs")]
@@ -44,6 +54,19 @@ pub struct XBricksSection {
     pub xsk: Vec<XskMapping>,
     #[serde(default = "default_workers")]
     pub workers: Vec<WorkerConfig>,
+}
+
+// Implement standard Default trait for the section to keep the logic clean
+impl Default for WabricksSection {
+    fn default() -> Self {
+        Self {
+            // Map each field to its respective default function
+            ifaces: default_ifaces(),
+            umem: default_umem_configs(),
+            xsk: default_xsk_mappings(),
+            workers: default_workers(),
+        }
+    }
 }
 
 /// Provides the default worker configuration
@@ -97,7 +120,7 @@ fn default_xsk_mappings() -> Vec<XskMapping> {
     }]
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, TS)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
 pub struct InterfaceConfig {
     pub name: String,
     #[serde(default)]
@@ -124,7 +147,7 @@ pub struct InterfaceConfig {
     pub checksum_offload: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, TS)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
 pub struct UmemConfig {
     /// umem_group_id
     pub id: usize,
@@ -146,7 +169,7 @@ fn default_partitions() -> u32 {
     1
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, TS)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
 pub struct XskMapping {
     pub iface: String,
     pub queues: Vec<u32>,
@@ -163,14 +186,14 @@ fn default_xdp_mode() -> String {
     "auto".to_string()
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, TS)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
 pub struct PartitionRequest {
     /// umem_group_id
     pub umem: usize,
     pub count: usize,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, TS)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
 pub struct WorkerConfig {
     pub id: usize,
     pub core: usize,
@@ -182,13 +205,24 @@ fn default_poll_frequency() -> u64 {
     1000
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, TS)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
+pub enum PipelineLifecycle {
+    Running,
+    Paused,
+    Stopping,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
 pub struct PipelineConfig {
     pub name: String,
     pub workers: Vec<usize>,
     pub nodes: Vec<NodeConfig>,
     #[serde(default = "default_poll_frequency")]
     pub poll_frequency: u64,
+    // * Target operational state of the pipeline
+    // * Parsed from TOML, falls back to None if omitted
+    #[serde(default)]
+    pub lifecycle_state: Option<PipelineLifecycle>,
 }
 
 fn deserialize_args<'de, D>(deserializer: D) -> Result<HashMap<String, String>, D::Error>
@@ -281,7 +315,7 @@ where
     deserializer.deserialize_option(WasmDataVisitor)
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, TS)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
 pub struct NodeConfig {
     pub id: String,
     #[serde(rename = "type")]
@@ -300,6 +334,9 @@ pub struct NodeConfig {
     pub hot_args: HashMap<String, String>,
     #[serde(default, deserialize_with = "deserialize_wasm_data")]
     pub wasm_data: Option<HashMap<String, String>>,
+    // * Target operational state of the individual node
+    // * Allows overriding the pipeline-level state
+    pub desired_state: Option<PipelineLifecycle>,
 }
 #[derive(Debug, Clone)]
 pub struct NodeInstance {
@@ -322,6 +359,7 @@ pub struct PipelineInstance {
     pub name: String,
     pub node_instances: Vec<NodeInstance>,
     pub poll_frequency: u64,
+    pub desired_state: Option<PipelineLifecycle>,
 }
 
 /// Configuration for a single Worker Thread.
@@ -332,7 +370,7 @@ pub struct WorkerBuilderConfig {
     pub pipelines: Vec<PipelineInstance>, // List of pipelines this worker runs
 }
 
-impl XBricksConfig {
+impl WabricksConfig {
     /// Load configuration from a TOML file and validate it
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let contents = std::fs::read_to_string(path)?;
@@ -340,7 +378,7 @@ impl XBricksConfig {
     }
 
     pub fn from_toml_str(toml_str: &str) -> Result<Self> {
-        let mut config: XBricksConfig = toml::from_str(toml_str)?;
+        let mut config: WabricksConfig = toml::from_str(toml_str)?;
         for pipeline in &mut config.pipelines {
             for node in &mut pipeline.nodes {
                 if node.node_type == "PacketGenerator" {
@@ -472,6 +510,7 @@ impl XBricksConfig {
                         },
                         hot_args: HashMap::new(),
                         wasm_data: None,
+                        desired_state: None,
                     },
                     // Node 2: BatchTxNode sink
                     NodeConfig {
@@ -491,9 +530,11 @@ impl XBricksConfig {
                         },
                         hot_args: HashMap::new(),
                         wasm_data: None,
+                        desired_state: None,
                     },
                 ],
                 poll_frequency: default_poll_frequency(),
+                lifecycle_state: None,
             };
 
             self.pipelines.push(pipeline);
@@ -1463,6 +1504,7 @@ impl XBricksConfig {
                             args: node_conf.args.clone(),
                             hot_args: node_conf.hot_args.clone(),
                             wasm_data: node_conf.wasm_data.clone(),
+                            desired_state: node_conf.desired_state.clone(),
                         },
                         state: NodeDynamicState::default(),
                         node_instance_id: NodeInstanceId::new(
@@ -1482,6 +1524,7 @@ impl XBricksConfig {
                         name: pipeline_conf.name.clone(),
                         node_instances: pipeline_instance_nodes,
                         poll_frequency: pipeline_conf.poll_frequency,
+                        desired_state: pipeline_conf.lifecycle_state.clone(),
                     });
             }
         }
@@ -1492,7 +1535,7 @@ impl XBricksConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::XBricksConfig;
+    use super::{PipelineLifecycle, WabricksConfig};
     use std::path::PathBuf;
     use ts_rs::{Config, TS};
 
@@ -1505,7 +1548,7 @@ mod tests {
     fn export_bindings() {
         let config = Config::default().with_out_dir(PathBuf::from("../wabrix-ui/src/types/"));
         // Force the base path to your UI folder
-        XBricksConfig::export_all(&config).expect("could not export type");
+        WabricksConfig::export_all(&config).expect("could not export type");
     }
 
     #[test]
@@ -1527,13 +1570,79 @@ mod tests {
             ]
         "#;
 
-        let config: XBricksConfig = toml::from_str(toml_str).unwrap();
+        let config: WabricksConfig = toml::from_str(toml_str).unwrap();
         let result = config.validate();
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
             .to_string()
             .contains("Duplicate UMEM id"));
+    }
+
+    #[test]
+    fn test_desired_state_is_typed_enum() {
+        let toml_str = r#"
+            [wabrix]
+            ifaces = [
+                { name = "lo", rxd = 2048, txd = 2048 }
+            ]
+            umem = [
+                { id = 0, frame_size = 2048, frame_count = 8192, fq_size = 1024, cq_size = 1024, head_room = 128 }
+            ]
+            xsk = [
+                { iface = "lo", queues = [0], umem = 0, rxq_size = 1024, txq_size = 1024, zerocopy = true }
+            ]
+            workers = [
+                { id = 0, core = 0 }
+            ]
+
+            [[pipelines]]
+            name = "main"
+            workers = [0]
+            desired_state = "Paused"
+
+            [[pipelines.nodes]]
+            id = "drop"
+            type = "DropNode"
+            desired_state = "Running"
+        "#;
+
+        let config: WabricksConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.pipelines[0].lifecycle_state,
+            Some(PipelineLifecycle::Paused)
+        );
+        assert_eq!(
+            config.pipelines[0].nodes[0].desired_state,
+            Some(PipelineLifecycle::Running)
+        );
+    }
+
+    #[test]
+    fn test_invalid_desired_state_is_rejected() {
+        let toml_str = r#"
+            [wabrix]
+            ifaces = [
+                { name = "lo", rxd = 2048, txd = 2048 }
+            ]
+            umem = [
+                { id = 0, frame_size = 2048, frame_count = 8192, fq_size = 1024, cq_size = 1024, head_room = 128 }
+            ]
+            xsk = [
+                { iface = "lo", queues = [0], umem = 0, rxq_size = 1024, txq_size = 1024, zerocopy = true }
+            ]
+            workers = [
+                { id = 0, core = 0 }
+            ]
+
+            [[pipelines]]
+            name = "main"
+            workers = [0]
+            desired_state = "Offline"
+        "#;
+
+        let result = toml::from_str::<WabricksConfig>(toml_str);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -1554,7 +1663,7 @@ mod tests {
             ]
         "#;
 
-        let config: XBricksConfig = toml::from_str(toml_str).unwrap();
+        let config: WabricksConfig = toml::from_str(toml_str).unwrap();
         let result = config.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("power of 2"));
@@ -1578,7 +1687,7 @@ mod tests {
             ]
         "#;
 
-        let config: XBricksConfig = toml::from_str(toml_str).unwrap();
+        let config: WabricksConfig = toml::from_str(toml_str).unwrap();
         let result = config.validate();
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -1607,7 +1716,7 @@ mod tests {
             ]
         "#;
 
-        let config: XBricksConfig = toml::from_str(toml_str).unwrap();
+        let config: WabricksConfig = toml::from_str(toml_str).unwrap();
         let result = config.validate();
         assert!(result.is_err());
         assert!(result
@@ -1634,7 +1743,7 @@ mod tests {
             ]
         "#;
 
-        let config: XBricksConfig = toml::from_str(toml_str).unwrap();
+        let config: WabricksConfig = toml::from_str(toml_str).unwrap();
         let result = config.validate();
         assert!(result.is_err());
         assert!(result
@@ -1661,7 +1770,7 @@ mod tests {
             ]
         "#;
 
-        let config: XBricksConfig = toml::from_str(toml_str).unwrap();
+        let config: WabricksConfig = toml::from_str(toml_str).unwrap();
         let result = config.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("head_room"));
@@ -1690,7 +1799,7 @@ mod tests {
             ]
         "#;
 
-        let config: XBricksConfig = toml::from_str(toml_str).unwrap();
+        let config: WabricksConfig = toml::from_str(toml_str).unwrap();
         // Verify we have 2 UMEM domains
         assert_eq!(config.wabrix.umem.len(), 2);
 
@@ -1716,7 +1825,7 @@ mod tests {
             ]
         "#;
 
-        let config: XBricksConfig = toml::from_str(toml_str).unwrap();
+        let config: WabricksConfig = toml::from_str(toml_str).unwrap();
         let result = config.validate();
         assert!(result.is_err());
         // XSK validation happens before worker validation, so empty queues error comes first
@@ -1742,7 +1851,7 @@ mod tests {
             workers = []
         "#;
 
-        let config: XBricksConfig = toml::from_str(toml_str).unwrap();
+        let config: WabricksConfig = toml::from_str(toml_str).unwrap();
         let result = config.validate();
         assert!(result.is_err());
         assert!(result
@@ -1796,7 +1905,7 @@ mod tests {
                 type = "DropNode"
         "#;
 
-        let config: XBricksConfig = toml::from_str(toml_str).unwrap();
+        let config: WabricksConfig = toml::from_str(toml_str).unwrap();
         let result = config.validate();
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -1851,14 +1960,14 @@ mod tests {
                 type = "DropNode"
         "#;
 
-        let config: XBricksConfig = toml::from_str(toml_str).unwrap();
+        let config: WabricksConfig = toml::from_str(toml_str).unwrap();
         let result = config.validate();
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_example_pipeline_test_0_toml() {
-        let config = XBricksConfig::from_file("../wabrix/examples/pipeline_test_0.toml");
+        let config = WabricksConfig::from_file("../wabrix/examples/pipeline_test_0.toml");
         assert!(
             config.is_ok(),
             "pipeline_test_0.toml should be valid: {:?}",
@@ -1942,7 +2051,7 @@ mod tests {
 
     #[test]
     fn test_example_simple_pipeline_toml() {
-        let config = XBricksConfig::from_file("../wabrix/examples/simple_pipeline.toml");
+        let config = WabricksConfig::from_file("../wabrix/examples/simple_pipeline.toml");
         assert!(
             config.is_ok(),
             "simple_pipeline.toml should be valid: {:?}",
@@ -1997,7 +2106,7 @@ mod tests {
             ]
         "#;
 
-        let config: XBricksConfig = toml::from_str(toml_str).unwrap();
+        let config: WabricksConfig = toml::from_str(toml_str).unwrap();
         assert!(config.validate().is_ok());
 
         // Verify partition requests were parsed correctly
@@ -2026,7 +2135,7 @@ mod tests {
             ]
         "#;
 
-        let config: XBricksConfig = toml::from_str(toml_str).unwrap();
+        let config: WabricksConfig = toml::from_str(toml_str).unwrap();
         let result = config.validate();
         assert!(result.is_err());
         assert!(result
@@ -2054,7 +2163,7 @@ mod tests {
             ]
         "#;
 
-        let config: XBricksConfig = toml::from_str(toml_str).unwrap();
+        let config: WabricksConfig = toml::from_str(toml_str).unwrap();
         let result = config.validate();
         assert!(result.is_err());
         assert!(result
@@ -2081,7 +2190,7 @@ mod tests {
             ]
         "#;
 
-        let config: XBricksConfig = toml::from_str(toml_str).unwrap();
+        let config: WabricksConfig = toml::from_str(toml_str).unwrap();
         let result = config.validate();
         assert!(result.is_err());
         assert!(result
@@ -2108,7 +2217,7 @@ mod tests {
             ]
         "#;
 
-        let config: XBricksConfig = toml::from_str(toml_str).unwrap();
+        let config: WabricksConfig = toml::from_str(toml_str).unwrap();
         let result = config.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("has count = 0"));
@@ -2116,7 +2225,7 @@ mod tests {
 
     #[test]
     fn test_example_mixed_umem_workers_toml() {
-        let config = XBricksConfig::from_file("../wabrix/examples/mixed_umem_workers.toml");
+        let config = WabricksConfig::from_file("../wabrix/examples/mixed_umem_workers.toml");
         assert!(
             config.is_ok(),
             "mixed_umem_workers.toml should be valid: {:?}",
@@ -2161,7 +2270,7 @@ mod tests {
             ]
         "#;
 
-        let config: XBricksConfig = toml::from_str(toml_str).unwrap();
+        let config: WabricksConfig = toml::from_str(toml_str).unwrap();
         let result = config.validate();
         assert!(result.is_err());
         assert!(result
@@ -2188,7 +2297,7 @@ mod tests {
             ]
         "#;
 
-        let config: XBricksConfig = toml::from_str(toml_str).unwrap();
+        let config: WabricksConfig = toml::from_str(toml_str).unwrap();
         let result = config.validate();
         assert!(result.is_err());
         assert!(result
@@ -2215,7 +2324,7 @@ mod tests {
             ]
         "#;
 
-        let config: XBricksConfig = toml::from_str(toml_str).unwrap();
+        let config: WabricksConfig = toml::from_str(toml_str).unwrap();
         assert!(config.validate().is_ok());
     }
 
@@ -2267,7 +2376,7 @@ mod tests {
     #[test]
     fn test_wasm_inspector_upstream_umem_match_is_accepted() {
         let toml_str = wasm_umem_pipeline_toml(0, 0);
-        let config: XBricksConfig = toml::from_str(&toml_str).unwrap();
+        let config: WabricksConfig = toml::from_str(&toml_str).unwrap();
         assert!(config.validate().is_ok(), "identical umem should be valid");
     }
 
@@ -2311,7 +2420,7 @@ mod tests {
                 id = "drop2"
                 type = "DropNode"
         "#;
-        let config: XBricksConfig = toml::from_str(toml_str).unwrap();
+        let config: WabricksConfig = toml::from_str(toml_str).unwrap();
         assert!(
             config.validate().is_ok(),
             "matching umem via XSK lookup should be valid"
@@ -2383,7 +2492,7 @@ mod tests {
         umem = "1"
         "#;
 
-        let result = XBricksConfig::from_toml_str(toml_str);
+        let result = WabricksConfig::from_toml_str(toml_str);
 
         // Assert that the configuration failed validation
         assert!(

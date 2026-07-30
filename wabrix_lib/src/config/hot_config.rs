@@ -1,4 +1,5 @@
 use crate::generator_node::GenState;
+use crate::toml_parser::PipelineLifecycle;
 use arc_swap::ArcSwap;
 use macaddr::MacAddr6;
 use serde::{Deserialize, Serialize};
@@ -22,6 +23,9 @@ pub enum NodeDynamicState {
     },
     Inspector {
         drop_probability: f32,
+    },
+    WasmEngine {
+        wasm_file_path: String,
     },
     #[default]
     Static,
@@ -96,6 +100,11 @@ impl NodeDynamicState {
                     }
                 }
             }
+            NodeDynamicState::WasmEngine { wasm_file_path } => {
+                if let Some(path_str) = updates.get("wasm_file_path") {
+                    *wasm_file_path = path_str.to_string();
+                }
+            }
             NodeDynamicState::Static => {}
         }
     }
@@ -113,11 +122,11 @@ pub struct HotPipelineConfig {
     // ⚡ FAST PATH: Workers use this.
     // Index matches usize::from(&node_id)
     pub fast_nodes: Vec<HotNodeData>,
-
-    // 🐌 SLOW PATH: Axum API uses this to translate UI strings into the Vec index
+    // SLOW PATH: Axum API uses this to translate UI strings into the Vec index
     pub name_to_index: HashMap<String, usize>,
-
-    /// Timer poll frequency in Hz. Hot-changeable — workers read this on each iteration.
+    /// Hot-changeable — workers read this on each iteration.
+    pub lifecycle_state: Option<PipelineLifecycle>,
+    /// Timer poll frequency in Hz. - Hot-changeable
     pub poll_frequency: u64,
 }
 

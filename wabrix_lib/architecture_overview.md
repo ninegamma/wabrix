@@ -12,9 +12,9 @@ XBricks is a high-performance, run-to-completion (RTC) userspace networking engi
 
 The configuration layer acts as the static definition of the system state, bridging the TOML files, the React GUI, and the initialization engine.
 
-* **`XBricksConfig`:** The root struct representing the user's intended topology (`[umem]`, `[xsk]`, `[workers]`, `[[pipelines]]`). It holds parameters as loosely-typed strings (`HashMap<String, String>`).
+* **`WabricksConfig`:** The root struct representing the user's intended topology (`[umem]`, `[xsk]`, `[workers]`, `[[pipelines]]`). It holds parameters as loosely-typed strings (`HashMap<String, String>`).
 * **Validation Phase:** Ensures mathematical consistency before touching hardware (e.g., verifying UMEM sizes against FQ/CQ/RX/TX rings, validating queue-to-worker assignments, and resolving UMEM partition requests).
-* **Translation:** Transforms the `XBricksConfig` into a `SystemBuilder` configuration, mapping logical interfaces and queues to specific CPU cores and worker IDs.
+* **Translation:** Transforms the `WabricksConfig` into a `SystemBuilder` configuration, mapping logical interfaces and queues to specific CPU cores and worker IDs.
 
 ## 2. Initialization Phase (`SystemBuilder`)
 

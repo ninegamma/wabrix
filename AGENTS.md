@@ -56,7 +56,7 @@ xbrix/
 | `xbricks_lib/src/system_builder.rs` | `XSocketRegistry`, system wiring (UMEM allocation, partition assignment) |
 | `xbricks_lib/src/pipeline.rs` | Pipeline DAG runner, `PipelineFactory`, `PipelineRunner`, worker thread spawner |
 | `xbricks_lib/src/nodes.rs` | Built-in pipeline nodes (`BatchRxNode`, `BatchTxNode`, etc.) |
-| `xbricks_lib/src/toml_parser.rs` | `XBricksConfig` — top-level TOML config deserializer |
+| `xbricks_lib/src/toml_parser.rs` | `WabricksConfig` — top-level TOML config deserializer |
 | `xbricks_lib/src/config/` | BPF program loading, interface setup, hot-reload config state |
 | `xbricks_wasm/src/wasm_manager.rs` | Plugin lifecycle: load, instantiate, call, unload |
 | `xbricks_wasm/src/wasm_engine.rs` | Wasmtime `Engine` + `Linker` setup, host-function registration |

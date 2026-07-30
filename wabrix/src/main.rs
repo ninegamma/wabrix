@@ -1,10 +1,11 @@
-mod metrics_server; // Added the new metrics server module
+mod metrics_server;
 
 use anyhow::Context;
 use clap::Parser;
 use log::{debug, error, info};
 use separator::Separatable;
 use std::collections::HashMap;
+use std::env;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -16,6 +17,7 @@ use wabrix_base::telemetry::{
 };
 use wabrix_base::ControlEvent;
 use wabrix_lib::config::hot_config::SharedSystemState;
+use wabrix_lib::config::reconciliation::{reconcile_config, ReconciliationResult};
 use wabrix_lib::probe_kernel_fds;
 
 #[derive(Debug, Parser)]
@@ -30,23 +32,19 @@ struct Opt {
 pub enum SystemCommand {
     Start,
     Stop,
+    Apply(String),
     Check,
-    Restart,
     Shutdown,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize standard terminal logging (e.g., via env_logger)
-    // Run with `RUST_LOG=info cargo run` to see logs
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
 
     let (telemetry_tx, _) = tokio::sync::broadcast::channel::<TMLiveStats>(100);
     let (ctrl_tx, _) = tokio::sync::broadcast::channel::<Arc<ControlEvent>>(100);
 
-    // ==========================================================
-    // SPAWN PROMETHEUS METRICS SERVER
-    // ==========================================================
+    // Spawn Prometheus metrics server
     metrics_server::spawn_metrics_server(telemetry_tx.subscribe());
 
     log::info!("Starting Wabrix Open Source Engine...");
@@ -56,26 +54,40 @@ async fn main() -> anyhow::Result<()> {
         "TSC frequency: {} Hz",
         platform_data.tsc_frequency.separated_string()
     );
+    // - PROBE INTERFACES
     wabrix_base::system::probe_xdp_interfaces();
 
-    // --- LOAD CONFIGURATION ---
-    info!("Loading configuration from: {}", opt.config);
-    let config = wabrix_lib::toml_parser::XBricksConfig::from_file(&opt.config)
-        .with_context(|| format!("Failed to load configuration from {}", opt.config))?;
-    info!("Configuration loaded and validated successfully");
+    // - LOAD CONFIGURATION AND DETERMINE INITIAL STATE
+    info!("Evaluating configuration from: {}", opt.config);
 
-    let shared_config = Arc::new(RwLock::new(config));
+    let (initial_config, mut dataplane_active) =
+        match wabrix_lib::toml_parser::WabricksConfig::from_file(&opt.config) {
+            Ok(config) => {
+                info!(
+                    "Configuration loaded and validated successfully. Initiating START sequence."
+                );
+                (config, true)
+            }
+            Err(e) => {
+                error!(
+                    "Invalid or missing configuration file at {}: {}",
+                    opt.config, e
+                );
+                info!("System initialized in STOP state. Awaiting valid configuration via CLI.");
+                (wabrix_lib::toml_parser::WabricksConfig::default(), false)
+            }
+        };
+
+    let shared_config = Arc::new(RwLock::new(initial_config));
     let config_path = Arc::new(RwLock::new(opt.config.clone()));
 
     let initial_state = SharedSystemState::new(HashMap::new());
     let active_shared_state = Arc::new(arc_swap::ArcSwap::new(initial_state));
 
-    // --- SETUP CONTROL CHANNEL ---
-    let (cmd_tx, mut cmd_rx) = mpsc::channel::<SystemCommand>(10);
+    // - SETUP CONTROL CHANNEL
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<SystemCommand>(10); // Setup control channel
 
-    // ==========================================================
-    // SPAWN ASYNC CLI LISTENER
-    // ==========================================================
+    // Spawn async CLI listener
     let cli_cmd_tx = cmd_tx.clone();
     let cli_ctrl_tx = ctrl_tx.clone();
 
@@ -84,10 +96,14 @@ async fn main() -> anyhow::Result<()> {
         let mut reader = BufReader::new(stdin).lines();
 
         println!("=========================================");
-        println!("Wabrix CLI Ready.");
+        println!("Wabrix Declarative CLI Ready.");
         println!("Prometheus Exporter: http://localhost:9090/metrics");
+        match env::current_dir() {
+            Ok(dir) => println!("Working directory is: {}", dir.display()),
+            Err(err) => println!("Working directory is unavailable ({})", err),
+        }
         println!(
-            "Commands: start, stop, restart, check, run, ctrl <address_pattern> <opcode>, shutdown"
+            "Commands: start, stop, apply <file.toml>, check, ctrl <address> <opcode>, shutdown"
         );
         println!("=========================================");
 
@@ -100,40 +116,30 @@ async fn main() -> anyhow::Result<()> {
             match parts[0].to_lowercase().as_str() {
                 "start" => { let _ = cli_cmd_tx.send(SystemCommand::Start).await; }
                 "stop" => { let _ = cli_cmd_tx.send(SystemCommand::Stop).await; }
-                "restart" => { let _ = cli_cmd_tx.send(SystemCommand::Restart).await; }
                 "check" => { let _ = cli_cmd_tx.send(SystemCommand::Check).await; }
+                "apply" => {
+                    let path = parts.get(1).map(|s| s.to_string()).unwrap_or_else(|| "wabrix.toml".to_string());
+                    let _ = cli_cmd_tx.send(SystemCommand::Apply(path)).await;
+                }
                 "ctrl" => {
-                    // If you type `ctrl <address_pattern> <opcode> <byte1> <byte2>...`
                     let address_pattern = parts.get(1).unwrap_or(&"*").to_string();
                     let opcode = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
-
-                    // Parse any remaining parts as u8 bytes for the payload
                     let payload: Vec<u8> = parts.iter().skip(3)
                         .filter_map(|s| s.parse::<u8>().ok())
                         .collect();
 
-                    println!("=> Broadcasting ControlEvent (address: {}, opcode: {}, payload: {:?}) to plugins...", address_pattern, opcode, payload);
-
-                    let event = Arc::new(ControlEvent {
-                        address_pattern,
-                        opcode,
-                        payload,
-                    });
+                    println!("=> Broadcasting ControlEvent (address: {}, opcode: {}, payload: {:?})", address_pattern, opcode, payload);
+                    let event = Arc::new(ControlEvent { address_pattern, opcode, payload });
                     let _ = cli_ctrl_tx.send(event);
                 }
                 "shutdown" | "exit" | "quit" => {
                     let _ = cli_cmd_tx.send(SystemCommand::Shutdown).await;
                     break;
                 }
-                _ => println!("Unknown command. Use: start, stop, restart, check, ctrl <address_pattern> <opcode> [payload_bytes...], shutdown"),
+                _ => println!("Unknown command. Use: start, stop, apply <file>, check, ctrl <address> <opcode> [payload_bytes], shutdown"),
             }
         }
     });
-
-    // ==========================================================
-    // DATA PLANE LIFECYCLE LOOP (State Machine)
-    // ==========================================================
-    let mut dataplane_active = true;
 
     loop {
         let next_cmd;
@@ -142,10 +148,10 @@ async fn main() -> anyhow::Result<()> {
             info!("--- Initializing Data Plane ---");
 
             let action = {
-                // 1. Reload config from disk
-                let current_config = {
+                // Reload config from disk
+                let mut current_config = {
                     let path = config_path.read().await;
-                    match wabrix_lib::toml_parser::XBricksConfig::from_file(&*path) {
+                    match wabrix_lib::toml_parser::WabricksConfig::from_file(&*path) {
                         Ok(fresh) => {
                             info!("Configuration reloaded from: {}", *path);
                             let mut guard = shared_config.write().await;
@@ -159,7 +165,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
 
-                // 2. System Checks
+                // System Checks
                 let worker_cores: Vec<usize> = current_config
                     .wabrix
                     .workers
@@ -174,7 +180,7 @@ async fn main() -> anyhow::Result<()> {
                     .collect();
                 wabrix_base::system::check_system(&worker_cores, &interfaces);
 
-                // 3. Configure Network Interfaces
+                // Configure Network Interfaces
                 info!("Configuring network interfaces...");
                 let _configured_ifaces =
                     wabrix_lib::config::interface_setup::check_or_configure_interfaces(
@@ -185,7 +191,7 @@ async fn main() -> anyhow::Result<()> {
                     .context("Failed to configure network interfaces")
                     .unwrap();
 
-                // 4. Setup BPF
+                // Setup BPF
                 let (interface_skels, _xdp_links) =
                     wabrix_lib::config::configure_bpf::setup_bpf(interfaces.clone())
                         .context("Failed to setup BPF programs")
@@ -193,7 +199,7 @@ async fn main() -> anyhow::Result<()> {
 
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-                // 5. Build System
+                // Build System
                 info!("Building XDP system from configuration...");
                 let sys_builder = current_config
                     .to_system_builder()
@@ -202,7 +208,7 @@ async fn main() -> anyhow::Result<()> {
 
                 let builder_ctrl_tx = Some(ctrl_tx.clone());
 
-                let xbricks_system = tokio::task::block_in_place(|| {
+                let wabrix_system = tokio::task::block_in_place(|| {
                     sys_builder
                         .build(
                             Some(&interface_skels),
@@ -211,21 +217,21 @@ async fn main() -> anyhow::Result<()> {
                         )
                         .map_err(|e| anyhow::anyhow!("Failed to build XDP system: {}", e))
                 })?;
+                let system_state = wabrix_system.shared_state.clone();
+                active_shared_state.store(system_state.clone());
 
-                active_shared_state.store(xbricks_system.shared_state.clone());
-
-                // 6. Wait for links
+                // Wait for physical links
                 for iface in &current_config.wabrix.ifaces {
                     wabrix_base::system::wait_for_physical_link(&iface.name).await;
                 }
 
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-                // 7. Spawn Workers
+                // Spawn Workers
                 let shutdown = Arc::new(AtomicBool::new(false));
                 let workers_completed = Arc::new(AtomicUsize::new(0));
-                let pipeline_registry = Arc::clone(&xbricks_system.telemetry_registry);
-                let handles = xbricks_system
+                let pipeline_registry = Arc::clone(&wabrix_system.telemetry_registry);
+                let handles = wabrix_system
                     .spawn_workers(shutdown.clone(), workers_completed.clone(), false)
                     .context("Failed to spawn worker threads")?;
 
@@ -246,30 +252,63 @@ async fn main() -> anyhow::Result<()> {
                     shutdown.clone(),
                 )?;
 
-                // ==========================================================
-                // WAIT FOR CLI EVENTS OR WORKER COMPLETION WHILE RUNNING
-                // ==========================================================
+                // Wait for CLI events or worker completion while running
                 let num_workers = handles.len();
-                let cmd = tokio::select! {
-                    _ = tokio::signal::ctrl_c() => SystemCommand::Shutdown,
-                    Some(c) = cmd_rx.recv() => c,
-                    _ = async {
-                        loop {
-                            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                            if num_workers > 0 && workers_completed.load(Ordering::Acquire) >= num_workers {
-                                break;
+
+                let cmd = loop {
+                    tokio::select! {
+                        _ = tokio::signal::ctrl_c() => break SystemCommand::Shutdown,
+                        Some(c) = cmd_rx.recv() => {
+                            match c {
+                                SystemCommand::Apply(new_path) => {
+                                    info!("Applying new configuration from: {}", new_path);
+                                    let target_config_result = wabrix_lib::toml_parser::WabricksConfig::from_file(&new_path);
+
+                                    match target_config_result {
+                                        Ok(target_config) => {
+                                            match reconcile_config(system_state.clone(), &current_config, &target_config) {
+                                                ReconciliationResult::FullRestart => {
+                                                info!("Structural changes detected. Initiating full data plane restart.");
+                                                let mut path_guard = config_path.write().await;
+                                                *path_guard = new_path;
+                                                break SystemCommand::Start;
+                                                },
+                                                ReconciliationResult::LiveUpdated => {
+                                                    info!("Live configuration updates applied via RCU.");
+                                                    // Keep the local baseline synchronized for future comparisons.
+                                                    current_config = target_config;
+                                                },
+                                                ReconciliationResult::NoAction => {
+                                                    info!("Target configuration matches current state. No action taken.");
+                                                },
+                                                ReconciliationResult::Error(err) => {
+                                                    error!("Reconciliation failed: {}. Configuration remains unchanged.", err);
+                                                }
+                                            }
+                                        },
+                                        Err(e) => {
+                                            error!("Failed to load target configuration: {}. Ignoring apply command.", e);
+                                        }
+                                    }
+                                },
+                                other_cmd => break other_cmd,
                             }
+                        },
+                        _ = async {
+                            loop {
+                                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                                if num_workers > 0 && workers_completed.load(Ordering::Acquire) >= num_workers {
+                                    break;
+                                }
+                            }
+                        } => {
+                            info!("All workers have completed their execution. Ending single run.");
+                            break SystemCommand::Stop;
                         }
-                    } => {
-                        info!("All workers have completed their execution. Ending single run.");
-                        SystemCommand::Stop
-                    },
-                    else => SystemCommand::Shutdown,
+                    }
                 };
 
-                // ==========================================================
-                // TEARDOWN DATA PLANE
-                // ==========================================================
+                // Teardown data plane
                 info!("Stopping data plane workers...");
 
                 debug!("Evicting sockets from Kernel BPF maps...");
@@ -289,16 +328,14 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
 
-                active_shared_state.store(wabrix_lib::config::hot_config::SharedSystemState::new(
-                    std::collections::HashMap::new(),
-                ));
+                active_shared_state.store(SharedSystemState::new(HashMap::new()));
 
                 debug!("Detaching BPF programs from physical interfaces...");
                 drop(_xdp_links);
                 drop(interface_skels);
 
                 cmd
-            }; // <--- 🔥 RUST SCOPE DESTROYS ALL SOCKETS HERE 🔥
+            };
 
             probe_kernel_fds("POST-DROP");
             info!("Userspace destroyed. Yielding to kernel for graceful AF_XDP unbind...");
@@ -307,9 +344,7 @@ async fn main() -> anyhow::Result<()> {
 
             next_cmd = action;
         } else {
-            // ==========================================================
-            // IDLE STATE
-            // ==========================================================
+            // Idle state handling
             info!("Dataplane is currently OFFLINE. Awaiting CLI commands...");
 
             next_cmd = tokio::select! {
@@ -319,9 +354,7 @@ async fn main() -> anyhow::Result<()> {
             };
         }
 
-        // ==========================================================
-        // STATE MACHINE EVALUATION
-        // ==========================================================
+        // State machine evaluation
         match next_cmd {
             SystemCommand::Start => {
                 info!("Received START command. Booting hardware...");
@@ -331,8 +364,13 @@ async fn main() -> anyhow::Result<()> {
                 info!("Received STOP command. Entering IDLE state...");
                 dataplane_active = false;
             }
-            SystemCommand::Restart => {
-                info!("Received RESTART command. Rebooting data plane...");
+            SystemCommand::Apply(path) => {
+                info!(
+                    "Received APPLY command in offline mode. Setting target config to {}",
+                    path
+                );
+                let mut path_guard = config_path.write().await;
+                *path_guard = path;
                 dataplane_active = true;
             }
             SystemCommand::Check => {
@@ -358,8 +396,8 @@ async fn main() -> anyhow::Result<()> {
 
                 info!("Validating pipeline topology...");
                 match current_config.to_system_builder() {
-                    Ok(_) => info!("✅ Configuration and topology are valid!"),
-                    Err(e) => error!("❌ Topology validation failed: {}", e),
+                    Ok(_) => info!("Configuration and topology are valid!"),
+                    Err(e) => error!("Topology validation failed: {}", e),
                 }
             }
             SystemCommand::Shutdown => {

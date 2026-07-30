@@ -1,5 +1,5 @@
 pub(crate) use crate::nodes::{BatchRxNode, BatchTxNode, DropNode, FastParserNode};
-use crate::toml_parser::PipelineInstance;
+use crate::toml_parser::{PipelineLifecycle, PipelineInstance};
 use arc_swap::ArcSwap;
 use core_affinity::CoreId;
 use log::{debug, info};
@@ -677,8 +677,7 @@ impl PipelineFactory {
 
                     let wasm_path = node_instance
                         .node_config
-                        .args
-                        .get("wasm_file_path")
+                        .effective_arg("wasm_file_path")
                         .ok_or_else(|| {
                             format!(
                                 "{} {} missing 'wasm_file_path' in args",
@@ -849,6 +848,7 @@ impl PipelineFactory {
             fast_nodes,
             name_to_index,
             poll_frequency: pipeline_instance.poll_frequency,
+            lifecycle_state: pipeline_instance.desired_state.clone(),
         }));
 
         // =========================================================
@@ -1085,6 +1085,19 @@ impl PipelineRunner {
         let mut total_packets_this_iteration = 0;
         let mut timer_work_done = false;
 
+        let hot = self.pipeline_rcu.load();
+
+        match hot.lifecycle_state.as_ref() {
+            Some(PipelineLifecycle::Paused) => {
+                // Pipeline intentionally disabled.
+                return (0, 0);
+            }
+
+            _ => {
+                // Online
+            }
+        }
+
         // =========================================================
         //    INGRESS: Process all entry points in the DAG
         // =========================================================
@@ -1108,7 +1121,7 @@ impl PipelineRunner {
 
         let now = unsafe { std::arch::x86_64::_rdtsc() };
 
-        let poll_frequency = self.pipeline_rcu.load().poll_frequency.max(1);
+        let poll_frequency = hot.poll_frequency.max(1);
         if now - self.last_timer_poll > self.tsc_freq / poll_frequency {
             // =========================================================
             //    TIMERS: Process asynchronous events (e.g., TCP Retransmits)
