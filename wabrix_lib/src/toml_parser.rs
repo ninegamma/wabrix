@@ -334,6 +334,7 @@ pub struct NodeConfig {
     pub hot_args: HashMap<String, String>,
     #[serde(default, deserialize_with = "deserialize_wasm_data")]
     pub wasm_data: Option<HashMap<String, String>>,
+    pub hot_wasm_data: Option<HashMap<String, String>>,
     // * Target operational state of the individual node
     // * Allows overriding the pipeline-level state
     pub desired_state: Option<PipelineLifecycle>,
@@ -510,6 +511,7 @@ impl WabricksConfig {
                         },
                         hot_args: HashMap::new(),
                         wasm_data: None,
+                        hot_wasm_data: None,
                         desired_state: None,
                     },
                     // Node 2: BatchTxNode sink
@@ -530,6 +532,7 @@ impl WabricksConfig {
                         },
                         hot_args: HashMap::new(),
                         wasm_data: None,
+                        hot_wasm_data: None,
                         desired_state: None,
                     },
                 ],
@@ -1504,6 +1507,7 @@ impl WabricksConfig {
                             args: node_conf.args.clone(),
                             hot_args: node_conf.hot_args.clone(),
                             wasm_data: node_conf.wasm_data.clone(),
+                            hot_wasm_data: node_conf.hot_wasm_data.clone(),
                             desired_state: node_conf.desired_state.clone(),
                         },
                         state: NodeDynamicState::default(),

@@ -51,17 +51,24 @@ id = "tcp_engine"
 type = "WasmEngine"
 routes = ["shared_tx_sink", "veth_sink", "drop"]
 labels = ["Drops", "Linux", "Replies", "SYNs", "FINs"]
-args= { umem = "0", wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/tcp_engine.wasm" }
-hot_args= {}
+args= { umem = "0"  }
+hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/tcp_engine.wasm" }
 
+# Cold Data: Passed exactly once to `init-data()` during instantiation.
+# Changes here require a FullRestart (ReconciliationAction).
 [pipelines.nodes.wasm_data]
-dst_mac = "44:49:88:06:63:39"
-syn_rate = "100"
 src_ip = "10.10.10.222"
+dst_ip = "10.10.10.31"
+src_mac = "44:49:88:06:63:38"
+dst_mac = "44:49:88:06:63:39"
+
+# Hot Data: Diffed during reconcile_config().
+# Changes here trigger a ControlEvent dispatch to `on-control-event()`.
+[pipelines.nodes.hot_wasm_data]
+syn_rate = "100"
 syn_limit = "1k"
 close_timeout = "5000"
-src_mac = "44:49:88:06:63:38"
-dst_ip = "10.10.10.31"
+
 
 [[pipelines.nodes]]
 id = "nd_parser_veth"

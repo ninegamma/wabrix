@@ -1,5 +1,5 @@
 pub(crate) use crate::nodes::{BatchRxNode, BatchTxNode, DropNode, FastParserNode};
-use crate::toml_parser::{PipelineLifecycle, PipelineInstance};
+use crate::toml_parser::{PipelineInstance, PipelineLifecycle};
 use arc_swap::ArcSwap;
 use core_affinity::CoreId;
 use log::{debug, info};
@@ -790,6 +790,21 @@ impl PipelineFactory {
                         instance_idx * frames_per_instance * umem_info.frame_size;
                     wasm_instance_counters[umem_id] += 1;
 
+                    // Create a unified configuration map combining cold and hot data for initialization
+                    let mut combined_wasm_data = std::collections::HashMap::new();
+
+                    if let Some(cold_data) = &node_instance.node_config.wasm_data {
+                        for (k, v) in cold_data {
+                            combined_wasm_data.insert(k.clone(), v.clone());
+                        }
+                    }
+
+                    if let Some(hot_data) = &node_instance.node_config.hot_wasm_data {
+                        for (k, v) in hot_data {
+                            combined_wasm_data.insert(k.clone(), v.clone());
+                        }
+                    }
+
                     if node_type == "WasmInspectorNode" {
                         use wabrix_wasm::WasmInspectorNode;
                         Box::new(WasmInspectorNode::new(
@@ -801,11 +816,7 @@ impl PipelineFactory {
                             telemetry_metrics,
                             partition_start_bytes,
                             umem_id as u8,
-                            node_instance
-                                .node_config
-                                .wasm_data
-                                .clone()
-                                .unwrap_or_default(),
+                            combined_wasm_data,
                         ))
                     } else {
                         use wabrix_wasm::WasmEngine;
@@ -818,14 +829,10 @@ impl PipelineFactory {
                             telemetry_metrics,
                             partition_start_bytes,
                             umem_id as u8,
-                            node_instance
-                                .node_config
-                                .wasm_data
-                                .clone()
-                                .unwrap_or_default(),
+                            combined_wasm_data,
                             platform_data,
                             mailbox_offset,
-                        ))
+                        )?)
                     }
                 }
                 _ => {

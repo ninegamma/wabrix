@@ -54,6 +54,7 @@ async fn main() -> anyhow::Result<()> {
         "TSC frequency: {} Hz",
         platform_data.tsc_frequency.separated_string()
     );
+
     // - PROBE INTERFACES
     wabrix_base::system::probe_xdp_interfaces();
 
@@ -85,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
     let active_shared_state = Arc::new(arc_swap::ArcSwap::new(initial_state));
 
     // - SETUP CONTROL CHANNEL
-    let (cmd_tx, mut cmd_rx) = mpsc::channel::<SystemCommand>(10); // Setup control channel
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<SystemCommand>(10);
 
     // Spawn async CLI listener
     let cli_cmd_tx = cmd_tx.clone();
@@ -188,14 +189,12 @@ async fn main() -> anyhow::Result<()> {
                         &current_config.wabrix.xsk,
                         false,
                     )
-                    .context("Failed to configure network interfaces")
-                    .unwrap();
+                        .context("Failed to configure network interfaces")?;
 
                 // Setup BPF
                 let (interface_skels, _xdp_links) =
                     wabrix_lib::config::configure_bpf::setup_bpf(interfaces.clone())
-                        .context("Failed to setup BPF programs")
-                        .unwrap();
+                        .context("Failed to setup BPF programs")?;
 
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
@@ -203,8 +202,7 @@ async fn main() -> anyhow::Result<()> {
                 info!("Building XDP system from configuration...");
                 let sys_builder = current_config
                     .to_system_builder()
-                    .context("Failed to create system builder")
-                    .unwrap();
+                    .context("Failed to create system builder")?;
 
                 let builder_ctrl_tx = Some(ctrl_tx.clone());
 
@@ -217,6 +215,7 @@ async fn main() -> anyhow::Result<()> {
                         )
                         .map_err(|e| anyhow::anyhow!("Failed to build XDP system: {}", e))
                 })?;
+
                 let system_state = wabrix_system.shared_state.clone();
                 active_shared_state.store(system_state.clone());
 
@@ -246,6 +245,7 @@ async fn main() -> anyhow::Result<()> {
                     pipeline_registry.clone(),
                     shutdown.clone(),
                 )?;
+
                 spawn_pipeline_telemetry(
                     telemetry_tx.clone(),
                     pipeline_registry,
@@ -268,14 +268,20 @@ async fn main() -> anyhow::Result<()> {
                                         Ok(target_config) => {
                                             match reconcile_config(system_state.clone(), &current_config, &target_config) {
                                                 ReconciliationResult::FullRestart => {
-                                                info!("Structural changes detected. Initiating full data plane restart.");
-                                                let mut path_guard = config_path.write().await;
-                                                *path_guard = new_path;
-                                                break SystemCommand::Start;
+                                                    info!("Structural changes detected. Initiating full data plane restart.");
+                                                    let mut path_guard = config_path.write().await;
+                                                    *path_guard = new_path;
+                                                    break SystemCommand::Start;
                                                 },
-                                                ReconciliationResult::LiveUpdated => {
-                                                    info!("Live configuration updates applied via RCU.");
-                                                    // Keep the local baseline synchronized for future comparisons.
+                                                ReconciliationResult::LiveUpdated(events) => {
+                                                    info!("Live configuration updates applied. Dispatching {} control events.", events.len());
+
+                                                    // Dispatch imperative events generated from Wasm diffs
+                                                    for event in events {
+                                                        let _ = ctrl_tx.send(event);
+                                                    }
+
+                                                    // Keep the local baseline synchronized for future comparisons
                                                     current_config = target_config;
                                                 },
                                                 ReconciliationResult::NoAction => {

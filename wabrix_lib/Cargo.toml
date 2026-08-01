@@ -42,6 +42,7 @@ rand = "0.10"
 wabrix_wasm = { workspace = true, optional = true }
 wasmtime = { workspace = true }
 wasmtime-wasi = { workspace = true }
+postcard = "1.1.3"
 
 [build-dependencies]
 anyhow = { workspace = true }

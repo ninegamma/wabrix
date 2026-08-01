@@ -74,7 +74,7 @@ impl WasmEngine {
         wasm_data: HashMap<String, String>,
         platform_data: &PlatformData,
         mailbox_offset: u32,
-    ) -> Self {
+    ) -> Result<Self, String> {
         // 1. Fetch the Component from the Manager's DashMap cache
         // This takes nanoseconds if already loaded, avoiding disk I/O.
         let component = manager
@@ -122,15 +122,34 @@ impl WasmEngine {
 
         if !wasm_data.is_empty() {
             let data: Vec<(String, String)> = wasm_data.into_iter().collect();
-            bindings
-                .wabrix_plugins_packet_engine()
-                .call_init_data(&mut store, &data, platform_data.tsc_frequency)
-                .unwrap_or_else(|e| {
-                    log::error!("Failed to call init-data on packet-engine: {}", e);
-                });
+            let init_result = bindings.wabrix_plugins_packet_engine().call_init_data(
+                &mut store,
+                &data,
+                platform_data.tsc_frequency,
+            );
+
+            match init_result {
+                Ok(true) => {
+                    // Plugin accepted the configuration and initialized successfully
+                }
+                Ok(false) => {
+                    // Plugin rejected the configuration due to missing or invalid data
+                    return Err(format!(
+                        "WasmEngine node {} rejected initialization data. Verify TOML parameters.",
+                        id
+                    ));
+                }
+                Err(e) => {
+                    // Wasm runtime encountered a trap or fatal execution error during init
+                    return Err(format!(
+                        "WasmEngine node {} crashed during init-data execution: {}",
+                        id, e
+                    ));
+                }
+            }
         }
 
-        Self {
+        Ok(Self {
             id,
             store,
             bindings,
@@ -145,7 +164,7 @@ impl WasmEngine {
             umem_id,
             supports_oob_telemetry: false,
             poisoned: false,
-        }
+        })
     }
 
     /// PRIVATE HELPER: Handles WASM execution, Length mutation, Telemetry, and Routing
