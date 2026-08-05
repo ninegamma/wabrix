@@ -805,35 +805,20 @@ impl PipelineFactory {
                         }
                     }
 
-                    if node_type == "WasmInspectorNode" {
-                        use wabrix_wasm::WasmInspectorNode;
-                        Box::new(WasmInspectorNode::new(
-                            my_id.clone(),
-                            manager,
-                            wasm_path,
-                            routing_table,
-                            None,
-                            telemetry_metrics,
-                            partition_start_bytes,
-                            umem_id as u8,
-                            combined_wasm_data,
-                        ))
-                    } else {
-                        use wabrix_wasm::WasmEngine;
-                        let _worker_rx = ctrl_tx.as_ref().map(|tx| tx.subscribe());
-                        Box::new(WasmEngine::new(
-                            my_id.clone(),
-                            manager,
-                            wasm_path,
-                            routing_table,
-                            telemetry_metrics,
-                            partition_start_bytes,
-                            umem_id as u8,
-                            combined_wasm_data,
-                            platform_data,
-                            mailbox_offset,
-                        )?)
-                    }
+                    use wabrix_wasm::WasmEngine;
+                    let _worker_rx = ctrl_tx.as_ref().map(|tx| tx.subscribe());
+                    Box::new(WasmEngine::new(
+                        my_id.clone(),
+                        manager,
+                        wasm_path,
+                        routing_table,
+                        telemetry_metrics,
+                        partition_start_bytes,
+                        umem_id as u8,
+                        combined_wasm_data,
+                        platform_data,
+                        mailbox_offset,
+                    )?)
                 }
                 _ => {
                     return Err(format!(

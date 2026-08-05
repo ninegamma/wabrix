@@ -3,6 +3,7 @@
 
 use anyhow::{anyhow, Result};
 use log::{debug, info, warn};
+use std::collections::BTreeSet;
 use std::process::Command;
 
 /// Interface configuration from TOML
@@ -20,12 +21,63 @@ pub struct InterfaceSetup {
     pub master: Option<String>,
     /// Whether TX checksum offload is enabled. Defaults to false.
     pub checksum_offload: Option<bool>,
+    /// Namespace created by this setup invocation, if any.
+    pub created_namespace: Option<String>,
+}
+
+struct NamespaceRollback<'a> {
+    namespace: &'a str,
+    active: bool,
+}
+
+impl<'a> NamespaceRollback<'a> {
+    fn new(namespace: &'a str) -> Self {
+        Self {
+            namespace,
+            active: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for NamespaceRollback<'_> {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+
+        warn!(
+            "Rolling back network namespace {} after failed interface setup",
+            self.namespace
+        );
+        match Command::new("ip")
+            .args(["netns", "del", self.namespace])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                info!("✓ Rolled back namespace {}", self.namespace);
+            }
+            Ok(output) => {
+                warn!(
+                    "Failed to roll back namespace {}: {}",
+                    self.namespace,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+            Err(err) => {
+                warn!("Failed to roll back namespace {}: {}", self.namespace, err);
+            }
+        }
+    }
 }
 
 impl InterfaceSetup {
     /// Configure the interface: bring it up and set queue count
     /// if b_do_not_change == true, only existence is checked, and a down interface is brought up
-    pub fn configure(&self, b_just_check: bool) -> Result<()> {
+    pub fn configure(&mut self, b_just_check: bool) -> Result<()> {
         info!("Configuring interface {}...", self.name);
 
         // Check if this is a veth interface that needs to be created
@@ -86,7 +138,7 @@ impl InterfaceSetup {
     }
 
     /// Setup veth pair with either bridge-master or namespace configuration
-    fn setup_veth_pair(&self) -> Result<()> {
+    fn setup_veth_pair(&mut self) -> Result<()> {
         let peer_name = self
             .peer
             .as_ref()
@@ -210,11 +262,8 @@ impl InterfaceSetup {
 
         // Create network namespace
         info!("Creating network namespace {}...", namespace);
-        let ns_list_output = Command::new("ip").args(["netns", "list"]).output()?;
-
-        let ns_exists = String::from_utf8_lossy(&ns_list_output.stdout)
-            .lines()
-            .any(|line| line.trim().starts_with(namespace));
+        let ns_exists = namespace_exists(namespace)?;
+        let mut namespace_rollback = None;
 
         if !ns_exists {
             let output = Command::new("ip")
@@ -230,6 +279,8 @@ impl InterfaceSetup {
                 ));
             }
             info!("✓ Created namespace {}", namespace);
+            self.created_namespace = Some(namespace.clone());
+            namespace_rollback = Some(NamespaceRollback::new(namespace));
         } else {
             info!("✓ Namespace {} already exists", namespace);
         }
@@ -352,6 +403,9 @@ impl InterfaceSetup {
         info!("✓ Brought up {} in namespace", peer_name);
 
         info!("✓ Veth pair setup complete");
+        if let Some(rollback) = namespace_rollback.as_mut() {
+            rollback.disarm();
+        }
         Ok(())
     }
 
@@ -1086,6 +1140,7 @@ pub fn check_or_configure_interfaces(
                     ipnet: None,
                     master: None,
                     checksum_offload: None,
+                    created_namespace: None,
                 };
 
                 match temp_setup.get_max_ring_sizes() {
@@ -1114,7 +1169,7 @@ pub fn check_or_configure_interfaces(
             }
         };
 
-        let setup = InterfaceSetup {
+        let mut setup = InterfaceSetup {
             name: iface_cfg.name.clone(),
             queues,
             rxd,
@@ -1126,6 +1181,7 @@ pub fn check_or_configure_interfaces(
             ipnet: iface_cfg.ipnet.clone(),
             master: iface_cfg.master.clone(),
             checksum_offload: iface_cfg.checksum_offload,
+            created_namespace: None,
         };
 
         setup.configure(b_just_check)?;
@@ -1141,6 +1197,68 @@ pub fn check_or_configure_interfaces(
     }
 
     Ok(configured)
+}
+
+fn list_network_namespaces() -> Result<BTreeSet<String>> {
+    let output = Command::new("ip").args(["netns", "list"]).output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "Failed to list network namespaces: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split_whitespace().next().map(String::from))
+        .collect())
+}
+
+fn namespace_exists(namespace: &str) -> Result<bool> {
+    Ok(list_network_namespaces()?.contains(namespace))
+}
+
+/// Remove namespaces created during interface setup.
+pub fn remove_created_namespaces(namespaces: &[String]) -> Result<()> {
+    let namespaces: BTreeSet<&str> = namespaces.iter().map(String::as_str).collect();
+    if namespaces.is_empty() {
+        return Ok(());
+    }
+
+    let existing = list_network_namespaces()?;
+    let mut errors = Vec::new();
+
+    for namespace in namespaces {
+        if !existing.contains(namespace) {
+            debug!(
+                "Skipping removal of namespace {} because it no longer exists",
+                namespace
+            );
+            continue;
+        }
+
+        info!("Removing network namespace {}...", namespace);
+        let output = Command::new("ip")
+            .args(["netns", "del", namespace])
+            .output()?;
+
+        if output.status.success() {
+            info!("✓ Removed namespace {}", namespace);
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            warn!("Failed to remove namespace {}: {}", namespace, stderr);
+            errors.push(format!("{}: {}", namespace, stderr));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "Failed to remove network namespace(s): {}",
+            errors.join("; ")
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -1161,6 +1279,7 @@ mod tests {
             ipnet: None,
             master: None,
             checksum_offload: None,
+            created_namespace: None,
         };
 
         assert_eq!(setup.name, "lo");

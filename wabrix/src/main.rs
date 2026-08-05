@@ -4,11 +4,12 @@ use anyhow::Context;
 use clap::Parser;
 use log::{debug, error, info};
 use separator::Separatable;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
+use std::io::{self, BufRead};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use std::thread;
 use tokio::sync::{mpsc, RwLock};
 
 use wabrix_base::system::PlatformData;
@@ -35,6 +36,42 @@ pub enum SystemCommand {
     Apply(String),
     Check,
     Shutdown,
+}
+
+struct NamespaceCleanup {
+    namespaces: HashSet<String>,
+}
+
+impl NamespaceCleanup {
+    fn new() -> Self {
+        Self {
+            namespaces: HashSet::new(),
+        }
+    }
+
+    fn track(&mut self, namespace: String) {
+        self.namespaces.insert(namespace);
+    }
+
+    fn cleanup(&mut self) {
+        if self.namespaces.is_empty() {
+            return;
+        }
+
+        let mut namespaces: Vec<String> = self.namespaces.drain().collect();
+        namespaces.sort();
+        if let Err(err) =
+            wabrix_lib::config::interface_setup::remove_created_namespaces(&namespaces)
+        {
+            error!("Namespace cleanup failed: {}", err);
+        }
+    }
+}
+
+impl Drop for NamespaceCleanup {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
 }
 
 #[tokio::main]
@@ -84,18 +121,16 @@ async fn main() -> anyhow::Result<()> {
 
     let initial_state = SharedSystemState::new(HashMap::new());
     let active_shared_state = Arc::new(arc_swap::ArcSwap::new(initial_state));
+    let mut namespace_cleanup = NamespaceCleanup::new();
 
     // - SETUP CONTROL CHANNEL
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<SystemCommand>(10);
 
-    // Spawn async CLI listener
+    // Spawn CLI listener on an OS thread so Tokio shutdown is not blocked by stdin.
     let cli_cmd_tx = cmd_tx.clone();
     let cli_ctrl_tx = ctrl_tx.clone();
 
-    tokio::spawn(async move {
-        let stdin = tokio::io::stdin();
-        let mut reader = BufReader::new(stdin).lines();
-
+    thread::spawn(move || {
         println!("=========================================");
         println!("Wabrix Declarative CLI Ready.");
         println!("Prometheus Exporter: http://localhost:9090/metrics");
@@ -108,19 +143,42 @@ async fn main() -> anyhow::Result<()> {
         );
         println!("=========================================");
 
-        while let Ok(Some(line)) = reader.next_line().await {
+        let stdin = io::stdin();
+        for line in stdin.lock().lines() {
+            let line = match line {
+                Ok(line) => line,
+                Err(err) => {
+                    eprintln!("CLI input error: {}", err);
+                    break;
+                }
+            };
+
             let parts: Vec<&str> = line.trim().split_whitespace().collect();
             if parts.is_empty() {
                 continue;
             }
 
             match parts[0].to_lowercase().as_str() {
-                "start" => { let _ = cli_cmd_tx.send(SystemCommand::Start).await; }
-                "stop" => { let _ = cli_cmd_tx.send(SystemCommand::Stop).await; }
-                "check" => { let _ = cli_cmd_tx.send(SystemCommand::Check).await; }
+                "start" => {
+                    if cli_cmd_tx.blocking_send(SystemCommand::Start).is_err() {
+                        break;
+                    }
+                }
+                "stop" => {
+                    if cli_cmd_tx.blocking_send(SystemCommand::Stop).is_err() {
+                        break;
+                    }
+                }
+                "check" => {
+                    if cli_cmd_tx.blocking_send(SystemCommand::Check).is_err() {
+                        break;
+                    }
+                }
                 "apply" => {
                     let path = parts.get(1).map(|s| s.to_string()).unwrap_or_else(|| "wabrix.toml".to_string());
-                    let _ = cli_cmd_tx.send(SystemCommand::Apply(path)).await;
+                    if cli_cmd_tx.blocking_send(SystemCommand::Apply(path)).is_err() {
+                        break;
+                    }
                 }
                 "ctrl" => {
                     let address_pattern = parts.get(1).unwrap_or(&"*").to_string();
@@ -134,7 +192,7 @@ async fn main() -> anyhow::Result<()> {
                     let _ = cli_ctrl_tx.send(event);
                 }
                 "shutdown" | "exit" | "quit" => {
-                    let _ = cli_cmd_tx.send(SystemCommand::Shutdown).await;
+                    let _ = cli_cmd_tx.blocking_send(SystemCommand::Shutdown);
                     break;
                 }
                 _ => println!("Unknown command. Use: start, stop, apply <file>, check, ctrl <address> <opcode> [payload_bytes], shutdown"),
@@ -183,13 +241,19 @@ async fn main() -> anyhow::Result<()> {
 
                 // Configure Network Interfaces
                 info!("Configuring network interfaces...");
-                let _configured_ifaces =
+                let configured_ifaces =
                     wabrix_lib::config::interface_setup::check_or_configure_interfaces(
                         &current_config.wabrix.ifaces,
                         &current_config.wabrix.xsk,
                         false,
                     )
-                        .context("Failed to configure network interfaces")?;
+                    .context("Failed to configure network interfaces")?;
+                for namespace in configured_ifaces
+                    .iter()
+                    .filter_map(|iface| iface.created_namespace.as_ref())
+                {
+                    namespace_cleanup.track(namespace.clone());
+                }
 
                 // Setup BPF
                 let (interface_skels, _xdp_links) =
@@ -278,6 +342,11 @@ async fn main() -> anyhow::Result<()> {
 
                                                     // Dispatch imperative events generated from Wasm diffs
                                                     for event in events {
+                                                        info!(
+                                                            "Dispatching control event opcode {} to {}",
+                                                            event.opcode,
+                                                            event.address_pattern
+                                                        );
                                                         let _ = ctrl_tx.send(event);
                                                     }
 
@@ -412,6 +481,8 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+
+    namespace_cleanup.cleanup();
 
     info!("Wabrix shut down gracefully.");
     Ok(())

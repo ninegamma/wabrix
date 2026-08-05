@@ -1,0 +1,22 @@
+[ ns_sender ]                                                      [ ns_receiver ]
+┌────────────────┐                                                 ┌────────────────┐
+│ UDP Sender     │                                                 │ UDP Receiver   │
+│ 10.0.1.101:5000│                                                 │ 10.0.1.102:6000│
+└──────┬─────────┘                                                 └───────▲────────┘
+       │                                                                   │
+ veth_sender (10.0.1.101)                                           veth_receiver (10.0.1.102)
+───────┼───────────────────────────────────────────────────────────────────┼──────────────
+    veth_in (Host)                                                      veth_out (Host)
+       │                                                                   ▲
+       ▼                                                                   │
+ ┌──────────────┐   ┌────────────┐   ┌───────────────┐   ROUTE_TX   ┌──────────────┐
+ │ BatchRxNode  ├──►│ FastParser ├──►│ FilterEngine  ├─────────────►│ BatchTxNode  │
+ └──────────────┘   └────────────┘   │ (WasmEngine)  │              └──────────────┘
+                                     └───────┬───────┘
+                                             │ ROUTE_DROP
+                                             ▼
+                                     ┌───────────────┐
+                                     │   DropNode    │
+                                     └───────────────┘
+
+The test can be started from the wabrix root with run_integration_test.sh

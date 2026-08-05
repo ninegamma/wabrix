@@ -1,0 +1,93 @@
+[wabrix]
+ifaces = [
+    { name = "veth_in", rxd = 1024, txd = 1024, type = "veth", namespace = "ns_sender", peer = "veth_sender", ipnet = "10.0.1.101/24", checksum_offload = false },
+    { name = "veth_out", rxd = 1024, txd = 1024, type = "veth", namespace = "ns_receiver", peer = "veth_receiver", ipnet = "10.0.1.102/24", checksum_offload = false }
+]
+
+# Single UMEM region shared across both veth sockets for zero-copy path
+umem = [
+    { id = 0, frame_size = 2048, frame_count = 131072, fq_size = 4096, cq_size = 4096, head_room = 128, partitions = 2, reserved = 10240 }
+]
+
+xsk = [
+    { iface = "veth_in", queues = [0], umem = 0, rxq_size = 4096, txq_size = 4096, zerocopy = false, xdp_mode = "auto" },
+    { iface = "veth_out", queues = [0], umem = 0, rxq_size = 4096, txq_size = 4096, zerocopy = false, xdp_mode = "auto" }
+]
+
+workers = [
+    { id = 0, core = 2, partitions = [{ umem = 0, count = 1 }] }
+]
+
+# Pipeline topology forwarding packets from veth_in to veth_out through filter_engine
+[[pipelines]]
+name = "veth_filter_pipeline"
+workers = [0]
+poll_frequency = 1000
+desired_state = "Running"
+
+[[pipelines.nodes]]
+id = "rx_veth_in"
+type = "BatchRxNode"
+routes = ["nd_parser"]
+queues = [0]
+args = { interface = "veth_in", batch_size = "64" }
+hot_args = {}
+
+[[pipelines.nodes]]
+id = "nd_parser"
+type = "FastParserNode"
+routes = ["filter_engine"]
+args = {}
+hot_args = {}
+
+[[pipelines.nodes]]
+id = "filter_engine"
+type = "WasmEngine"
+routes = ["tx_veth_out", "drop_sink"]
+labels = ["PacketsForwarded", "PacketsDropped"]
+desired_state = "Running"
+args = { umem = "0" }
+hot_args = { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/filter_engine.wasm" }
+
+[pipelines.nodes.wasm_data]
+signature = "MALICIOUS_PAYLOAD_V1"
+
+[pipelines.nodes.hot_wasm_data]
+signature = "MALICIOUS_PAYLOAD_V2"
+
+[[pipelines.nodes]]
+id = "tx_veth_out"
+type = "BatchTxNode"
+routes = []
+queues = [0]
+args = { interface = "veth_out", sink_type = "xsk" }
+hot_args = {}
+
+[[pipelines.nodes]]
+id = "drop_sink"
+type = "DropNode"
+routes = []
+args = {}
+hot_args = {}
+
+[[pipelines]]
+name = "veth_reverse"
+workers = [0]
+poll_frequency = 1000
+desired_state = "Running"
+
+[[pipelines.nodes]]
+id = "rx_veth_out"
+type = "BatchRxNode"
+routes = ["tx_veth_in"]
+queues = [0]
+args = { interface = "veth_out", sink_type = "xsk" }
+hot_args = {}
+
+[[pipelines.nodes]]
+id = "tx_veth_in"
+type = "BatchTxNode"
+routes = []
+queues = [0]
+args = { interface = "veth_in", batch_size = "64" }
+hot_args = {}

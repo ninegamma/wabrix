@@ -1180,6 +1180,8 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -3004,6 +3006,7 @@ dependencies = [
  "log",
  "macaddr",
  "network-types",
+ "serde",
 ]
 
 [[package]]
@@ -3032,6 +3035,7 @@ dependencies = [
  "core_affinity",
  "crossbeam-channel",
  "crossbeam-queue",
+ "hashbrown 0.17.1",
  "ipnet",
  "libbpf-cargo",
  "libbpf-rs",

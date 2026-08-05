@@ -1,0 +1,77 @@
+[wabrix]
+ifaces= [
+    { name = "enp2s0f0np0", rxd = 8160, txd = 8160, irq_core = 6 },
+    { name = "enp2s0f1np1", rxd = 8160, txd = 8160, irq_core = 8 }
+]
+
+# A single UMEM group is utilized to ensure zero-copy forwarding between both physical interfaces
+# The second Umem partition allows for hot spin-up of a second worker (todo)
+umem= [
+    { id = 0, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 2, reserved = 131072 }
+]
+
+xsk= [
+    { iface = "enp2s0f0np0", queues = [0], umem = 0, rxq_size = 16384, txq_size = 16384, zerocopy = true, xdp_mode = "auto" },
+    { iface = "enp2s0f1np1", queues = [0], umem = 0, rxq_size = 16384, txq_size = 16384, zerocopy = true, xdp_mode = "auto" }
+]
+
+workers= [
+    { id = 0, core = 7, partitions = [{ umem = 0, count = 1 }] }
+]
+
+# ===================================================================
+# PIPELINE: dpi_filter
+# ===================================================================
+[[pipelines]]
+name = "dpi_filter"
+workers = [0]
+poll_frequency = 10000
+desired_state = "Running"
+
+[[pipelines.nodes]]
+id = "rx_source"
+type = "BatchRxNode"
+routes = ["nd_parser"]
+queues = [0]
+args= { interface = "enp2s0f0np0", batch_size = "256" }
+hot_args= {}
+
+[[pipelines.nodes]]
+id = "nd_parser"
+type = "FastParserNode"
+routes = ["filter_engine"]
+args= {}
+hot_args= {}
+
+[[pipelines.nodes]]
+id = "filter_engine"
+type = "WasmEngine"
+# Route zero corresponds to the egress interface; Route one corresponds to the drop sink
+routes = ["tx_sink", "drop_sink"]
+labels = ["PacketsForwarded", "PacketsDropped"]
+desired_state = "Running"
+args= { umem = "0" }
+hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/filter_engine.wasm" }
+
+[pipelines.nodes.wasm_data]
+# Initial cold configuration fallback
+signature = "MALICIOUS_PAYLOAD_V1"
+
+[pipelines.nodes.hot_wasm_data]
+# This value overrides the cold data at startup and can be updated at runtime via the CLI apply command
+signature = "MALICIOUS_PAYLOAD_V2"
+
+[[pipelines.nodes]]
+id = "tx_sink"
+type = "BatchTxNode"
+routes = []
+queues = [0]
+args= { interface = "enp2s0f1np1", sink_type = "xsk" }
+hot_args= {}
+
+[[pipelines.nodes]]
+id = "drop_sink"
+type = "DropNode"
+routes = []
+args= {}
+hot_args= {}

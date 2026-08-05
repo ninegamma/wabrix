@@ -1,19 +1,14 @@
 use crate::config::hot_config::SharedSystemState;
 use crate::toml_parser::{NodeConfig, PipelineConfig, WabricksConfig};
+use hashbrown::HashMap as WasmHashMap;
 use postcard::to_allocvec;
-use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
-use wabrix_api::StandardOpcode;
+use wabrix_api::{HotWasmPayload, StandardOpcode};
 use wabrix_base::ControlEvent;
 
 // StandardOpcode::UpdateConfiguration assigned to the State & Lifecycle block
 const OPCODE_HOT_WASM_UPDATE: u32 = StandardOpcode::UpdateConfiguration as u32;
-
-#[derive(Serialize)]
-struct HotWasmPayload<'a> {
-    updates: &'a HashMap<String, String>,
-}
 
 pub enum ReconciliationResult {
     FullRestart,
@@ -91,7 +86,7 @@ pub fn reconcile_config(
                 let current_map = current_node.hot_wasm_data.as_ref().unwrap_or(&empty_map);
                 let target_map = target_node.hot_wasm_data.as_ref().unwrap_or(&empty_map);
 
-                let mut diff_updates = HashMap::new();
+                let mut diff_updates = WasmHashMap::new();
 
                 // Identify keys that were removed and mark them with an empty string tombstone
                 for key in current_map.keys() {
@@ -106,13 +101,16 @@ pub fn reconcile_config(
                 }
 
                 let payload = HotWasmPayload {
-                    updates: &diff_updates,
+                    updates: diff_updates,
                 };
 
                 match to_allocvec(&payload) {
                     Ok(bytes) => {
                         let event = ControlEvent {
-                            address_pattern: target_node.id.clone(),
+                            address_pattern: format!(
+                                "*/{}/{}/{}",
+                                target_pipeline.name, target_node.id, target_node.node_type
+                            ),
                             opcode: OPCODE_HOT_WASM_UPDATE,
                             payload: bytes,
                         };

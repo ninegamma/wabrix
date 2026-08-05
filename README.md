@@ -1,4 +1,4 @@
-# Wabrix©
+# Wabrix
 
 **The programmable, zero-copy data plane for custom network security and line-rate protocol parsing.**
 
@@ -18,7 +18,7 @@ Designed for environments where standard firewalls fail—such as proprietary Io
 Wabrix works by bypassing the standard Linux networking stack using a modern, kernel-native approach:
 
 1. **AF_XDP (Kernel Bypass):** Packets are moved directly from the Network Interface Card (NIC) memory (UMEM) to userspace.
-    * **Wabrix vs. DPDK:** Unlike DPDK, which requires proprietary drivers and consumes significant CPU resources through constant "busy-polling," Wabrix utilizes the Linux kernel's **AF_XDP (eBPF)** framework. This allows us to achieve comparable line-rate performance while using **standard Linux drivers** and significantly reducing power consumption and complexity.
+    * **Wabrix vs. DPDK:** Wabrix vs. DPDK: Both frameworks utilize dedicated core polling for maximum throughput. However, DPDK requires proprietary Poll Mode Drivers (PMDs) that detach the network interface from the operating system, forcing the core into its highest power state permanently. Wabrix utilizes the Linux kernel's AF_XDP (eBPF) framework, achieving comparable line-rate performance using standard Linux drivers. This preserves standard OS networking management, reduces deployment complexity, and allows the kernel to retain control over power state transitions and hardware management.
 
 2. **Zero-Copy Wasm:** The UMEM is mapped directly into the linear memory space of a WebAssembly runtime. Wasm plugins process the raw packet data in-place without `memcpy` operations.
 
@@ -69,5 +69,6 @@ In the spirit of open innovation, we grant a free patent license to any user str
 
 *For Enterprise inquiries, Design Partnerships, or alternative licensing, [contact NineGamma](mailto:contact@ninegamma.com).*
 
+"Wabrix" is a pending trademark of NineGamma. 
 
 © 2026 NineGamma. All rights reserved.
