@@ -20,7 +20,8 @@ wabrix_base = { path = "wabrix_base" }
 wabrix_wasm = { path = "wabrix_wasm" }
 libbpf-rs = "^0.26.2"
 libbpf-sys = { version = "1.7", default-features = false }
-xsk-rs = { path = "../xsk-rs" }
+xsk-rs = { git = "https://github.com/rstade/xsk-rs.git", branch = "rstade" }
+#xsk-rs = { path = "../xsk-rs" }
 # Add these for the Wasm side of the house:
 wit-bindgen = "0.54"
 wasmtime = { version = "43.0", features = ["component-model"] }

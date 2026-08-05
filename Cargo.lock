@@ -1671,6 +1671,7 @@ dependencies = [
 [[package]]
 name = "libxdp-sys"
 version = "0.2.4+1.6.0"
+source = "git+https://github.com/ninegamma/libxdp-sys.git?branch=ninegamma#0247134af5b73d45e470a625cf95669bd6c46ec0"
 dependencies = [
  "bindgen",
  "cc",
@@ -3843,6 +3844,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 [[package]]
 name = "xsk-rs"
 version = "0.8.2"
+source = "git+https://github.com/rstade/xsk-rs.git?branch=rstade#7a770e0937426821b037844d35dd412973d1b204"
 dependencies = [
  "bitflags 2.13.1",
  "cfg-if",
