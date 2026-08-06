@@ -252,36 +252,38 @@ impl Node for TcpNode {
         // Drain the input batch in place, preserving FIFO arrival order (required
         // for correct same-flow TCP state transitions). `Batch::drain` returns a
         // borrowing iterator — no intermediate Vec/memcpy, unlike `.collect()`.
-        for mut pdu in batch.drain(..) {
-            pdu.parse_fast();
+        unsafe {
+            for mut pdu in batch.drain(..) {
+                pdu.parse_fast();
 
-            // Align with Wasm plugin: Use fingerprint instead of manual field checks
-            if pdu.header_stack.fingerprint() != wabrix_api::packet::Packet::TCP_OVER_IPV4 {
-                self.stats[STAT_TO_LINUX] += 1;
+                // Align with Wasm plugin: Use fingerprint instead of manual field checks
+                if pdu.header_stack.fingerprint() != wabrix_api::packet::Packet::TCP_OVER_IPV4 {
+                    self.stats[STAT_TO_LINUX] += 1;
 
-                // Align with Wasm plugin: Route non-TCP traffic to Linux instead of Drop
-                if (ROUTE_LINUX as usize) < num_routes {
-                    self.output_batches[ROUTE_LINUX as usize].push(pdu).ok();
+                    // Align with Wasm plugin: Route non-TCP traffic to Linux instead of Drop
+                    if (ROUTE_LINUX as usize) < num_routes {
+                        self.output_batches[ROUTE_LINUX as usize].push(pdu).ok();
+                    } else {
+                        self.output_batches[ROUTE_DROP as usize].push(pdu).ok();
+                    }
+                    continue;
+                }
+
+                let current_tsc = self.current_tsc;
+                let route = handle_tcp_packet(
+                    &mut pdu,
+                    &mut self.connections,
+                    &self.config,
+                    &mut self.stats,
+                    current_tsc,
+                ) as usize;
+
+                if route < num_routes {
+                    self.output_batches[route].push(pdu).ok();
                 } else {
+                    self.stats[STAT_DROP] += 1;
                     self.output_batches[ROUTE_DROP as usize].push(pdu).ok();
                 }
-                continue;
-            }
-
-            let current_tsc = self.current_tsc;
-            let route = handle_tcp_packet(
-                &mut pdu,
-                &mut self.connections,
-                &self.config,
-                &mut self.stats,
-                current_tsc,
-            ) as usize;
-
-            if route < num_routes {
-                self.output_batches[route].push(pdu).ok();
-            } else {
-                self.stats[STAT_DROP] += 1;
-                self.output_batches[ROUTE_DROP as usize].push(pdu).ok();
             }
         }
 
@@ -449,109 +451,108 @@ impl Node for TcpNode {
 
             let data_ptr = pdu.data_address(0);
 
-            if state == TcpState::Established || state == TcpState::SynReceived {
-                if let Some(conn) = self.connections.get_mut(&flow_key) {
-                    conn.state = TcpState::FinWait1;
-                    conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
+            unsafe {
+                if state == TcpState::Established || state == TcpState::SynReceived {
+                    if let Some(conn) = self.connections.get_mut(&flow_key) {
+                        conn.state = TcpState::FinWait1;
+                        conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
+                    }
+                    let len = write_tcp_reply(
+                        data_ptr,
+                        reply_src_mac,
+                        reply_dst_mac,
+                        flow_key.2,
+                        flow_key.3,
+                        flow_key.0,
+                        flow_key.1,
+                        snd_nxt,
+                        rcv_nxt,
+                        FLAG_FIN | FLAG_ACK,
+                    );
+                    pdu.w.set_data_length(len);
+                    self.stats[STAT_SENT_FIN] += 1;
+                    batch.push(pdu).ok();
+                    generated += 1;
+                } else {
+                    self.connections.remove(&flow_key);
+                    let len = write_tcp_reply(
+                        data_ptr,
+                        reply_src_mac,
+                        reply_dst_mac,
+                        flow_key.2,
+                        flow_key.3,
+                        flow_key.0,
+                        flow_key.1,
+                        snd_nxt,
+                        rcv_nxt,
+                        FLAG_RST | FLAG_ACK,
+                    );
+                    pdu.w.set_data_length(len);
+                    self.stats[STAT_SENT_RST] += 1;
+                    batch.push(pdu).ok();
+                    generated += 1;
                 }
-                let len = write_tcp_reply(
-                    data_ptr,
-                    reply_src_mac,
-                    reply_dst_mac,
-                    flow_key.2,
-                    flow_key.3,
-                    flow_key.0,
-                    flow_key.1,
-                    snd_nxt,
-                    rcv_nxt,
-                    FLAG_FIN | FLAG_ACK,
-                );
-                pdu.w.set_data_length(len);
-                self.stats[STAT_SENT_FIN] += 1;
-                batch.push(pdu).ok();
-                generated += 1;
-            } else {
-                self.connections.remove(&flow_key);
-                let len = write_tcp_reply(
-                    data_ptr,
-                    reply_src_mac,
-                    reply_dst_mac,
-                    flow_key.2,
-                    flow_key.3,
-                    flow_key.0,
-                    flow_key.1,
-                    snd_nxt,
-                    rcv_nxt,
-                    FLAG_RST | FLAG_ACK,
-                );
-                pdu.w.set_data_length(len);
-                self.stats[STAT_SENT_RST] += 1;
-                batch.push(pdu).ok();
-                generated += 1;
             }
         }
 
         // === Priority 2: SYN generation ===
-        while frame_idx < allocated {
-            let allowed = self.syn_gen.activated
-                && match self.config.syn_limit {
+        unsafe {
+            while frame_idx < allocated {
+                let allowed = self.syn_gen.activated && match self.config.syn_limit {
                     Some(max) => self.syn_gen.syns_sent < max || max == 0,
                     None => true,
                 };
-            if !allowed {
-                break;
+                if !allowed {
+                    break;
+                }
+
+                let mut pdu = self.scratch_pdus[frame_idx].assume_init_read();
+                frame_idx += 1;
+
+                self.syn_gen.syns_sent += 1;
+                self.syn_gen.prng_state = self.syn_gen.prng_state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let isn = self.syn_gen.prng_state;
+
+                let src_port = self.syn_gen.port_counter;
+                let base_ip = u32::from_be_bytes(self.config.src_ip.unwrap_or([0, 0, 0, 0]));
+                let our_ip = base_ip.wrapping_add(self.syn_gen.ip_offset);
+
+                if self.syn_gen.port_counter == PORT_END_RANGE {
+                    self.syn_gen.port_counter = PORT_START_RANGE;
+                    self.syn_gen.ip_offset = (self.syn_gen.ip_offset + 1) % 250;
+                } else {
+                    self.syn_gen.port_counter += 1;
+                }
+
+                let dst_port = 80u16;
+                let their_ip = u32::from_be_bytes(self.config.dst_ip.unwrap_or([0, 0, 0, 0]));
+                let flow_key = FlowKey(their_ip, dst_port, our_ip, src_port);
+                self.connections.insert(
+                    flow_key,
+                    TcpState::SynSent,
+                    isn.wrapping_add(1),
+                    0,
+                    current_tsc,
+                );
+
+                let data_ptr = pdu.data_address(0);
+                let len = write_tcp_reply(
+                    data_ptr,
+                    reply_src_mac,
+                    reply_dst_mac,
+                    our_ip,
+                    src_port,
+                    their_ip,
+                    dst_port,
+                    isn,
+                    0,
+                    FLAG_SYN,
+                );
+                pdu.w.set_data_length(len);
+                self.stats[STAT_SENT_SYN] += 1;
+                batch.push(pdu).ok();
+                generated += 1;
             }
-
-            let mut pdu = unsafe { self.scratch_pdus[frame_idx].assume_init_read() };
-            frame_idx += 1;
-
-            self.syn_gen.syns_sent += 1;
-            self.syn_gen.prng_state = self
-                .syn_gen
-                .prng_state
-                .wrapping_mul(1_664_525)
-                .wrapping_add(1_013_904_223);
-            let isn = self.syn_gen.prng_state;
-
-            let src_port = self.syn_gen.port_counter;
-            let base_ip = u32::from_be_bytes(self.config.src_ip.unwrap_or([0, 0, 0, 0]));
-            let our_ip = base_ip.wrapping_add(self.syn_gen.ip_offset);
-
-            if self.syn_gen.port_counter >= PORT_END_RANGE {
-                self.syn_gen.port_counter = PORT_START_RANGE;
-                self.syn_gen.ip_offset = (self.syn_gen.ip_offset + 1) % 250;
-            } else {
-                self.syn_gen.port_counter += 1;
-            }
-
-            let dst_port = 80u16;
-            let their_ip = u32::from_be_bytes(self.config.dst_ip.unwrap_or([0, 0, 0, 0]));
-            let flow_key = FlowKey(their_ip, dst_port, our_ip, src_port);
-            self.connections.insert(
-                flow_key,
-                TcpState::SynSent,
-                isn.wrapping_add(1),
-                0,
-                current_tsc,
-            );
-
-            let data_ptr = pdu.data_address(0);
-            let len = write_tcp_reply(
-                data_ptr,
-                reply_src_mac,
-                reply_dst_mac,
-                our_ip,
-                src_port,
-                their_ip,
-                dst_port,
-                isn,
-                0,
-                FLAG_SYN,
-            );
-            pdu.w.set_data_length(len);
-            self.stats[STAT_SENT_SYN] += 1;
-            batch.push(pdu).ok();
-            generated += 1;
         }
 
         // Return any allocated but unused frames to the pool
@@ -590,7 +591,7 @@ impl Node for TcpNode {
 /// Extracts TCP header fields, runs the state machine, and writes the reply
 /// back into the same frame. Returns `ROUTE_TX` if a reply was written,
 /// `ROUTE_DROP` otherwise.
-fn handle_tcp_packet(
+unsafe fn handle_tcp_packet(
     pdu: &mut Pdu,
     pool: &mut ConnectionPool,
     config: &EngineConfig,

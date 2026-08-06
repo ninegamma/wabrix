@@ -17,6 +17,7 @@ wabrix_lib = { path = "../wabrix_lib" }
 wabrix_base = { path = "../wabrix_base" }
 env_logger = "0.11.11"
 prometheus = "0.14.0"
+ureq = "3.3.0"
 
 [build-dependencies]
 anyhow = { workspace = true }

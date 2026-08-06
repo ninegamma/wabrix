@@ -22,7 +22,7 @@ pub struct SavedPosition {
     pub y: f32,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
+#[derive(Debug, Default, Deserialize, Serialize, Clone, PartialEq, TS)]
 #[ts(export_to = "WabricksConfig.ts")] // This "activates" the environment variable path
 pub struct WabricksConfig {
     pub wabrix: WabricksSection,
@@ -32,16 +32,6 @@ pub struct WabricksConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[ts(skip)]
     pub layout: HashMap<String, SavedPosition>,
-}
-
-impl Default for WabricksConfig {
-    fn default() -> Self {
-        Self {
-            wabrix: WabricksSection::default(),
-            pipelines: Vec::new(),
-            layout: HashMap::new(),
-        }
-    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
