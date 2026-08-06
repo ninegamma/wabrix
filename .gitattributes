@@ -1,0 +1,6 @@
+# Ignore the xdp-tools C source code for language statistics
+xdp-tools/** linguist-vendored
+
+# Optionally ignore all C and Header files repository-wide
+*.c linguist-vendored
+*.h linguist-vendored
