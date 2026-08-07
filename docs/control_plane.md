@@ -1,20 +1,20 @@
-# XBRIX Control Plane Architecture
+# WABRIX Control Plane Architecture
 
-The XBRIX control plane manages the lifecycle, configuration, and observability of the high-performance AF_XDP data plane. It operates strictly outside the packet-processing hot path to ensure zero interference with the deterministic, lock-free worker threads.
+The WABRIX control plane manages the lifecycle, configuration, and observability of the high-performance AF_XDP data plane. It operates strictly outside the packet-processing hot path to ensure zero interference with the deterministic, lock-free worker threads.
 
 ## Architecture and Runtime
 
-* **Binary Entry Point:** The control plane is hosted within the main `xbricks` binary. It exposes a CLI and a management API over REST and WebSockets using the `axum` framework.
+* **Binary Entry Point:** The control plane is hosted within the main `wabrix` binary. It exposes a CLI and a management API over REST and WebSockets using the `axum` framework.
 * **Asynchronous Execution:** Unlike the data plane, which relies on thread-pinned synchronous polling loops, the control plane is driven by the `tokio` asynchronous runtime.
 * **Error Handling:** The control plane utilizes standard Rust ergonomics, including heap allocations and `anyhow` / `thiserror` for cold-path error handling.
 
 ## Configuration and State Reconciliation
 
-* **Declarative Configuration:** System state is defined via TOML configuration files, parsed by the `xbricks_lib::toml_parser::WabricksConfig`.
+* **Declarative Configuration:** System state is defined via TOML configuration files, parsed by the `wabrix_lib::toml_parser::WabricksConfig`.
 * **Hot-Reloading:** The control plane utilizes `arc-swap` to perform atomic pointer swaps for configuration updates. This allows the system to transition to new states with zero downtime.
 * **Structural vs. Dynamic Updates:**
 * Changes to physical constraints (e.g., UMEM sizing, worker core affinity, interface bindings) trigger a graceful teardown and full system restart.
-* Changes to dynamic plugin arguments (`hot_args`, `wasm_data`) or operational states (Online, Offline, Bypass) trigger live updates dispatched directly to the running nodes.
+* Changes to dynamic plugin arguments (`hot_args`, `hot_wasm_data`) or operational states (Online, Offline, Bypass) trigger live updates dispatched directly to the running nodes.
 
 
 
@@ -25,7 +25,7 @@ The XBRIX control plane manages the lifecycle, configuration, and observability 
 
 ## WebAssembly Plugin Interface
 
-The control plane interacts with the Wasm-based processing nodes via specific functions defined in the `xbricks.wit` host-guest ABI:
+The control plane interacts with the Wasm-based processing nodes via specific functions defined in the `wabrix.wit` host-guest ABI:
 
 * **Control Events:** The `on-control-event(opcode, payload) -> bool` function is invoked by the worker thread when a `ControlEvent` arrives from the control plane.
 * Opcodes `0x0000` to `0x0FFF` are reserved for `StandardOpcode` values (e.g., SetOperationalState, FlushState).
