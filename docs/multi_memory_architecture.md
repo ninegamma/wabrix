@@ -146,3 +146,60 @@ Each plugin instance owns a non-overlapping mailbox, but all instances may addre
 ## Current limitation
 
 The packet-engine and filter paths use the mailbox/proxy architecture described above. The generator WIT interface still accepts a Canonical ABI byte list and has not yet been migrated to a mailbox-based generator call. Although a generator component can be built and composed, it cannot correctly write separated UMEM through its legacy `PacketBatch::new(&mut batch_bytes)` path. Generator deployment must wait for that ABI migration.
+
+## Multi memory currently no longer pursued due to heavy performance degradation
+
+Using the multi-memory architecture the performance has degraded by a factor of 2 vs single memory. We need now roughly 1000 cycles per packet in the tcp_engine.
+
+This is the reason due to Codex 5.6 Sol: 
+
+I’ll break down the hot-path adapter calls made for a received TCP packet and a generated SYN, including whether composition lowered them to direct calls or table-mediated adapter calls. That should account for where the extra cycles are spent.
+
+Yes. The slowdown is caused by the current scalar WAT bridge, not inherently by WebAssembly multi-memory.
+
+A generated SYN currently performs roughly 40 cross-module adapter calls:
+
+- Tick detection: about 12 loads.
+- Header generation: about 19 stores.
+- Repeated `desc_addr` reads: 3 loads.
+- Updating `desc_len`: 4 byte stores.
+- Writing the action: 4 byte stores.
+
+Small values are especially expensive because `umem::read::<u32>()` currently becomes four `load8` calls, and a 20-byte header becomes two `store64` plus four `store8` calls.
+
+Received TCP packets are similar: `HeaderStack`, `desc_addr`, and `frame_size_log2` are reread for each MAC/IP/TCP accessor, producing approximately 40–50 adapter calls per packet.
+
+Each adapter call:
+
+- crosses between core Wasm instances;
+- cannot be inlined by LLVM;
+- switches memory-instance context;
+- executes explicit bounds checks because UMEM has no guard region.
+
+Single-memory code used direct loads that LLVM could inline, combine, and cache. Therefore, a roughly 500–1,000 cycle penalty is plausible.
+
+Best optimization sequence:
+
+1. Add `load32` and `store32` to eliminate four-call `u32` operations.
+2. Cache `HeaderStack`, `desc_addr`, `desc_len`, and frame size once inside each `Packet`.
+3. Avoid rereading descriptor fields for every header.
+4. Add specialized wider adapter operations for complete MAC/IP/TCP headers.
+5. Ultimately compose a bridge module importing both heap and UMEM, allowing `memory.copy` between them in one call.
+
+These changes should remove most of the regression. The current implementation prioritizes correctness and memory separation but is too fine-grained for the desired dataplane performance.
+
+Given the reported change from roughly 500 to 1,000 cycles/packet:
+
+| Optimization | Estimated result |
+|---|---:|
+| Current scalar adapter | ~1,000 cycles |
+| Add `load32`/`store32` | ~800–900 |
+| Cache PDU metadata per `Packet` | ~650–750 |
+| Specialized header load/store functions | ~575–675 |
+| Dual-memory bulk-copy bridge | ~525–625 |
+
+A realistic short-term target is 650–750 cycles/packet—a 25–35% improvement—using `load32`/`store32` and cached descriptor fields.
+
+With a redesigned bridge using one bulk operation per header or packet, 525–625 cycles appears achievable, within roughly 5–25% of the original single-memory performance.
+
+Returning fully to ~500 cycles may be difficult because cross-core-memory calls, explicit bounds checks, and component dispatch remain. The largest immediate gain should come from reducing approximately 40–50 adapter calls per packet to fewer than 10.
