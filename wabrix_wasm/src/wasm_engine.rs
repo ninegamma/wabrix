@@ -47,8 +47,6 @@ pub struct WasmEngine {
     #[cfg(feature = "profiling")]
     total_cycles: u64,
     telemetry_metrics: TelemetryMetrics,
-    /// Byte offset from Umem base where WASM address 0 begins for this instance.
-    partition_start_bytes: u32,
     /// UMEM-relative byte offset of this instance's BatchMetadata mailbox.
     mailbox_offset: u32,
     /// The Umem this node is bound to. Every incoming PDU must carry this id.
@@ -69,47 +67,41 @@ impl WasmEngine {
         wasm_file_path: &str,
         routing_table: Vec<NodeId>, // Accept any number of routes
         telemetry_metrics: TelemetryMetrics,
-        partition_start_bytes: u32,
         umem_id: u8,
         wasm_data: HashMap<String, String>,
         platform_data: &PlatformData,
         mailbox_offset: u32,
     ) -> Result<Self, String> {
-        // 1. Fetch the Component from the Manager's DashMap cache
+        // Fetch the Component from the Manager DashMap cache
         // This takes nanoseconds if already loaded, avoiding disk I/O.
         let component = manager
             .get_component(wasm_file_path)
             .expect("Failed to load Wasm component");
 
-        // 2. Build the partition-specific UmemHandle for this instance.
-        //    WASM address 0 will map to `umem_base + partition_start_bytes`.
-        //    The window extends to the end of the full Umem.
-        let partition_handle = manager.make_partition_handle(partition_start_bytes);
-        log::info!(
-            "NODE {}: Partition start bytes: {}",
-            id,
-            partition_start_bytes
-        );
+        // Build the instance-specific UmemHandle.
+        // WASM memory index one maps directly to the physical start of the UMEM.
+        let instance_handle = manager.make_instance_handle();
+        log::info!("NODE {}: Mailbox offset: {}", id, mailbox_offset);
 
-        // 3. Pre-load the partition handle into the shared XdpMemoryCreator so
-        //    that Wasmtime picks it up when it calls new_memory() during instantiate().
-        manager.set_instantiation_handle(partition_handle.clone());
+        // Pre-load the handle into the shared XdpMemoryCreator so
+        // that Wasmtime picks it up when it calls new_memory during instantiate.
+        manager.set_instantiation_handle(instance_handle.clone());
 
-        // 4. Initialize the WASI Context for THIS specific node
+        // Initialize the WASI Context for THIS specific node
         let wasi_ctx = WasiCtxBuilder::new()
             .inherit_stdout()
             .inherit_stderr()
             .build();
 
-        // 5. Create the Store
-        // This is where the magic happens: Wasmtime calls our `XdpMemoryCreator`
-        // in the background to hand out the zero-copy UMEM handle.
+        // Create the Store
+        // Wasmtime calls our XdpMemoryCreator in the background to hand out
+        // the zero-copy UMEM handle for the secondary memory instance.
         let mut store = Store::new(
             manager.engine(),
             MyHostState {
                 ctx: wasi_ctx,
                 table: ResourceTable::new(),
-                umem: partition_handle, // Host-side state also sees the partition window
+                umem: instance_handle,
             },
         );
 
@@ -159,7 +151,6 @@ impl WasmEngine {
             #[cfg(feature = "profiling")]
             total_cycles: 0,
             telemetry_metrics,
-            partition_start_bytes,
             mailbox_offset,
             umem_id,
             supports_oob_telemetry: false,
@@ -210,12 +201,7 @@ impl WasmEngine {
         let status = self
             .bindings
             .wabrix_plugins_packet_engine()
-            .call_process_batch(
-                &mut self.store,
-                len as u32,
-                self.partition_start_bytes,
-                self.mailbox_offset,
-            )
+            .call_process_batch(&mut self.store, len as u32, self.mailbox_offset)
             .unwrap_or_else(|e| {
                 log::error!("NODE {}: Wasm execution failed: {}", self.id, e);
                 u32::MAX

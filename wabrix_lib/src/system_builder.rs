@@ -453,8 +453,6 @@ impl SystemBuilder {
 
         // Reuse the wasm_counts computed in the pre-scan above.
         #[cfg(feature = "wasm")]
-        let wasm_instance_totals: Vec<usize> = wasm_counts.clone();
-        #[cfg(feature = "wasm")]
         let mut wasm_instance_counters = vec![0u32; MAX_UMEM];
 
         // Build pipeline runners for each worker
@@ -494,8 +492,6 @@ impl SystemBuilder {
                     #[cfg(feature = "wasm")]
                     &self.wasm_managers,
                     shared_state.clone(),
-                    #[cfg(feature = "wasm")]
-                    &wasm_instance_totals,
                     #[cfg(feature = "wasm")]
                     &mut wasm_instance_counters,
                 )

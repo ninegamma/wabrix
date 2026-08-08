@@ -1,168 +1,148 @@
-# Wabrix Memory Architecture & Zero-Copy
+# Wabrix Multi-Memory Architecture
 
-Here is a concise breakdown of the memory architecture and address calculation that enables zero-copy packet processing and metadata exchange between the Linux Host and the WebAssembly plugin.
+This document describes the currently implemented memory architecture for packet-engine WebAssembly components. It supersedes the earlier design that assumed stable Rust could directly emit loads and stores against WebAssembly Memory 1.
 
-### 1. The Wasm32 Multi-Memory Address Space
+## Overview
 
-In the multi-memory architecture, Wabrix leverages Wasmtime's support for multiple disjoint memory instances. Instead of a single flat array where physical RAM mappings and WebAssembly application state are interleaved, the host provisions distinct memory spaces.
-
-The massive 4GB limit per memory instance remains, but separation of concerns is enforced at the WebAssembly VM layer.
-### 2. The Segregated Memory Map
-
-To the #![no_std] Rust plugin compiled with the +multimemory target feature, memory is strictly segregated into two primary instances.
-
-Wasm32 Memory 0 (Primary / Default)
-```text
-┌──────────────────────────────────────────┐
-│                                          │
-│  WASM Heap (~2 MB)                       │ -> ConnectionPool & State
-│  WASM Stack (~64 KB)                     │ -> Function execution
-│  Static Data                             │ -> Globals
-│                                          │
-└──────────────────────────────────────────┘
-
-Wasm32 Memory 1 (Imported UMEM)
-┌──────────────────────────────────────────┐
-│                                          │
-│  AF_XDP UMEM (128 MB)                    │ -> Raw Ethernet Frames & Mailbox
-│  (Directly mapped by Host, starts at 0)  │
-│                                          │
-└──────────────────────────────────────────┘
-```
-
-#### Host-Side Physical UMEM Layout
-
-The host maps the entire AF_XDP UMEM as one contiguous physical region and exposes it entirely as Memory 1. The internal layout of this memory remains divided into functional zones:
-
+Each composed plugin component contains two independently allocated core WebAssembly memories:
 
 ```text
-Host Physical UMEM (Exposed as WASM Memory 1)
-┌──────────────────────────────────────────────────────────────────────┐
-│  Control Block  [0 .. control_block_bytes)                           │
-│                                                                      │
-│  mailbox_offset_0 = 0 × sizeof(BatchMetadata)                        │
-│  mailbox_offset_1 = 1 × sizeof(BatchMetadata)                        │
-│  mailbox_offset_N = N × sizeof(BatchMetadata)                        │
-│                                                                      │
-├──────────────────────────────────────────────────────────────────────┤  <-- reserved_bytes
-│  AF_XDP Payload Frames  [reserved_bytes .. total_size)               │
-│                                                                      │
-│  Raw Ethernet frames from / to the NIC (shared by all instances)     │
-│                                                                      │
-└──────────────────────────────────────────────────────────────────────┘
+Component
+├── Rust plugin core module
+│   └── default memory: heap, stack, statics, connection state
+└── WAT UMEM adapter core module
+    └── adapter memory: the host's AF_XDP UMEM mapping
 ```
 
-### Address Calculation
+The Rust compiler continues to use its module's default memory normally. The WAT adapter owns a second core memory whose address zero maps to the beginning of AF_XDP UMEM. The two memories are separate core-module memories inside one Component Model component; Rust pointers never point into the adapter memory.
 
-The transition to a multi-memory architecture completely eliminates the partition_offset and wrapping_sub pointer arithmetic required in a single-memory model.
-Because Memory 1 is dedicated exclusively to the UMEM, address 0 in Memory 1 maps exactly to the physical start of the UMEM mmap region.
+This distinction matters: current stable Rust can enable the multi-memory proposal, but it cannot assign a normal `*const T` or `*mut T` to a non-default memory address space. Wabrix therefore accesses UMEM through imported adapter functions rather than Rust pointer dereferences.
 
-* Direct Translation: An AF_XDP frame offset of 2048 is accessed directly at address 2048 in Memory 1.
+## Memory layout
 
-* API Simplification: The plugin no longer needs a partition_offset argument to calculate negative base addresses. Frame offsets provided by the AF_XDP descriptors map 1:1 with Memory 1 addresses.
+### Rust plugin memory
 
-### Zero-Copy Packet Payloads
+The Rust core module's default memory contains:
 
-Standard Rust pointer dereferencing (*mut u8) implicitly targets Memory 0. To interact with the UMEM, the data plane code must explicitly target the secondary memory.
+- the allocator heap;
+- the shadow stack and function stack data;
+- globals and static data;
+- connection tables and plugin configuration;
+- temporary fixed-size header values returned by the packet API.
 
-The plugin utilizes Wasm multi-memory intrinsics (e.g., memory.load, memory.store, or memory.copy instructions targeting index 1, typically abstracted via core::arch::wasm32 or inline assembly). This allows the plugin to write headers directly into the NIC's TX ring buffer located in Memory 1.
+Wasmtime backs this memory with a private anonymous mapping created by `HeapMemory`. It is not mapped onto UMEM.
 
-No serialization, no Vec allocation, and no boundary crossing occur.
+### UMEM adapter memory
 
-### The Per-Instance Mailbox (Zero-Copy Metadata Exchange)
+The composed component includes a small core module generated from `tools/umem_adapter.wat`. Its memory export is replaced during composition with a dedicated memory declaration. During instantiation, `XdpMemoryCreator` recognizes that declaration by its exact limits and supplies the existing AF_XDP `mmap` through `UmemHandle`.
 
-By default, the WebAssembly Component Model enforces a strict Canonical ABI. Returning data like lists or strings forces the guest to allocate heap memory (in Memory 0), and forces the host to allocate native vectors and physically copy the data across the sandbox boundary.
-
-To bypass the Component Model and achieve 1M+ PPS throughput, Wabrix utilizes a Per-Instance Metadata Mailbox located within the shared Control Block at the start of the UMEM (Memory 1).
-
-#### The AF_XDP Fill Queue Trick
-
-To prevent the physical NIC hardware from overwriting the Control Block with incoming Ethernet frames, the Host Runner utilizes the AF_XDP Fill Queue (FQ). The host **withholds all frames belonging to the Control Block** from the Fill Queue during initialization. Because the NIC never receives these addresses, it will never DMA packets into them.
-
-The number of withheld frames scales with the number of plugin instances:
-```
-control_block_frames = ceil(N_instances × sizeof(BatchMetadata) / frame_size)
-```
-
-All frames in `[0, control_block_frames)` are permanently excluded from the FQ.
-
-#### The Plugin Interface
-
-The WIT interface is reduced to a minimal signaling mechanism — no data crossing the boundary:
+Address zero in this memory is the physical beginning of UMEM, so descriptor addresses and mailbox offsets are direct UMEM-relative byte offsets. No partition-offset or wrapping-sub address conversion is used.
 
 ```text
-   process-batch: func(batch-size: u32, mailbox-offset: u32) -> u32;
+AF_XDP UMEM
+┌─────────────────────────────────────────────────────────────────────┐
+│ Reserved frames and per-instance control mailboxes                  │
+│                                                                     │
+│ mailbox_offset(instance)                                            │
+│   = reserved_bytes - (instance + 1) * MAILBOX_STRIDE                │
+│                                                                     │
+├─────────────────────────────────────────────────────────────────────┤ reserved_bytes
+│ Packet payload frames                                               │
+│ Raw Ethernet frames used by RX and TX rings                         │
+└─────────────────────────────────────────────────────────────────────┘ total_size
 ```
 
-- **`batch-size`:** Number of valid PDU entries written into the mailbox.
-- **`mailbox-offset`:** UMEM-relative byte offset of this instance's `BatchMetadata`. Equals `N × sizeof(BatchMetadata)`.
+Control-block frames are withheld from the AF_XDP Fill Queue, preventing the NIC from DMA-writing into plugin mailboxes.
 
-#### The `BatchMetadata` Layout
+## WAT adapter
 
-`BatchMetadata` (defined in `wabrix_api`) is the shared control structure written by the host and read/written by the plugin:
+The adapter exports four core functions:
+
+```text
+load8(offset) -> u32
+load64(offset) -> u64
+store8(offset, value)
+store64(offset, value)
+```
+
+The functions use ordinary loads and stores against the adapter module's own memory. From the Rust module they appear as imports from `wabrix_umem`. Fixed-size structures are transferred in 64-bit chunks with byte operations for any remainder.
+
+These are direct core-Wasm calls. They do not use the Component Model Canonical ABI, allocate vectors, serialize values, or invoke native host callbacks. Packet payload bytes remain in UMEM. Header reads return small `Copy` values in Rust memory; changes are committed through explicit write methods.
+
+## Plugin packet API
+
+`Packet` is an offset-backed proxy rather than a wrapper around `&mut Pdu0`. It stores the UMEM-relative offset of its mailbox PDU slot and uses the adapter for all descriptor, header, payload, and action access.
+
+Header accessors return values:
 
 ```rust
-#[repr(C)]
-pub struct BatchMetadata {
-    pub pdus:    [Pdu0; MAX_BATCH_SIZE],  // Full packet descriptors (plugin view)
-    pub actions: [u32;  MAX_BATCH_SIZE],  // Routing decisions written by plugin
-}
+let mut tcp = packet.tcp_header()?;
+tcp.set_flags(new_flags);
+packet.write_tcp_header(&tcp);
 ```
 
-Each `Pdu0` slot is 64 bytes: a 56-byte `WPdu` core (header stack, descriptor address, length, options, metadata, timestamp) plus 8 bytes the plugin must never read or write. The host uses an identical-layout `HostBatch` type that places a `*const SystemBus` pointer in those last 8 bytes:
+They cannot return references into UMEM because a Rust reference belongs to the Rust module's default memory. The explicit read/write API makes the address-space transition visible and prevents invalid cross-memory references.
 
-```
-Byte layout of each PDU slot (64 bytes, repr(C, align(64))):
-┌─────────────────────────────────┬──────────────────┐
-│  WPdu core  [0..56]             │  tail  [56..64]  │
-│  header_stack (16)              │  host: SystemBus* │
-│  desc_addr (8)                  │  plugin: (unused) │
-│  desc_len (4)                   │                  │
-│  desc_options (4)               │                  │
-│  metadata (16)                  │                  │
-│  timestamp (8)                  │                  │
-└─────────────────────────────────┴──────────────────┘
-```
+`Packet::write_bytes` writes stack or heap bytes into the frame. `Packet::contains` scans payload data through a fixed 256-byte stack window and performs no heap allocation. `MailboxBatch` iterates PDU and action offsets without constructing slices into UMEM.
 
-A compile-time assertion enforces layout compatibility:
-```rust
-const _: () = assert!(size_of::<HostBatch>() == size_of::<BatchMetadata>());
-```
+The host-facing layouts remain unchanged:
 
-#### The Hot-Path Data Flow
+- `Pdu` remains the native host descriptor;
+- `Pdu0` remains 64 bytes and 64-byte aligned;
+- `WPdu` remains 56 bytes;
+- the final eight bytes of `Pdu0` remain reserved for the host `SystemBus` pointer;
+- `BatchMetadata` still contains `[Pdu0; MAX_BATCH_SIZE]` followed by the action array.
 
-Each call to `execute_wasm_and_route` follows four phases:
+## Mailbox call flow
 
-**Phase 1 — Populate (Host → Mailbox):**  
-A single `ptr::copy_nonoverlapping` copies all `len` `Pdu` structs from the host `Batch` into the UMEM mailbox. LLVM lowers this to SIMD instructions, moving ~16 KB in a handful of CPU cycles. The plugin sees the full packet descriptor (address, length, header metadata) for each frame.
+The packet-engine WIT call transfers only scalar signaling values:
 
-```txt
-ptr::copy_nonoverlapping(
-    batch.as_ptr() as *const Pdu,
-    (*mailbox_ptr).pdus.as_mut_ptr(),
-    len,
-);
+```wit
+process-batch: func(batch-size: u32, mailbox-offset: u32) -> u32;
 ```
 
-**Phase 2 — WASM Execution:**  
-The host calls `process_batch(batch_size, mailbox_offset)`. The plugin reads `pdus[i]` for packet metadata, processes frames zero-copy, and writes its routing decision to `actions[i]`. It may also mutate `WPdu` fields such as `desc_len` or `desc_addr` to reflect packet modifications.
+Processing follows these phases:
 
-**Phase 3 — Mutation (Mailbox → Host):**  
-A symmetric `ptr::copy_nonoverlapping` copies the plugin-modified PDU slots back into the host `Batch`. The `system_bus` tail bytes are preserved unchanged (plugins never touch them), so the host's `Pdu` state remains consistent.
+1. The host bulk-copies active native PDU descriptors into the instance's UMEM mailbox.
+2. The host calls `process-batch(batch-size, mailbox-offset)`.
+3. `MailboxBatch` derives each PDU and action offset from the mailbox offset.
+4. The plugin reads descriptors and headers through the WAT adapter, accesses payload frames at their direct UMEM offsets, and writes actions or mutations through the adapter.
+5. The host bulk-copies mutated PDU descriptors back and routes packets using the mailbox action array.
 
-```txt
-ptr::copy_nonoverlapping(
-    (*mailbox_ptr).pdus.as_ptr(),
-    batch.as_mut_ptr() as *mut Pdu,
-    len,
-);
+There are no per-packet heap allocations or Canonical ABI lists in this packet-engine hot path. Descriptor values and headers cross between the two core memories as scalar machine words; packet payloads are not copied into Rust memory except for bounded inspection windows requested by plugin code.
+
+## Build and composition
+
+The `wasm32-wasip2` Rust target normally invokes `wasm-component-ld`, which cannot resolve the custom `wabrix_umem` core imports. The build therefore has two stages:
+
+1. Cargo uses `rust-lld` to emit a core Wasm module containing the WIT metadata and unresolved `wabrix_umem` imports.
+2. `tools/build_components.sh` invokes `tools/compose_umem.py`, which:
+   - compiles `tools/umem_adapter.wat`;
+   - creates an initial component with `wasm-tools component new --adapt`;
+   - inserts the dedicated UMEM core memory;
+   - rebinds the adapter's memory import from the Rust memory to UMEM;
+   - parses and validates the final component.
+
+Build all supplied plugins with:
+
+```bash
+cd wabrix_api
+bash tools/build_components.sh
 ```
 
-**Phase 4 — Routing:**  
-The host reads `actions[i]` from the mailbox and distributes PDUs across output `Batch` queues according to each plugin's routing decision.
+Loadable components are written to `target/wasm32-wasip2/release/*.wasm`. The intermediate Rust core modules are retained as `*.core.wasm`.
 
-This architecture guarantees that:
+## Wasmtime configuration and safety
 
-1. **Both packet payloads and control metadata are 100% zero-copy and zero-allocation** on the hot path.
-2. **Plugin instances execute concurrently without contention**: each instance owns an exclusive, non-overlapping `BatchMetadata` slice within the Control Block.
-3. **The control channel is hardware-protected**: withheld FQ frames ensure the NIC never overwrites the Control Block.
+`WasmManager` enables the Component Model and multi-memory proposals. Its custom memory creator distinguishes memories by the declaration inserted during composition:
+
+- normal Rust/component memories receive private anonymous mappings;
+- only the UMEM adapter signature receives `UmemHandle`.
+
+The Wasmtime guard size is zero because the physical UMEM allocation has no host-owned guard mapping after it. Cranelift therefore retains explicit bounds checks. UMEM growth is rejected and its base pointer cannot move.
+
+Each plugin instance owns a non-overlapping mailbox, but all instances may address the shared packet-frame region. The pipeline and frame-ownership rules remain responsible for ensuring that two instances do not mutate the same frame concurrently.
+
+## Current limitation
+
+The packet-engine and filter paths use the mailbox/proxy architecture described above. The generator WIT interface still accepts a Canonical ABI byte list and has not yet been migrated to a mailbox-based generator call. Although a generator component can be built and composed, it cannot correctly write separated UMEM through its legacy `PacketBatch::new(&mut batch_bytes)` path. Generator deployment must wait for that ABI migration.

@@ -15,7 +15,7 @@ use wabrix_api::MAX_BATCH_SIZE;
 use wabrix_api::{PluginOpcode, StandardOpcode};
 
 use wabrix_api::tcp_common::{
-    run_tcp_state_machine, write_tcp_reply, EngineConfig, SynGenerator, TimeoutStack, FLAG_ACK,
+    run_tcp_state_machine, write_tcp_reply_raw, EngineConfig, SynGenerator, TimeoutStack, FLAG_ACK,
     FLAG_FIN, FLAG_RST, FLAG_SYN, PORT_END_RANGE, PORT_START_RANGE, STAT_COUNT, STAT_DROP,
     STAT_RECV_RST, STAT_RECV_SYN, STAT_SENT_FIN, STAT_SENT_RST, STAT_SENT_SYN, STAT_SENT_SYNACK,
     STAT_TO_LINUX, STAT_UNEXPECTED,
@@ -457,7 +457,7 @@ impl Node for TcpNode {
                         conn.state = TcpState::FinWait1;
                         conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
                     }
-                    let len = write_tcp_reply(
+                    let len = write_tcp_reply_raw(
                         data_ptr,
                         reply_src_mac,
                         reply_dst_mac,
@@ -475,7 +475,7 @@ impl Node for TcpNode {
                     generated += 1;
                 } else {
                     self.connections.remove(&flow_key);
-                    let len = write_tcp_reply(
+                    let len = write_tcp_reply_raw(
                         data_ptr,
                         reply_src_mac,
                         reply_dst_mac,
@@ -498,10 +498,11 @@ impl Node for TcpNode {
         // === Priority 2: SYN generation ===
         unsafe {
             while frame_idx < allocated {
-                let allowed = self.syn_gen.activated && match self.config.syn_limit {
-                    Some(max) => self.syn_gen.syns_sent < max || max == 0,
-                    None => true,
-                };
+                let allowed = self.syn_gen.activated
+                    && match self.config.syn_limit {
+                        Some(max) => self.syn_gen.syns_sent < max || max == 0,
+                        None => true,
+                    };
                 if !allowed {
                     break;
                 }
@@ -510,7 +511,11 @@ impl Node for TcpNode {
                 frame_idx += 1;
 
                 self.syn_gen.syns_sent += 1;
-                self.syn_gen.prng_state = self.syn_gen.prng_state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                self.syn_gen.prng_state = self
+                    .syn_gen
+                    .prng_state
+                    .wrapping_mul(1_664_525)
+                    .wrapping_add(1_013_904_223);
                 let isn = self.syn_gen.prng_state;
 
                 let src_port = self.syn_gen.port_counter;
@@ -536,7 +541,7 @@ impl Node for TcpNode {
                 );
 
                 let data_ptr = pdu.data_address(0);
-                let len = write_tcp_reply(
+                let len = write_tcp_reply_raw(
                     data_ptr,
                     reply_src_mac,
                     reply_dst_mac,
@@ -701,7 +706,7 @@ unsafe fn handle_tcp_packet(
     if let Some((reply_flags, reply_seq, reply_ack)) = action_opt {
         let reply_dst_mac = incoming_src_mac;
         let reply_src_mac = config.src_mac.unwrap_or(incoming_dst_mac);
-        let len = write_tcp_reply(
+        let len = write_tcp_reply_raw(
             data,
             reply_src_mac,
             reply_dst_mac,

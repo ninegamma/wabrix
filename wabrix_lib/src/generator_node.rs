@@ -91,7 +91,6 @@ pub struct GeneratorNode {
     #[cfg(feature = "wasm")]
     bindings: Option<GeneratorPlugin>,
     #[cfg(feature = "wasm")]
-    partition_start_bytes: u32,
     platform_data: PlatformData,
 }
 
@@ -125,7 +124,6 @@ impl GeneratorNode {
         tm_is_running: Arc<AtomicBool>,
         #[cfg(feature = "wasm")] wasm_manager: Option<&WasmManager>,
         #[cfg(feature = "wasm")] wasm_file_path: Option<&str>,
-        #[cfg(feature = "wasm")] partition_start_bytes: u32,
         #[cfg(feature = "wasm")] wasm_data: std::collections::HashMap<String, String>,
         platform_data: PlatformData,
     ) -> Self {
@@ -135,8 +133,8 @@ impl GeneratorNode {
             let component = manager
                 .get_component(path)
                 .expect("Failed to load Gen Wasm");
-            let partition_handle = manager.make_partition_handle(partition_start_bytes);
-            manager.set_instantiation_handle(partition_handle.clone());
+            let instance_handle = manager.make_instance_handle();
+            manager.set_instantiation_handle(instance_handle.clone());
 
             let wasi_ctx = WasiCtxBuilder::new()
                 .inherit_stdout()
@@ -147,7 +145,7 @@ impl GeneratorNode {
                 MyHostState {
                     ctx: wasi_ctx,
                     table: ResourceTable::new(),
-                    umem: partition_handle,
+                    umem: instance_handle,
                 },
             );
 
@@ -208,7 +206,6 @@ impl GeneratorNode {
             #[cfg(feature = "wasm")]
             bindings,
             #[cfg(feature = "wasm")]
-            partition_start_bytes,
             platform_data,
         }
     }
@@ -514,7 +511,7 @@ impl Node for GeneratorNode {
             // Just pass the bytes and the offset. The plugin handles the rest!
             let lengths = bindings
                 .wabrix_plugins_generator()
-                .call_generate_batch(store, batch_bytes, self.partition_start_bytes)
+                .call_generate_batch(store, batch_bytes)
                 .unwrap_or_else(|e| {
                     log::error!("WASM Generator failed: {}", e);
                     vec![0; allocated]

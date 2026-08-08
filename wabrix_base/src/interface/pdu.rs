@@ -520,7 +520,7 @@ mod tests {
     fn test_push_header_moves_pointer_and_updates_len() {
         // 1. Setup Mock UMEM (Simulate a 2048-byte frame)
         let mut umem_buffer: Vec<u8> = vec![0; 2048];
-        let umem_base = umem_buffer.as_mut_ptr();
+        let umem_base = umem_buffer.as_mut_ptr() as usize;
 
         // 2. Define Initial State
         // Frame Index 0 starts at offset 0.
@@ -555,15 +555,11 @@ mod tests {
         let header;
         {
             // SAFETY: Pdu and Pdu0 are both repr(C, align(64)) with identical layouts (WPdu + 8-byte pad).
-            let mut packet = Packet::new(
-                unsafe { &mut *(&mut pdu as *mut Pdu as *mut Pdu0) },
-                umem_base as usize,
-            );
 
             // 4. Fill Payload with known pattern (0xAA) to verify it stays intact
             unsafe {
                 // Use the public API to get the data pointer
-                let payload_ptr = packet.data_ptr_mut();
+                let payload_ptr = pdu.payload_mut(0).unwrap();
                 ptr::write_bytes(payload_ptr, 0xAA, initial_payload_len);
             }
 
@@ -576,18 +572,19 @@ mod tests {
 
             // 6. Perform Push
             // (Assuming the method is named push_header as requested)
-            packet.push_header(&header).expect("push_header failed");
+            pdu.push_header(umem_base as usize, &header)
+                .expect("push_header failed");
 
             // 7. ASSERTIONS
 
             // A. Verify Length and Headroom updates via Public API
             assert_eq!(
-                packet.data_len() as usize,
+                pdu.data_len() as usize,
                 initial_payload_len + header_size,
                 "Data length should increase"
             );
             assert_eq!(
-                packet.headroom(),
+                pdu.headroom(),
                 initial_headroom - header_size,
                 "Headroom should decrease"
             );
@@ -602,13 +599,12 @@ mod tests {
         );
 
         // SAFETY: same layout as above.
-        let packet = Packet::new(
-            unsafe { &mut *(&mut pdu as *mut Pdu as *mut Pdu0) },
-            umem_base as usize,
-        );
+        unsafe {
+            let mut pdu = &mut *(&mut pdu as *mut Pdu);
+        }
         // C. Verify Memory Content
         unsafe {
-            let current_data_ptr = packet.data_ptr();
+            let current_data_ptr = pdu.payload(0).unwrap();
 
             // 1. Check if Header is written at the new start
             let written_header = *(current_data_ptr as *const TestHeader);
