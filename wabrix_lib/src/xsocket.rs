@@ -229,7 +229,7 @@ impl XSocket {
     // --- Accessors ---
     #[inline(always)]
     pub fn umem_ptr(&self) -> *mut u8 {
-        self.umem.as_ptr()
+        self.umem.as_ptr() as *mut u8
     }
 
     // Standard data access: desc.addr() is relative to UMEM start

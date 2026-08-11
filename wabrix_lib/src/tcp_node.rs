@@ -498,10 +498,11 @@ impl Node for TcpNode {
         // === Priority 2: SYN generation ===
         unsafe {
             while frame_idx < allocated {
-                let allowed = self.syn_gen.activated && match self.config.syn_limit {
-                    Some(max) => self.syn_gen.syns_sent < max || max == 0,
-                    None => true,
-                };
+                let allowed = self.syn_gen.activated
+                    && match self.config.syn_limit {
+                        Some(max) => self.syn_gen.syns_sent < max || max == 0,
+                        None => true,
+                    };
                 if !allowed {
                     break;
                 }
@@ -510,7 +511,11 @@ impl Node for TcpNode {
                 frame_idx += 1;
 
                 self.syn_gen.syns_sent += 1;
-                self.syn_gen.prng_state = self.syn_gen.prng_state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                self.syn_gen.prng_state = self
+                    .syn_gen
+                    .prng_state
+                    .wrapping_mul(1_664_525)
+                    .wrapping_add(1_013_904_223);
                 let isn = self.syn_gen.prng_state;
 
                 let src_port = self.syn_gen.port_counter;

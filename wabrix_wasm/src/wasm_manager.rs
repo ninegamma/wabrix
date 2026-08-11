@@ -208,7 +208,10 @@ impl WasmManager {
             )));
         }
 
-        let umem_ptr = umem.as_ptr();
+        // The UMEM is already shared with AF_XDP, so `Arc::get_mut` cannot be used.
+        // Convert the read-only raw pointer to a writable one; the disjoint-access
+        // invariants documented on `UmemHandle` must be upheld by every caller.
+        let umem_ptr = umem.as_ptr() as *mut u8;
         let total_umem_size = frame_count as usize * frame_size as usize;
         let umem_handle = Arc::new(UmemHandle {
             ptr: umem_ptr,

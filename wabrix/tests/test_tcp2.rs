@@ -13,16 +13,27 @@ impl Drop for EngineProcess {
 }
 
 // Fetches and extracts a specific counter from the Prometheus metrics page
-fn get_metric_value(metrics_url: &str, metric_type: &str, node_path: &str, label: &str) -> Result<u64, String> {
+fn get_metric_value(
+    metrics_url: &str,
+    metric_type: &str,
+    node_path: &str,
+    label: &str,
+) -> Result<u64, String> {
     let mut response = ureq::get(metrics_url).call().map_err(|e| e.to_string())?;
-    let body = response.body_mut().read_to_string().map_err(|e| e.to_string())?;
+    let body = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| e.to_string())?;
 
     let target_node = format!("tmstats_name=\"{}\"", node_path);
     let target_label = format!("data_label=\"{}\"", label);
 
     for line in body.lines() {
         // Enforce strict matching on metric type, fully qualified node path, and data label
-        if line.starts_with(metric_type) && line.contains(&target_node) && line.contains(&target_label) {
+        if line.starts_with(metric_type)
+            && line.contains(&target_node)
+            && line.contains(&target_label)
+        {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if let Some(val_str) = parts.last() {
                 return val_str.parse::<u64>().map_err(|e| e.to_string());
@@ -37,9 +48,7 @@ fn get_metric_value(metrics_url: &str, metric_type: &str, node_path: &str, label
 fn verify_tcp_connection_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
     // Utilize the pre-compiled binary path directly to avoid rustc dependency
     let child = Command::new(env!("CARGO_BIN_EXE_wabrix"))
-        .args([
-            "-c", "tests/test_tcp2.toml"
-        ])
+        .args(["-c", "tests/test_tcp2.toml"])
         .spawn()?;
 
     let _engine_guard = EngineProcess(child);
@@ -62,9 +71,27 @@ fn verify_tcp_connection_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
     // Poll the metrics endpoint until target conditions are met or timeout is reached
     while start_time.elapsed() < timeout {
         // Target wabrix_packets_total and differentiate between client and server pipelines
-        last_client_syn = get_metric_value(metrics_url, "wabrix_packets_total", "tcp_client/tcp_engine", "SentSyn").unwrap_or(0);
-        last_server_syn = get_metric_value(metrics_url, "wabrix_packets_total", "tcp_server/tcp_engine", "RecvSyn").unwrap_or(0);
-        last_client_fin = get_metric_value(metrics_url, "wabrix_packets_total", "tcp_client/tcp_engine", "SentFin").unwrap_or(0);
+        last_client_syn = get_metric_value(
+            metrics_url,
+            "wabrix_packets_total",
+            "tcp_client/tcp_engine",
+            "SentSyn",
+        )
+        .unwrap_or(0);
+        last_server_syn = get_metric_value(
+            metrics_url,
+            "wabrix_packets_total",
+            "tcp_server/tcp_engine",
+            "RecvSyn",
+        )
+        .unwrap_or(0);
+        last_client_fin = get_metric_value(
+            metrics_url,
+            "wabrix_packets_total",
+            "tcp_client/tcp_engine",
+            "SentFin",
+        )
+        .unwrap_or(0);
 
         if last_client_syn >= expected_connections && last_server_syn >= expected_connections {
             connections_established = true;
@@ -82,7 +109,10 @@ fn verify_tcp_connection_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
     if !connections_established || !connections_closed {
         println!("--- DEBUG INFO: TEST FAILURE ---");
         println!("Target expected connections: {}", expected_connections);
-        println!("Connections established boolean: {}", connections_established);
+        println!(
+            "Connections established boolean: {}",
+            connections_established
+        );
         println!("Connections closed boolean: {}", connections_closed);
         println!("Final metric SentSyn (Client): {}", last_client_syn);
         println!("Final metric RecvSyn (Server): {}", last_server_syn);
@@ -100,8 +130,14 @@ fn verify_tcp_connection_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    assert!(connections_established, "Failed to establish expected TCP connections");
-    assert!(connections_closed, "Failed to teardown expected TCP connections");
+    assert!(
+        connections_established,
+        "Failed to establish expected TCP connections"
+    );
+    assert!(
+        connections_closed,
+        "Failed to teardown expected TCP connections"
+    );
 
     Ok(())
 }

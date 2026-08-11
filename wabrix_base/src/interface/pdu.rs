@@ -2,7 +2,6 @@ use core::ptr;
 use core::{cmp, fmt, slice};
 use log::trace;
 use std::ops::Add;
-use xsk_rs::umem::frame::SegmentLengths;
 use xsk_rs::FrameDesc;
 
 use crate::frame_registry::CMD_BIT;
@@ -155,14 +154,9 @@ impl Pdu {
         // and where the frame starts (frame_base).
         // Example: If base is 4096 and data starts at 4352 (256 bytes offset), headroom is 256.
         let headroom = self.w.desc_addr as usize - local_frame_base;
-        FrameDesc {
-            addr: self.w.desc_addr as usize,
-            options: self.w.desc_options,
-            lengths: SegmentLengths {
-                headroom,
-                data: self.w.desc_len as usize,
-            },
-        }
+        FrameDesc::new(self.w.desc_addr as usize)
+            .with_options(self.w.desc_options)
+            .with_lengths(headroom, self.w.desc_len as usize)
     }
 
     /// Consumes the PDU for transmission.
@@ -532,14 +526,17 @@ mod tests {
         // The current data starts at 256
         let initial_desc_addr = initial_headroom;
 
-        let desc = FrameDesc {
-            addr: initial_desc_addr,
-            lengths: SegmentLengths {
-                headroom: initial_headroom,
-                data: initial_payload_len,
-            },
-            options: 0,
-        };
+        let desc =
+            FrameDesc::new(initial_desc_addr).with_lengths(initial_headroom, initial_payload_len);
+
+        //let desc = FrameDesc {
+        //    addr: initial_desc_addr,
+        //    lengths: SegmentLengths {
+        //        headroom: initial_headroom,
+        //        data: initial_payload_len,
+        //    },
+        //    options: 0,
+        //};
 
         // 3. Create PDU
         // We pass a null pointer for SystemBus as we won't trigger bus operations
@@ -633,14 +630,15 @@ mod tests {
         let umem_base = umem_buffer.as_mut_ptr();
 
         // Create a PDU with ZERO headroom (addr = 0)
-        let desc = FrameDesc {
+        let desc = FrameDesc::new(0).with_lengths(0, 100);
+        /*let desc = FrameDesc {
             addr: 0,
             lengths: SegmentLengths {
                 headroom: 0,
                 data: 100,
             },
             options: 0,
-        };
+        }; */
 
         let mut pdu = Pdu::new(desc, 0, 0, core::ptr::null(), 11);
 

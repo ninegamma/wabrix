@@ -4,7 +4,6 @@ use std::time::Duration;
 
 #[test]
 fn verify_filter_engine_forwarding() -> Result<(), Box<dyn std::error::Error>> {
-
     // Spawn UDP receiver thread inside the receiver namespace
     let receiver_handle = thread::spawn(|| {
         let script = r#"
