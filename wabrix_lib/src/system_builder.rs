@@ -5,7 +5,8 @@ use crossbeam_queue::ArrayQueue;
 use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::broadcast::Sender;
+use std::thread;
+use crossbeam_channel::{Receiver, Sender};
 use wabrix_base::frame_registry::RETURN_QUEUE_CAPACITY;
 use xsk_rs::config::{FrameSize, QueueSize};
 use xsk_rs::Umem;
@@ -46,7 +47,7 @@ impl SystemBuilder {
         mut self,
         interface_skels: Option<&HashMap<String, Arc<XscrubberSkel<'static>>>>,
         platform_data: PlatformData,
-        ctrl_tx: Option<Sender<Arc<ControlEvent>>>,
+        ctrl_rx: Option<Receiver<Arc<ControlEvent>>>,
     ) -> Result<Box<XBricksSystem>, Box<dyn std::error::Error>> {
         use crate::config::hot_config::SharedSystemState;
         let num_workers = self.workers.len();
@@ -457,6 +458,10 @@ impl SystemBuilder {
         #[cfg(feature = "wasm")]
         let mut wasm_instance_counters = vec![0u32; MAX_UMEM];
 
+        // Crossbeam receivers are multi-consumer, not broadcast. Give each
+        // runner its own queue and fan out events after construction.
+        let mut control_senders: Vec<Sender<Arc<ControlEvent>>> = Vec::new();
+
         // Build pipeline runners for each worker
         for worker in self.workers {
             let worker_id = worker.id as usize;
@@ -480,10 +485,12 @@ impl SystemBuilder {
                         .collect();
 
                 // --- Create a dedicated receiver for this Runner ---
-                let runner_control_rx = ctrl_tx.as_ref().map(|tx| tx.subscribe());
+                let (runner_control_tx, runner_control_rx) =
+                    crossbeam_channel::bounded(100);
+                control_senders.push(runner_control_tx);
 
                 // Build the node DAG for this pipeline instance
-                let builder_ctrl_tx = ctrl_tx.clone();
+                let builder_ctrl_tx = None;
                 let (nodes, source_indices) = crate::pipeline::PipelineFactory::build(
                     pipeline_instance_cfg,
                     worker_id,
@@ -514,7 +521,7 @@ impl SystemBuilder {
                     nodes,
                     source_indices,
                     node_identities,
-                    runner_control_rx,
+                    Some(runner_control_rx),
                     xbricks_system.platform_data.tsc_frequency,
                     pipeline_rcu,
                 )
@@ -523,6 +530,16 @@ impl SystemBuilder {
                 runners.push(runner);
             }
             xbricks_system.worker_runners[worker_id] = Some((core_id, runners));
+        }
+
+        if let Some(control_rx) = ctrl_rx {
+            thread::spawn(move || {
+                while let Ok(event) = control_rx.recv() {
+                    for control_tx in &control_senders {
+                        let _ = control_tx.try_send(event.clone());
+                    }
+                }
+            });
         }
 
         xbricks_system.telemetry_registry = Arc::new(telemetry_registry);

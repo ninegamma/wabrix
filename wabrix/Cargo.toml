@@ -18,6 +18,7 @@ wabrix_base = { path = "../wabrix_base" }
 env_logger = "0.11.11"
 prometheus = "0.14.0"
 ureq = "3.3.0"
+crossbeam-channel = "0.5.16"
 
 [build-dependencies]
 anyhow = { workspace = true }

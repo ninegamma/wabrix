@@ -12,7 +12,7 @@ use crate::generator_node::{GenState, GeneratorNode};
 use crate::tcp_node::TcpNode;
 pub(crate) use crate::{BatchRx, BatchTx};
 use separator::Separatable;
-use tokio::sync::broadcast::{Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender};
 use wabrix_api::helpers::parse_suffixed_number;
 use wabrix_api::MAX_BATCH_SIZE;
 use wabrix_base::frame_registry::{set_tsc_frequency, set_worker_frame_registry};
@@ -806,7 +806,7 @@ impl PipelineFactory {
                     }
 
                     use wabrix_wasm::WasmEngine;
-                    let _worker_rx = ctrl_tx.as_ref().map(|tx| tx.subscribe());
+                    let _worker_rx = ctrl_tx.as_ref().map(|tx| tx.clone());
                     Box::new(WasmEngine::new(
                         my_id.clone(),
                         manager,

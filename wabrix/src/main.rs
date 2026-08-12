@@ -78,19 +78,24 @@ impl Drop for NamespaceCleanup {
 async fn main() -> anyhow::Result<()> {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
 
+    // Telemetry stays Tokio broadcast (control plane only)
     let (telemetry_tx, _) = tokio::sync::broadcast::channel::<TMLiveStats>(100);
-    let (ctrl_tx, _) = tokio::sync::broadcast::channel::<Arc<ControlEvent>>(100);
+
+    // Control events use crossbeam for lock-free synchronous polling on the hot path
+    let (ctrl_tx, ctrl_rx) = crossbeam_channel::bounded::<Arc<ControlEvent>>(100);
 
     // Spawn Prometheus metrics server
     metrics_server::spawn_metrics_server(telemetry_tx.subscribe());
 
-    log::info!("Starting Wabrix Open Source Engine...");
+    log::info!("Starting Wabrix Engine...");
     let opt = Opt::parse();
     let platform_data = PlatformData::detect();
     info!(
         "TSC frequency: {} Hz",
         platform_data.tsc_frequency.separated_string()
     );
+
+    wabrix_base::system::lock_process_memory().expect("Failed to lock process memory");
 
     // - PROBE INTERFACES
     wabrix_base::system::probe_xdp_interfaces();
@@ -116,9 +121,11 @@ async fn main() -> anyhow::Result<()> {
             }
         };
 
-    let shared_config = Arc::new(RwLock::new(initial_config));
-    let config_path = Arc::new(RwLock::new(opt.config.clone()));
+    // Use ArcSwap for configuration to ensure RCU compliance across threads
+    let shared_config = Arc::new(arc_swap::ArcSwap::from_pointee(initial_config));
 
+    // RwLock is acceptable here ONLY if path updates are strictly confined to Tokio tasks
+    let config_path = Arc::new(RwLock::new(opt.config.clone()));
     let initial_state = SharedSystemState::new(HashMap::new());
     let active_shared_state = Arc::new(arc_swap::ArcSwap::new(initial_state));
     let mut namespace_cleanup = NamespaceCleanup::new();
@@ -213,13 +220,15 @@ async fn main() -> anyhow::Result<()> {
                     match wabrix_lib::toml_parser::WabricksConfig::from_file(&*path) {
                         Ok(fresh) => {
                             info!("Configuration reloaded from: {}", *path);
-                            let mut guard = shared_config.write().await;
-                            *guard = fresh.clone();
+                            // Atomically swap the configuration pointer for RCU compliance
+                            // The data plane will immediately observe the new pointer on its next batch iteration
+                            shared_config.store(std::sync::Arc::new(fresh.clone()));
                             fresh
                         }
                         Err(e) => {
                             error!("Failed to reload config from {}: {}. Using last known good config.", *path, e);
-                            shared_config.read().await.clone()
+                            // Dereference the Guard returned by load to access the Arc, then clone the underlying config
+                            (**shared_config.load()).clone()
                         }
                     }
                 };
@@ -268,14 +277,14 @@ async fn main() -> anyhow::Result<()> {
                     .to_system_builder()
                     .context("Failed to create system builder")?;
 
-                let builder_ctrl_tx = Some(ctrl_tx.clone());
+                let builder_ctrl_rx = Some(ctrl_rx.clone());
 
                 let wabrix_system = tokio::task::block_in_place(|| {
                     sys_builder
                         .build(
                             Some(&interface_skels),
                             platform_data.clone(),
-                            builder_ctrl_tx,
+                            builder_ctrl_rx,
                         )
                         .map_err(|e| anyhow::anyhow!("Failed to build XDP system: {}", e))
                 })?;
@@ -451,8 +460,7 @@ async fn main() -> anyhow::Result<()> {
             SystemCommand::Check => {
                 info!("Received CHECK command. Validating configuration...");
                 let current_config = {
-                    let guard = shared_config.read().await;
-                    guard.clone()
+                    shared_config.load_full().as_ref().clone()
                 };
 
                 let worker_cores: Vec<usize> = current_config

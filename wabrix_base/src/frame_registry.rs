@@ -148,28 +148,28 @@ impl FrameRegistry {
             let group_start = umem_config.group_start_frame_idx;
             let frame_count = umem_config.frame_count as usize;
 
-            // Convert absolute partition range to UMEM-relative local indices.
+            // Convert absolute partition range to UMEM-relative local indices
             let local_start = partition.start_idx - group_start;
             let local_end = partition.end_idx - group_start;
             let partition_size = (local_end - local_start) as usize;
 
-            // Pre-encode every frame in the partition.
-            // Encoding: (umem_group_id << 24) | local_idx
-            // decode_global_frame(encoded).1 == local_idx, so refcounts[local_idx] is a
-            // direct array access without any further arithmetic.
+            // Pre-encode every frame in the partition
+            // - Encoding format: (umem_group_id << 24) | local_idx
+            // - decode_global_frame(encoded).1 == local_idx
+            // - This allows refcounts[local_idx] to be a direct array access without further arithmetic
             let free_stash: Vec<u32> = (local_start..local_end)
                 .map(|local_idx| encode_global_frame(umem_group_id, local_idx))
                 .collect();
 
             debug!(
-                "  Worker {}: UMEM group {} partition - {} frames, local range [{}, {}), \
-                 refcounts sized to full UMEM ({})",
+                "  Worker {}: UMEM group {} partition - {} frames, local range [{}, {}), refcounts sized to full UMEM ({})",
                 worker_id, umem_group_id, partition_size, local_start, local_end, frame_count
             );
 
             registry_map[umem_group_id] = Some(PartitionData {
-                // Size to the full UMEM so local_idx (from decode_global_frame) is a
-                // direct zero-overhead index — no subtraction from partition.start_idx.
+                // Size to the full UMEM so local_idx is a direct zero-overhead index
+                // - Derived from decode_global_frame
+                // - Requires no subtraction from partition.start_idx
                 refcounts: vec![0u16; frame_count],
                 free_stash,
             });

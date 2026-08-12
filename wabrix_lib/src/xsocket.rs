@@ -47,7 +47,7 @@ pub struct XSocket {
     pub config: Arc<XdpSocketConfig>,
 }
 
-const MAX_FILL: usize = 8192;
+const MAX_FILL: usize = 4096;
 /// Split components for independent RX and TX access
 /// These DO NOT own the frame registry - it's accessed via thread-local storage
 pub struct XSocketRx {
@@ -430,8 +430,6 @@ impl XSocketRx {
         // Idiomatic way to clamp an upper bound in Rust
         let requested_count = requested_count.min(MAX_FILL);
 
-        let _threshold = LOG_INTERVAL_C_F_QUEUE_PACKETS;
-
         // Access Thread-Local Registry
         let registry_ptr = get_worker_frame_registry();
         if registry_ptr.is_null() {
@@ -441,18 +439,6 @@ impl XSocketRx {
         let frame_registry = unsafe { &mut *registry_ptr };
 
         let available = requested_count;
-        /*        let available_count = frame_registry.total_free_frames();
-                let available = std::cmp::min(requested_count, available_count);
-                if available == 0 {
-                    log::trace!(
-                        "Worker {}: Cannot replenish {} queue {}, no free frames available!",
-                        self.config.worker_id,
-                        &self.config.interface,
-                        self.config.queue_id
-                    );
-                    return 0;
-                }
-        */
 
         let t0 = unsafe { std::arch::x86_64::_rdtsc() };
 
@@ -567,43 +553,6 @@ impl XSocketRx {
 
         let t6 = unsafe { std::arch::x86_64::_rdtsc() };
 
-        // Log the breakdown (only occasionally to avoid log spam)
-        /*if self.prof_replenish_calls % 10000 == 0 {
-                    log::info!(
-                        "\n=== Replenish X-Ray (Cycles) ===\n\
-                         Lock      : {}\n\
-                         Allocator : {}\n\
-                         Math Loop : {}\n\
-                         FQ Produce: {}\n\
-                         Syscall   : {}\n\
-                         Release   : {}",
-                         t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4, t6 - t5
-                    );
-                }
-
-                let current_block = self.total_produced / threshold;
-
-                if current_block > self.last_logged_block {
-                    log::trace!(
-                        "Worker {}, I/f {}, Queue {}: Replenished in total {} frames to fill queue, free frames remaining: {}",
-                        self.config.worker_id,
-                        self.config.interface,
-                        self.config.queue_id,
-                        &self.total_produced,
-                        frame_registry.total_free_frames()
-                    );
-
-                    self.last_logged_block = current_block;
-                }
-                trace!(
-                    "Worker {}: Replenished {} frames to {} queue {} Fill Ring, free frames remaining: {}",
-                    self.config.worker_id,
-                    produced,
-                    &self.config.interface,
-                    self.config.queue_id,
-                    frame_registry.total_free_frames(),
-                );
-        */
         #[cfg(feature = "profiling")]
         {
             let end_cycles = unsafe { std::arch::x86_64::_rdtsc() };
@@ -619,7 +568,8 @@ impl XSocketRx {
                 // Only print if the spike is absurdly high (e.g., > 50,000 cycles)
                 if duration > 50_000 {
                     log::warn!(
-                        "MONSTER SPIKE DETECTED: Replenish took {} cycles!",
+                        "MONSTER SPIKE DETECTED: Replenish of {} frames took {} cycles!",
+                        produced,
                         duration
                     );
                     log::info!(

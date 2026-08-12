@@ -84,6 +84,25 @@ impl PlatformData {
     }
 }
 
+
+use std::io::Error;
+
+/// Locks all current and future memory allocations into physical RAM.
+pub fn lock_process_memory() -> Result<(), Error> {
+    // SAFETY:
+    // - mlockall does not mutate memory directly or cause data races.
+    // - It only modifies the kernel's virtual memory management behavior for this process.
+    let result = unsafe {
+        libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE)
+    };
+
+    if result != 0 {
+        return Err(Error::last_os_error());
+    }
+
+    Ok(())
+}
+
 pub fn get_mac_from_ifname(ifname: &str) -> Result<MacAddress, ParseError> {
     let iface = Path::new("/sys/class/net").join(ifname).join("address");
     let mut macaddr = String::new();

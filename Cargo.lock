@@ -3127,6 +3127,7 @@ dependencies = [
  "arc-swap",
  "axum",
  "clap",
+ "crossbeam-channel",
  "env_logger",
  "log",
  "prometheus",
@@ -3157,6 +3158,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "crossbeam-queue",
+ "libc",
  "log",
  "macaddr",
  "separator",
