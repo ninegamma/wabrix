@@ -246,7 +246,17 @@ async fn main() -> anyhow::Result<()> {
                     .iter()
                     .map(|i| i.name.clone())
                     .collect();
-                wabrix_base::system::check_system(&worker_cores, &interfaces);
+                let irq_assignments: Vec<(String, usize)> = current_config
+                    .wabrix
+                    .ifaces
+                    .iter()
+                    .filter_map(|iface| {
+                        iface
+                            .irq_core
+                            .map(|irq_core| (iface.name.clone(), irq_core))
+                    })
+                    .collect();
+                wabrix_base::system::check_system(&worker_cores, &interfaces, &irq_assignments);
 
                 // Configure Network Interfaces
                 info!("Configuring network interfaces...");
@@ -459,9 +469,7 @@ async fn main() -> anyhow::Result<()> {
             }
             SystemCommand::Check => {
                 info!("Received CHECK command. Validating configuration...");
-                let current_config = {
-                    shared_config.load_full().as_ref().clone()
-                };
+                let current_config = { shared_config.load_full().as_ref().clone() };
 
                 let worker_cores: Vec<usize> = current_config
                     .wabrix
@@ -475,7 +483,17 @@ async fn main() -> anyhow::Result<()> {
                     .iter()
                     .map(|i| i.name.clone())
                     .collect();
-                wabrix_base::system::check_system(&worker_cores, &interfaces);
+                let irq_assignments: Vec<(String, usize)> = current_config
+                    .wabrix
+                    .ifaces
+                    .iter()
+                    .filter_map(|iface| {
+                        iface
+                            .irq_core
+                            .map(|irq_core| (iface.name.clone(), irq_core))
+                    })
+                    .collect();
+                wabrix_base::system::check_system(&worker_cores, &interfaces, &irq_assignments);
 
                 info!("Validating pipeline topology...");
                 match current_config.to_system_builder() {

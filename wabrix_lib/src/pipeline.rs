@@ -12,7 +12,7 @@ use crate::config::hot_config::{HotNodeData, HotPipelineConfig, NodeDynamicState
 use crate::generator_node::{GenState, GeneratorNode};
 use crate::tcp_node::TcpNode;
 pub(crate) use crate::{BatchRx, BatchTx};
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::Receiver;
 use separator::Separatable;
 use wabrix_api::helpers::parse_suffixed_number;
 use wabrix_api::MAX_BATCH_SIZE;
@@ -101,7 +101,6 @@ impl PipelineFactory {
         worker_id: usize,
         xsocket_mgr: &mut dyn XSocketRxTxProvider,
         mut telemetry_registry: Option<&mut TelemetryRegistry>,
-        ctrl_tx: Option<Sender<Arc<ControlEvent>>>,
         platform_data: &PlatformData,
         #[cfg(feature = "wasm")] wasm_managers: &[Option<Arc<WasmManager>>],
         shared_state: Arc<crate::config::hot_config::SharedSystemState>,
@@ -853,7 +852,6 @@ impl PipelineFactory {
                     }
 
                     use wabrix_wasm::WasmEngine;
-                    let _worker_rx = ctrl_tx.as_ref().map(|tx| tx.clone());
                     Box::new(WasmEngine::new(
                         my_id.clone(),
                         manager,

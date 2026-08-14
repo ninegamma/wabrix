@@ -490,13 +490,11 @@ impl SystemBuilder {
                 control_senders.push(runner_control_tx);
 
                 // Build the node DAG for this pipeline instance
-                let builder_ctrl_tx = None;
                 let (nodes, source_indices) = crate::pipeline::PipelineFactory::build(
                     pipeline_instance_cfg,
                     worker_id,
                     &mut xbricks_system.xsocket_registry,
                     Some(&mut telemetry_registry),
-                    builder_ctrl_tx,
                     &xbricks_system.platform_data,
                     #[cfg(feature = "wasm")]
                     &self.wasm_managers,

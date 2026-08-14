@@ -84,7 +84,6 @@ impl PlatformData {
     }
 }
 
-
 use std::io::Error;
 
 /// Locks all current and future memory allocations into physical RAM.
@@ -92,9 +91,7 @@ pub fn lock_process_memory() -> Result<(), Error> {
     // SAFETY:
     // - mlockall does not mutate memory directly or cause data races.
     // - It only modifies the kernel's virtual memory management behavior for this process.
-    let result = unsafe {
-        libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE)
-    };
+    let result = unsafe { libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE) };
 
     if result != 0 {
         return Err(Error::last_os_error());
@@ -332,7 +329,7 @@ pub fn get_nic_rx_packets_detailed(interface: &str) -> Option<PacketStats> {
     get_nic_packets_detailed(interface, true)
 }
 
-use log::{info, warn};
+use log::{debug, info, warn};
 use std::fs;
 
 pub fn check_irqbalance_status() {
@@ -399,6 +396,73 @@ pub fn check_irq_affinity(worker_core: usize, interface: &str) {
         }
         if !b_warn {
             info!("✓ No IRQ conflicts found.");
+        }
+    }
+}
+
+fn cpu_thread_siblings(cpu: usize) -> Result<Vec<usize>, std::io::Error> {
+    let path = format!(
+        "/sys/devices/system/cpu/cpu{}/topology/thread_siblings_list",
+        cpu
+    );
+    let contents = fs::read_to_string(path)?;
+    let mut siblings = Vec::new();
+
+    for item in contents.trim().split(',') {
+        if let Some((start, end)) = item.split_once('-') {
+            let start = start.trim().parse::<usize>().map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid CPU sibling range")
+            })?;
+            let end = end.trim().parse::<usize>().map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid CPU sibling range")
+            })?;
+            if start > end {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "CPU sibling range is reversed",
+                ));
+            }
+            siblings.extend(start..=end);
+        } else {
+            siblings.push(item.trim().parse::<usize>().map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid CPU sibling")
+            })?);
+        }
+    }
+
+    Ok(siblings)
+}
+
+/// Warn when a configured NIC IRQ CPU is the SMT sibling of a worker CPU.
+///
+/// This check is intentionally advisory. The worker and IRQ may still be
+/// validly configured on separate physical cores, and some systems expose
+/// topology information differently. It only reports the common two-thread
+/// SMT case requested by the configuration sanity check.
+pub fn check_smt_irq_affinity(worker_cores: &[usize], irq_assignments: &[(String, usize)]) {
+    for &worker_core in worker_cores {
+        let siblings = match cpu_thread_siblings(worker_core) {
+            Ok(siblings) => siblings,
+            Err(error) => {
+                debug!(
+                    "Could not read SMT topology for worker CPU {}: {}",
+                    worker_core, error
+                );
+                continue;
+            }
+        };
+
+        if siblings.len() != 2 {
+            continue;
+        }
+
+        for (interface, irq_core) in irq_assignments {
+            if *irq_core != worker_core && siblings.contains(irq_core) {
+                warn!(
+                    "⚠️ WARNING: NIC {} IRQs are configured on CPU {}, the SMT sibling of worker CPU {}. Move the IRQ to a different physical core to avoid contention.",
+                    interface, irq_core, worker_core
+                );
+            }
         }
     }
 }
@@ -724,7 +788,12 @@ pub fn probe_xdp_interfaces() {
 /// # Arguments
 /// * `worker_cores` - List of CPU cores used by workers
 /// * `interfaces` - List of network interface names
-pub fn check_system(worker_cores: &[usize], interfaces: &[String]) {
+/// * `irq_assignments` - Configured `(interface, CPU)` IRQ assignments
+pub fn check_system(
+    worker_cores: &[usize],
+    interfaces: &[String],
+    irq_assignments: &[(String, usize)],
+) {
     info!("=== wabrix Pre-Flight System Check ===");
     // check for irdma module, in case of Intel E800 series cards it blocks advanced Eth fcts.
     check_irdma_mod_unloaded();
@@ -751,6 +820,9 @@ pub fn check_system(worker_cores: &[usize], interfaces: &[String]) {
             check_irq_affinity(core, interface);
         }
     }
+
+    // Check configured IRQ CPUs against SMT siblings of worker CPUs.
+    check_smt_irq_affinity(worker_cores, irq_assignments);
 
     info!("======== System Check Completed =======");
 }
