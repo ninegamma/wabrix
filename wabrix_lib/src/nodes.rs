@@ -1,3 +1,4 @@
+use crossbeam_utils::CachePadded;
 use std::arch::x86_64::_rdtsc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -357,13 +358,13 @@ pub struct DropNode {
     dropped_count: u64,
     /// Shared atomic counter published to the telemetry registry so the GUI
     /// can display the running dropped-packet total in real time.
-    telemetry_counter: Option<Arc<AtomicU64>>,
+    telemetry_counter: Option<Arc<CachePadded<AtomicU64>>>,
     #[cfg(feature = "profiling")]
     total_cycles: u64,
 }
 
 impl DropNode {
-    pub fn new(id: NodeId, telemetry_counter: Option<Arc<AtomicU64>>) -> Self {
+    pub fn new(id: NodeId, telemetry_counter: Option<Arc<CachePadded<AtomicU64>>>) -> Self {
         Self {
             id,
             dropped_count: 0,

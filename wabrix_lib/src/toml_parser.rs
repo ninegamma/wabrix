@@ -211,7 +211,7 @@ pub struct PipelineConfig {
     pub poll_frequency: u64,
     // * Target operational state of the pipeline
     // * Parsed from TOML, falls back to None if omitted
-    #[serde(default)]
+    #[serde(rename = "desired_state", alias = "lifecycle_state", default)]
     pub lifecycle_state: Option<PipelineLifecycle>,
 }
 

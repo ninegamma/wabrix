@@ -15,6 +15,7 @@ separator = { workspace = true }
 serde = { workspace = true }
 ts-rs = { workspace = true }
 libc = "0.2.186"
+crossbeam-utils = "0.8.22"
 
 [features]
 performance = []

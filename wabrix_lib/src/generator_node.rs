@@ -1,4 +1,5 @@
 use crate::config::hot_config::{NodeDynamicState, SharedSystemState};
+use crossbeam_utils::CachePadded;
 use log::{info, warn};
 use macaddr::MacAddr6;
 use network_types::eth::EtherType;
@@ -79,10 +80,10 @@ pub struct GeneratorNode {
     shared_state: Arc<SharedSystemState>,
     pipeline_name: String,
     // telemetry atomics shared with TelemetryRegistry
-    tm_total: Arc<AtomicU64>,
-    tm_this_run: Arc<AtomicU64>,
-    tm_avg_cycles: Arc<AtomicU64>,
-    tm_pps: Arc<AtomicU64>,
+    tm_total: Arc<CachePadded<AtomicU64>>,
+    tm_this_run: Arc<CachePadded<AtomicU64>>,
+    tm_avg_cycles: Arc<CachePadded<AtomicU64>>,
+    tm_pps: Arc<CachePadded<AtomicU64>>,
     tm_is_running: Arc<AtomicBool>,
 
     // === WASM FIELDS ===
@@ -118,10 +119,10 @@ impl GeneratorNode {
         shared_state: Arc<SharedSystemState>,
         pipeline_name: String,
         autostart: bool,
-        tm_total: Arc<AtomicU64>,
-        tm_this_run: Arc<AtomicU64>,
-        tm_avg_cycles: Arc<AtomicU64>,
-        tm_pps: Arc<AtomicU64>,
+        tm_total: Arc<CachePadded<AtomicU64>>,
+        tm_this_run: Arc<CachePadded<AtomicU64>>,
+        tm_avg_cycles: Arc<CachePadded<AtomicU64>>,
+        tm_pps: Arc<CachePadded<AtomicU64>>,
         tm_is_running: Arc<AtomicBool>,
         #[cfg(feature = "wasm")] wasm_manager: Option<&WasmManager>,
         #[cfg(feature = "wasm")] wasm_file_path: Option<&str>,

@@ -1,3 +1,4 @@
+use crossbeam_utils::CachePadded;
 use std::mem::{replace, size_of, MaybeUninit};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -43,7 +44,7 @@ pub struct TcpNode {
     /// (with a cheap uninit `Batch::new()`) into the `Directive::Split` result.
     output_batches: Vec<Batch>,
     processed: u64,
-    counters_pkts: Vec<Arc<AtomicU64>>,
+    counters_pkts: Vec<Arc<CachePadded<AtomicU64>>>,
     tm_force_sync: Arc<AtomicBool>,
     #[cfg(feature = "profiling")]
     total_cycles: u64,
@@ -56,7 +57,7 @@ impl TcpNode {
         umem_group_id: usize,
         config_data: Vec<(String, String)>,
         tsc_frequency: u64,
-        counters_pkts: Vec<Arc<AtomicU64>>,
+        counters_pkts: Vec<Arc<CachePadded<AtomicU64>>>,
         tm_force_sync: Arc<AtomicBool>,
     ) -> Self {
         let mut config = EngineConfig {

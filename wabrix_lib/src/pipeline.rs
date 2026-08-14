@@ -2,7 +2,8 @@ pub(crate) use crate::nodes::{BatchRxNode, BatchTxNode, DropNode, FastParserNode
 use crate::toml_parser::{PipelineInstance, PipelineLifecycle};
 use arc_swap::ArcSwap;
 use core_affinity::CoreId;
-use log::{debug, info};
+use crossbeam_utils::CachePadded;
+use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -11,8 +12,8 @@ use crate::config::hot_config::{HotNodeData, HotPipelineConfig, NodeDynamicState
 use crate::generator_node::{GenState, GeneratorNode};
 use crate::tcp_node::TcpNode;
 pub(crate) use crate::{BatchRx, BatchTx};
-use separator::Separatable;
 use crossbeam_channel::{Receiver, Sender};
+use separator::Separatable;
 use wabrix_api::helpers::parse_suffixed_number;
 use wabrix_api::MAX_BATCH_SIZE;
 use wabrix_base::frame_registry::{set_tsc_frequency, set_worker_frame_registry};
@@ -22,6 +23,52 @@ use wabrix_base::telemetry::TelemetryRegistry;
 use wabrix_base::{ControlEvent, Directive, Node, NodeId};
 #[cfg(feature = "wasm")]
 use wabrix_wasm::wasm_manager::WasmManager;
+
+/// Real-time priority used by the packet-processing workers.
+///
+/// SCHED_FIFO priorities range from 1 to 99 on Linux. Keep this below the
+/// kernel/IRQ real-time priorities so a worker cannot prevent those from
+/// running.
+const WORKER_FIFO_PRIORITY: i32 = 50;
+
+fn set_worker_fifo_scheduling(worker_id: usize) {
+    let param = libc::sched_param {
+        sched_priority: WORKER_FIFO_PRIORITY,
+    };
+
+    // pthread_setschedparam changes the policy of the calling thread only.
+    // This is important because workers are created through Tokio's blocking
+    // pool and must not change the policy of the whole process.
+    let result =
+        unsafe { libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param) };
+
+    if result == 0 {
+        info!(
+            "Worker {} scheduling policy set to SCHED_FIFO (priority {})",
+            worker_id, WORKER_FIFO_PRIORITY
+        );
+    } else {
+        let error = std::io::Error::from_raw_os_error(result);
+        warn!(
+            "Worker {} could not enable SCHED_FIFO (priority {}): {}. Continuing with the existing scheduling policy.",
+            worker_id, WORKER_FIFO_PRIORITY, error
+        );
+    }
+}
+
+fn restore_worker_scheduling(worker_id: usize) {
+    let param = libc::sched_param { sched_priority: 0 };
+    let result =
+        unsafe { libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_OTHER, &param) };
+
+    if result != 0 {
+        warn!(
+            "Worker {} could not restore SCHED_OTHER: {}",
+            worker_id,
+            std::io::Error::from_raw_os_error(result)
+        );
+    }
+}
 
 /// Trait for managing XDP socket access
 /// This abstracts away the details of how XDP sockets are stored and retrieved
@@ -422,10 +469,10 @@ impl PipelineFactory {
                         .map(|s| s.to_lowercase() == "true")
                         .unwrap_or(false);
 
-                    let tm_total = Arc::new(AtomicU64::new(0));
-                    let tm_this_run = Arc::new(AtomicU64::new(0));
-                    let tm_avg_cycles = Arc::new(AtomicU64::new(0));
-                    let tm_pps = Arc::new(AtomicU64::new(0));
+                    let tm_total = Arc::new(CachePadded::new(AtomicU64::new(0)));
+                    let tm_this_run = Arc::new(CachePadded::new(AtomicU64::new(0)));
+                    let tm_avg_cycles = Arc::new(CachePadded::new(AtomicU64::new(0)));
+                    let tm_pps = Arc::new(CachePadded::new(AtomicU64::new(0)));
                     let tm_is_running = Arc::new(AtomicBool::new(false));
                     let tm_force_sync = Arc::new(AtomicBool::new(false));
                     if let Some(ref mut reg) = telemetry_registry {
@@ -446,7 +493,7 @@ impl PipelineFactory {
                                 tm_avg_cycles.clone(),
                                 tm_pps.clone(),
                             ],
-                            vec![Arc::new(AtomicU64::new(0))],
+                            vec![Arc::new(CachePadded::new(AtomicU64::new(0)))],
                             Some(tm_is_running.clone()),
                             Some(tm_force_sync.clone()),
                         );
@@ -553,7 +600,7 @@ impl PipelineFactory {
 
                 // === 4. Drop Node ===
                 "DropNode" => {
-                    let dropped_pkts = Arc::new(AtomicU64::new(0));
+                    let dropped_pkts = Arc::new(CachePadded::new(AtomicU64::new(0)));
                     if let Some(ref mut reg) = telemetry_registry {
                         reg.register(
                             format!(
@@ -562,7 +609,7 @@ impl PipelineFactory {
                             ),
                             vec!["dropped".to_string()],
                             vec![dropped_pkts.clone()],
-                            vec![Arc::new(AtomicU64::new(0))],
+                            vec![Arc::new(CachePadded::new(AtomicU64::new(0)))],
                             None,
                             None,
                         );
@@ -638,11 +685,11 @@ impl PipelineFactory {
 
                     let labels = node_instance.node_config.labels.clone();
                     let num_buckets = labels.as_ref().map_or(0, |l| l.len());
-                    let counters_pkts: Vec<Arc<AtomicU64>> = (0..num_buckets)
-                        .map(|_| Arc::new(AtomicU64::new(0)))
+                    let counters_pkts: Vec<Arc<CachePadded<AtomicU64>>> = (0..num_buckets)
+                        .map(|_| Arc::new(CachePadded::new(AtomicU64::new(0))))
                         .collect();
-                    let counters_bytes: Vec<Arc<AtomicU64>> = (0..num_buckets)
-                        .map(|_| Arc::new(AtomicU64::new(0)))
+                    let counters_bytes: Vec<Arc<CachePadded<AtomicU64>>> = (0..num_buckets)
+                        .map(|_| Arc::new(CachePadded::new(AtomicU64::new(0))))
                         .collect();
                     let tm_force_sync = Arc::new(AtomicBool::new(false));
                     if let Some(registry) = telemetry_registry.as_mut() {
@@ -737,11 +784,11 @@ impl PipelineFactory {
 
                     let labels = node_instance.node_config.labels.clone();
                     let num_buckets = labels.as_ref().map_or(0, |l| l.len());
-                    let counters_pkts: Vec<Arc<AtomicU64>> = (0..num_buckets)
-                        .map(|_| Arc::new(AtomicU64::new(0)))
+                    let counters_pkts: Vec<Arc<CachePadded<AtomicU64>>> = (0..num_buckets)
+                        .map(|_| Arc::new(CachePadded::new(AtomicU64::new(0))))
                         .collect();
-                    let counters_bytes: Vec<Arc<AtomicU64>> = (0..num_buckets)
-                        .map(|_| Arc::new(AtomicU64::new(0)))
+                    let counters_bytes: Vec<Arc<CachePadded<AtomicU64>>> = (0..num_buckets)
+                        .map(|_| Arc::new(CachePadded::new(AtomicU64::new(0))))
                         .collect();
                     let tm_force_sync = Arc::new(AtomicBool::new(false));
 
@@ -1468,10 +1515,18 @@ pub fn spawn_worker_pipelines(
             0
         };
 
-        debug!(
-            "Worker {} starting with {} pipeline(s) on core {}",
+        // Use a real-time FIFO policy after pinning the worker. The policy is
+        // applied to this worker thread only; lack of CAP_SYS_NICE/root
+        // privileges is reported but does not prevent the data plane starting.
+        set_worker_fifo_scheduling(worker_id);
+
+        let tid = unsafe { libc::syscall(libc::SYS_gettid) };
+
+        info!(
+            "Worker {} with {} pipelines is running with OS TID {} on core {}",
             worker_id,
             runners.len(),
+            tid,
             core_id.id
         );
 
@@ -1649,6 +1704,10 @@ pub fn spawn_worker_pipelines(
         // 3. Finally drop the frame registry safely
         log::debug!("Worker {}: Dropping frame registry", worker_id);
         drop(frame_registry);
+
+        // spawn_blocking uses a reusable thread pool. Do not let a future
+        // unrelated blocking task inherit this worker's real-time policy.
+        restore_worker_scheduling(worker_id);
 
         // 4. Increment the workers completed counter (all workers increment, not just generator workers)
         workers_completed.fetch_add(1, Ordering::SeqCst);

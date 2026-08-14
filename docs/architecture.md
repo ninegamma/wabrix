@@ -1,6 +1,6 @@
 # Data Model and Architecture Summary
 
-**Scope:** This document describes the data model, architectural roles, and frame lifecycle of the **XBRIX** Rust workspace — specifically the `xbricks_base` crate (core types: `FrameRegistry`, `SystemBus`, `UmemPartition`, `Pdu`, `RuntimeUmemConfig`) and the `xbricks_lib` crate (socket layer: `XSocket`, `XSocketRx`, `XSocketTx`, `XSocketRegistry`, system builder). The `xbricks_wasm` crate (plugin/WASM runtime) and the `xbricks` binary (CLI entry point) are not covered in detail here.
+**Scope:** This document describes the data model, architectural roles, and frame lifecycle of the **WABRIX** Rust workspace — specifically the `wabrix_base` crate (core types: `FrameRegistry`, `SystemBus`, `UmemPartition`, `Pdu`, `RuntimeUmemConfig`) and the `wabrix_lib` crate (socket layer: `XSocket`, `XSocketRx`, `XSocketTx`, `XSocketRegistry`, system builder). The `wabrix_wasm` crate (plugin/WASM runtime) and the `wabrix` binary (CLI entry point) are not covered in detail here.
 
 **Platform context:** Linux-only, kernel-bypass packet I/O via **AF_XDP**. The application maps shared memory (UMEM) directly with the NIC driver, bypassing the kernel network stack on the fast path. All types described below assume a Linux host with XDP-capable NICs.
 

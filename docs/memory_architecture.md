@@ -1,4 +1,4 @@
-# xbricks Memory Architecture & Zero-Copy
+# wabrix Memory Architecture & Zero-Copy
 
 Here is a concise breakdown of the memory architecture and address calculation that enables zero-copy packet processing and metadata exchange between the Linux Host and the WebAssembly plugin.
 

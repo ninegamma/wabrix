@@ -562,32 +562,30 @@ impl XSocketRx {
             self.prof_replenish_calls += 1;
 
             // Catch the Sledgehammer
-            if duration > self.prof_max_replenish_cycles {
+            if duration > 50_000 {
                 self.prof_max_replenish_cycles = duration;
 
                 // Only print if the spike is absurdly high (e.g., > 50,000 cycles)
-                if duration > 50_000 {
-                    log::warn!(
-                        "MONSTER SPIKE DETECTED: Replenish of {} frames took {} cycles!",
-                        produced,
-                        duration
-                    );
-                    log::info!(
-                        "\n=== Replenish X-Ray (Cycles) ===\n\
-                 Lock      : {}\n\
-                 Allocator : {}\n\
-                 Math Loop : {}\n\
-                 FQ Produce: {}\n\
-                 Syscall   : {}\n\
-                 Release   : {}",
-                        t1 - t0,
-                        t2 - t1,
-                        t3 - t2,
-                        t4 - t3,
-                        t5 - t4,
-                        t6 - t5
-                    );
-                }
+                log::warn!(
+                    "MONSTER SPIKE DETECTED: Replenish of {} frames took {} cycles!",
+                    produced,
+                    duration
+                );
+                log::info!(
+                    "\n=== Replenish X-Ray (Cycles) ===\n\
+             Lock      : {}\n\
+             Allocator : {}\n\
+             Math Loop : {}\n\
+             FQ Produce: {}\n\
+             Syscall   : {}\n\
+             Release   : {}",
+                    t1 - t0,
+                    t2 - t1,
+                    t3 - t2,
+                    t4 - t3,
+                    t5 - t4,
+                    t6 - t5
+                );
             }
         }
 
@@ -635,8 +633,7 @@ impl BatchRx for XSocketRx {
         // The kernel drops packets if the fill queue is empty when packets arrive.
         //let fq_size = self.config.umem_config.fq_size as usize;
         if self.fill_deficit >= 1024 {
-            let to_replenish = std::cmp::max(self.fill_deficit, 512);
-            let produced = self.replenish_fill_queue(to_replenish);
+            let produced = self.replenish_fill_queue(self.fill_deficit);
             self.fill_deficit = self.fill_deficit.saturating_sub(produced);
             if self.fill_deficit > 2048 {
                 log::warn!("Fill deficit is too high: {}", self.fill_deficit);

@@ -3158,6 +3158,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "crossbeam-queue",
+ "crossbeam-utils",
  "libc",
  "log",
  "macaddr",
@@ -3179,6 +3180,7 @@ dependencies = [
  "core_affinity",
  "crossbeam-channel",
  "crossbeam-queue",
+ "crossbeam-utils",
  "hashbrown 0.17.1",
  "ipnet",
  "libbpf-cargo",

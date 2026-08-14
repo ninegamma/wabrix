@@ -95,13 +95,25 @@ pub fn decode_global_frame(global_idx: u32) -> (usize, u32) {
 
 /// Per-UMEM partition data within a worker's registry.
 /// `free_stash` holds encoded global frame indices (encode_global_frame format).
-/// `refcounts` is indexed directly by UMEM-relative local_idx — no subtraction needed.
+/// `refcounts` is indexed by local_idx - `refcount_start`.
 pub struct PartitionData {
-    /// Indexed by UMEM-relative local_idx. Sized to the full UMEM frame count so that
-    /// local_idx (from decode_global_frame) is a direct array index with no arithmetic.
+    /// First UMEM-relative frame represented by `refcounts`.
+    refcount_start: u32,
+    /// One counter per frame owned by this partition. Keeping this partition-local avoids
+    /// allocating a counter for every frame in the UMEM when a worker owns only a subrange.
     refcounts: Vec<u16>,
     /// Encoded global frame indices available for allocation.
     free_stash: Vec<u32>,
+}
+
+impl PartitionData {
+    /// Converts a UMEM-relative frame index to an index in this partition's compact
+    /// refcount array. Returns `None` for a frame that does not belong to the partition.
+    #[inline(always)]
+    fn refcount_index(&self, local_idx: u32) -> Option<usize> {
+        let idx = local_idx.checked_sub(self.refcount_start)? as usize;
+        (idx < self.refcounts.len()).then_some(idx)
+    }
 }
 
 /// Per-worker frame registry information
@@ -156,21 +168,18 @@ impl FrameRegistry {
             // Pre-encode every frame in the partition
             // - Encoding format: (umem_group_id << 24) | local_idx
             // - decode_global_frame(encoded).1 == local_idx
-            // - This allows refcounts[local_idx] to be a direct array access without further arithmetic
             let free_stash: Vec<u32> = (local_start..local_end)
                 .map(|local_idx| encode_global_frame(umem_group_id, local_idx))
                 .collect();
 
             debug!(
-                "  Worker {}: UMEM group {} partition - {} frames, local range [{}, {}), refcounts sized to full UMEM ({})",
+                "  Worker {}: UMEM group {} partition - {} frames, local range [{}, {}), refcounts reduced from full UMEM size {}",
                 worker_id, umem_group_id, partition_size, local_start, local_end, frame_count
             );
 
             registry_map[umem_group_id] = Some(PartitionData {
-                // Size to the full UMEM so local_idx is a direct zero-overhead index
-                // - Derived from decode_global_frame
-                // - Requires no subtraction from partition.start_idx
-                refcounts: vec![0u16; frame_count],
+                refcount_start: local_start,
+                refcounts: vec![0u16; partition_size],
                 free_stash,
             });
         }
@@ -204,11 +213,19 @@ impl FrameRegistry {
                     if let Some(partition_data) =
                         self.registry_map.get_mut(umem_id).and_then(|p| p.as_mut())
                     {
-                        unsafe {
-                            // SAFETY: local_idx is bounds-checked by the stash initializer
-                            *partition_data
-                                .refcounts
-                                .get_unchecked_mut(local_idx as usize) += 1;
+                        if let Some(refcount_idx) = partition_data.refcount_index(local_idx) {
+                            unsafe {
+                                // SAFETY: refcount_index verifies that the index belongs to
+                                // this partition and is within the compact refcounts vector.
+                                *partition_data.refcounts.get_unchecked_mut(refcount_idx) += 1;
+                            }
+                        } else {
+                            log::error!(
+                                "Worker {}: retain for frame local_idx={} outside UMEM {} partition",
+                                self.worker_id,
+                                local_idx,
+                                umem_id
+                            );
                         }
                     }
                 } else {
@@ -244,7 +261,8 @@ impl FrameRegistry {
     ///
     /// # Parameters
     /// * `global_idx` - Encoded global frame index: (umem_id << 24) | local_idx.
-    ///   The umem_id selects the partition; local_idx is the direct refcounts array index.
+    ///   The umem_id selects the partition; local_idx is translated to a partition-relative
+    ///   refcount index.
     #[inline]
     pub fn release_local(&mut self, global_idx: u32) {
         // 1. O(1) decode: 1 shift + 1 mask
@@ -252,11 +270,19 @@ impl FrameRegistry {
 
         // 2. Direct Vec index — O(1) with no hash computation
         if let Some(partition_data) = self.registry_map[umem_id].as_mut() {
-            let idx = local_idx as usize;
+            let Some(idx) = partition_data.refcount_index(local_idx) else {
+                log::error!(
+                    "Worker {}: frame local_idx={} is outside UMEM {} partition",
+                    self.worker_id,
+                    local_idx,
+                    umem_id
+                );
+                return;
+            };
 
             unsafe {
-                // SAFETY: local_idx is guaranteed to be within UMEM frame bounds
-                // because it is mapped 1:1 during stash initialization.
+                // SAFETY: refcount_index verifies that idx is within this partition's
+                // compact refcounts vector.
                 let refcount = partition_data.refcounts.get_unchecked_mut(idx);
 
                 if *refcount == 0 {
@@ -306,11 +332,13 @@ impl FrameRegistry {
             dst[..to_take].copy_from_slice(&stash[start_idx..]);
 
             // Mark all allocated frames as actively owned (refcount = 1).
-            // decode_global_frame gives local_idx directly — no subtraction.
             for &frame_idx in &dst[..to_take] {
                 let (_umem_id, local_idx) = decode_global_frame(frame_idx);
+                let refcount_idx = local_idx - registry.refcount_start;
                 unsafe {
-                    *registry.refcounts.get_unchecked_mut(local_idx as usize) = 1;
+                    // SAFETY: every frame copied from this partition's free_stash is within
+                    // [refcount_start, refcount_start + refcounts.len()).
+                    *registry.refcounts.get_unchecked_mut(refcount_idx as usize) = 1;
                 }
             }
 
@@ -341,9 +369,9 @@ impl FrameRegistry {
                 let frame_idx = stash.pop().unwrap();
                 frames.push(frame_idx);
 
-                // Direct array access — no subtraction from partition.start_idx.
                 let (_umem_id, local_idx) = decode_global_frame(frame_idx);
-                registry.refcounts[local_idx as usize] = 1;
+                let refcount_idx = local_idx - registry.refcount_start;
+                registry.refcounts[refcount_idx as usize] = 1;
             }
 
             if frames.is_empty() {
@@ -515,5 +543,42 @@ impl FrameRegistry {
         }
 
         allocated
+    }
+
+    /// Pre-faults all frames in the registry to eliminate demand paging latency
+    pub fn warm_up_umem_partitions(&mut self) {
+        for partition_data in self.registry_map.iter().flatten() {
+            // Iterate over all pre-encoded frames in the free stash
+            // Use volatile writes to prevent the compiler from optimizing the loop away
+            for &encoded_frame in &partition_data.free_stash {
+                let (umem_id, local_idx) = decode_global_frame(encoded_frame);
+
+                let Some(umem_config) = self.umem_configs.get(umem_id).and_then(Option::as_ref)
+                else {
+                    debug!(
+                        "Worker {} cannot warm up UMEM {}: no runtime configuration",
+                        self.worker_id, umem_id
+                    );
+                    continue;
+                };
+
+                let Some(umem) = self.active_umems.get(umem_id).and_then(Option::as_ref) else {
+                    debug!(
+                        "Worker {} cannot warm up UMEM {}: no active mapping",
+                        self.worker_id, umem_id
+                    );
+                    continue;
+                };
+
+                // Calculate physical UMEM offset
+                let offset = ((local_idx as u64) << umem_config.frame_size_log2)
+                    + umem_config.head_room as u64;
+
+                unsafe {
+                    let frame_ptr = umem.as_ptr().cast_mut().add(offset as usize);
+                    core::ptr::write_volatile(frame_ptr, 0x00);
+                }
+            }
+        }
     }
 }

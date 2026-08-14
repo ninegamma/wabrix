@@ -48,6 +48,7 @@ impl Drop for RuntimeUmemConfig {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[repr(align(64))]
 pub struct UmemPartition {
     pub worker_id: usize,     // Worker thread that owns this partition
     pub umem_group_id: usize, // Memory domain (UMEM group)
@@ -74,6 +75,7 @@ impl UmemPartition {
 /// Bit 31 = command (0 = Release, 1 = Retain); bits 30-24 = umem_id; bits 23-0 = local_idx.
 /// See frame_registry::{CMD_BIT, is_retain, extract_global_idx} for helpers.
 #[derive(Clone)]
+#[repr(align(64))]
 pub struct SystemBus {
     /// One ArrayQueue<u32> per worker. Senders push packed u32 commands;
     /// the owning worker pops them in process_returns().

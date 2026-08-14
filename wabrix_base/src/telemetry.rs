@@ -1,10 +1,151 @@
+use crossbeam_utils::CachePadded;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::ffi::c_void;
+use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::broadcast::Sender;
 use ts_rs::TS;
+
+const SIOCETHTOOL: libc::c_ulong = 0x8946;
+const ETHTOOL_GDRVINFO: u32 = 0x0000_0003;
+const ETHTOOL_GSTRINGS: u32 = 0x0000_001b;
+const ETHTOOL_GSTATS: u32 = 0x0000_001d;
+const ETH_SS_STATS: u32 = 1;
+const ETH_GSTRING_LEN: usize = 32;
+const IFNAMSIZ: usize = 16;
+
+#[repr(C)]
+#[derive(Default)]
+struct EthtoolDrvInfo {
+    cmd: u32,
+    driver: [u8; 32],
+    version: [u8; 32],
+    fw_version: [u8; 32],
+    bus_info: [u8; 32],
+    erom_version: [u8; 32],
+    reserved2: [u8; 12],
+    n_priv_flags: u32,
+    n_stats: u32,
+    testinfo_len: u32,
+    eedump_len: u32,
+    regdump_len: u32,
+}
+
+#[repr(C)]
+struct IfReq {
+    ifr_name: [libc::c_char; IFNAMSIZ],
+    ifr_data: *mut c_void,
+}
+
+/// Issue an ethtool request directly through SIOCETHTOOL.
+/// This avoids spawning `ethtool`, which would fork and can cause avoidable
+/// scheduler/TLB activity on latency-sensitive data-plane cores.
+fn ethtool_ioctl(interface: &str, request: *mut c_void) -> bool {
+    if interface.len() >= IFNAMSIZ {
+        return false;
+    }
+
+    let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+    if fd < 0 {
+        return false;
+    }
+
+    let mut ifr = IfReq {
+        ifr_name: [0; IFNAMSIZ],
+        ifr_data: request,
+    };
+    for (dst, src) in ifr.ifr_name.iter_mut().zip(interface.bytes()) {
+        *dst = src as libc::c_char;
+    }
+
+    let result = unsafe { libc::ioctl(fd, SIOCETHTOOL, &mut ifr) } == 0;
+    unsafe {
+        libc::close(fd);
+    }
+    result
+}
+
+fn ethtool_driver(interface: &str) -> Option<String> {
+    let mut info = EthtoolDrvInfo {
+        cmd: ETHTOOL_GDRVINFO,
+        ..Default::default()
+    };
+    if !ethtool_ioctl(interface, &mut info as *mut _ as *mut c_void) {
+        return None;
+    }
+
+    let end = info
+        .driver
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(info.driver.len());
+    Some(String::from_utf8_lossy(&info.driver[..end]).into_owned())
+}
+
+fn ethtool_stats(interface: &str) -> Option<(String, HashMap<String, u64>)> {
+    let mut info = EthtoolDrvInfo {
+        cmd: ETHTOOL_GDRVINFO,
+        ..Default::default()
+    };
+    if !ethtool_ioctl(interface, &mut info as *mut _ as *mut c_void) || info.n_stats == 0 {
+        return None;
+    }
+
+    let n_stats = info.n_stats as usize;
+    let strings_size = size_of::<u32>() * 3 + n_stats * ETH_GSTRING_LEN;
+    let mut strings_words = vec![0u64; strings_size.div_ceil(size_of::<u64>())];
+    let strings = strings_words.as_mut_ptr() as *mut u8;
+    unsafe {
+        *(strings as *mut u32) = ETHTOOL_GSTRINGS;
+        *(strings.add(size_of::<u32>()) as *mut u32) = ETH_SS_STATS;
+        *(strings.add(size_of::<u32>() * 2) as *mut u32) = info.n_stats;
+    }
+    if !ethtool_ioctl(interface, strings as *mut c_void) {
+        return None;
+    }
+
+    let stats_size = size_of::<u32>() * 2 + n_stats * size_of::<u64>();
+    let mut stats_words = vec![0u64; stats_size.div_ceil(size_of::<u64>())];
+    let stats = stats_words.as_mut_ptr() as *mut u8;
+    unsafe {
+        *(stats as *mut u32) = ETHTOOL_GSTATS;
+        *(stats.add(size_of::<u32>()) as *mut u32) = info.n_stats;
+    }
+    if !ethtool_ioctl(interface, stats as *mut c_void) {
+        return None;
+    }
+
+    let strings_bytes = unsafe { std::slice::from_raw_parts(strings, strings_size) };
+    let stats_bytes = unsafe { std::slice::from_raw_parts(stats, stats_size) };
+    let mut values = HashMap::with_capacity(n_stats);
+    for index in 0..n_stats {
+        let name_start = size_of::<u32>() * 3 + index * ETH_GSTRING_LEN;
+        let name_bytes = &strings_bytes[name_start..name_start + ETH_GSTRING_LEN];
+        let name_end = name_bytes
+            .iter()
+            .position(|&byte| byte == 0)
+            .unwrap_or(name_bytes.len());
+        let name = String::from_utf8_lossy(&name_bytes[..name_end])
+            .trim()
+            .to_owned();
+        let value_start = size_of::<u32>() * 2 + index * size_of::<u64>();
+        let value = u64::from_ne_bytes(stats_bytes[value_start..value_start + 8].try_into().ok()?);
+        values.insert(name, value);
+    }
+
+    let driver_end = info
+        .driver
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(info.driver.len());
+    Some((
+        String::from_utf8_lossy(&info.driver[..driver_end]).into_owned(),
+        values,
+    ))
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 #[ts(export_to = "TMLiveStats.ts")]
@@ -20,11 +161,12 @@ pub struct TMLiveStats {
 
 /// Represents a single node's metrics
 #[derive(Clone)]
+#[repr(align(64))]
 pub struct TelemetryMetrics {
     pub node_id: String,
     pub labels: Vec<String>,
-    pub counters_pkts: Vec<Arc<AtomicU64>>,
-    pub counters_bytes: Vec<Arc<AtomicU64>>,
+    pub counters_pkts: Vec<Arc<CachePadded<AtomicU64>>>,
+    pub counters_bytes: Vec<Arc<CachePadded<AtomicU64>>>,
     /// When Some, overrides the `is_active_run` heuristic with an explicit flag.
     pub active_flag: Option<Arc<AtomicBool>>,
     pub force_sync_flag: Option<Arc<AtomicBool>>,
@@ -47,8 +189,8 @@ impl TelemetryRegistry {
         &mut self,
         node_id: String,
         labels: Vec<String>,
-        counters_pkts: Vec<Arc<AtomicU64>>,
-        counters_bytes: Vec<Arc<AtomicU64>>,
+        counters_pkts: Vec<Arc<CachePadded<AtomicU64>>>,
+        counters_bytes: Vec<Arc<CachePadded<AtomicU64>>>,
         active_flag: Option<Arc<AtomicBool>>,
         force_sync_flag: Option<Arc<AtomicBool>>,
     ) {
@@ -238,18 +380,7 @@ pub fn spawn_telemetry_ice_for_ifaces(
     shutdown_signal: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     for iface in ifaces {
-        let is_ice = std::process::Command::new("ethtool")
-            .args(["-i", iface])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| {
-                String::from_utf8(o.stdout)
-                    .ok()?
-                    .lines()
-                    .find_map(|l| l.strip_prefix("driver: ").map(|d| d.trim() == "ice"))
-            })
-            .unwrap_or(false);
+        let is_ice = ethtool_driver(iface).as_deref() == Some("ice");
 
         if is_ice {
             spawn_telemetry_ice(
@@ -301,47 +432,18 @@ pub fn spawn_telemetry_ice(
         let mut idle_ticks = 0;
 
         while !shutdown_signal.load(Ordering::Relaxed) {
-            if let Ok(output) = tokio::process::Command::new("ethtool")
-                .args(["-S", &iface_name])
-                .output()
-                .await
-            {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-
-                let mut curr_rx_uc = 0u64;
-                let mut curr_rx_mc = 0u64;
-                let mut curr_rx_bc = 0u64;
-                let mut curr_sw_drops = 0u64;
-                let mut curr_hw_drops = 0u64;
-                let mut curr_tx_uc = 0u64;
-                let mut curr_tx_mc = 0u64;
-                let mut curr_tx_bc = 0u64;
-
-                // ==========================================
-                // 1. THE ROBUST ETHTOOL PARSER
-                // ==========================================
-                for line in stdout.lines() {
-                    // split_whitespace automatically handles the leading tabs/spaces in ethtool
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-
-                    // We expect lines like: "rx_unicast: 123456"
-                    if parts.len() == 2 {
-                        let key = parts[0];
-                        if let Ok(val) = parts[1].parse::<u64>() {
-                            match key {
-                                "rx_unicast:" => curr_rx_uc = val,
-                                "rx_multicast:" => curr_rx_mc = val,
-                                "rx_broadcast:" => curr_rx_bc = val,
-                                "rx_dropped:" => curr_sw_drops = val,
-                                "rx_dropped.nic:" => curr_hw_drops = val,
-                                "tx_unicast:" => curr_tx_uc = val,
-                                "tx_multicast:" => curr_tx_mc = val,
-                                "tx_broadcast:" => curr_tx_bc = val,
-                                _ => {} // Ignore the other 50+ stats we don't care about
-                            }
-                        }
-                    }
-                }
+            // Read the NIC counters through SIOCETHTOOL. This keeps telemetry
+            // completely in-process and avoids fork/exec on the data-plane host.
+            if let Some((_driver, stats)) = ethtool_stats(&iface_name) {
+                let stat = |name: &str| stats.get(name).copied().unwrap_or(0);
+                let curr_rx_uc = stat("rx_unicast");
+                let curr_rx_mc = stat("rx_multicast");
+                let curr_rx_bc = stat("rx_broadcast");
+                let curr_sw_drops = stat("rx_dropped");
+                let curr_hw_drops = stat("rx_dropped.nic");
+                let curr_tx_uc = stat("tx_unicast");
+                let curr_tx_mc = stat("tx_multicast");
+                let curr_tx_bc = stat("tx_broadcast");
 
                 // Sample real-time data-plane activity from the pipeline
                 // telemetry registry. `active_flag` (e.g. the generator's

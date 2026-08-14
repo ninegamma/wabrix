@@ -1,12 +1,12 @@
 // src/system_builder.rs
 
 use core_affinity::CoreId;
+use crossbeam_channel::{Receiver, Sender};
 use crossbeam_queue::ArrayQueue;
 use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
-use crossbeam_channel::{Receiver, Sender};
 use wabrix_base::frame_registry::RETURN_QUEUE_CAPACITY;
 use xsk_rs::config::{FrameSize, QueueSize};
 use xsk_rs::Umem;
@@ -292,6 +292,7 @@ impl SystemBuilder {
                     frame_registry.active_umems[group_id] = Some(umem.clone());
                 }
             }
+            frame_registry.warm_up_umem_partitions();
         }
 
         // --- 6. CREATE SOCKETS ---
@@ -485,8 +486,7 @@ impl SystemBuilder {
                         .collect();
 
                 // --- Create a dedicated receiver for this Runner ---
-                let (runner_control_tx, runner_control_rx) =
-                    crossbeam_channel::bounded(100);
+                let (runner_control_tx, runner_control_rx) = crossbeam_channel::bounded(100);
                 control_senders.push(runner_control_tx);
 
                 // Build the node DAG for this pipeline instance

@@ -1,8 +1,8 @@
 [wabrix]
 ifaces= [
-    { name = "enp2s0f0np0", rxd = 8160, txd = 8160, irq_core = 6 },
+    { name = "enp2s0f0np0", rxd = 8160, txd = 8160, irq_core = 2 },
     { name = "veth_wabrix", rxd = 1024, txd = 1024, type = "veth", namespace = "ns-wabrix", peer = "tap-veth-0", mac_if = "enp2s0f0np0", ipnet = "10.10.10.222/24", checksum_offload = false },
-    { name = "enp2s0f1np1", rxd = 8160, txd = 8160, irq_core = 8 },
+    { name = "enp2s0f1np1", rxd = 8160, txd = 8160, irq_core = 4 },
     { name = "veth_wabrix_1", rxd = 1024, txd = 1024, type = "veth", namespace = "ns-wabrix-1", peer = "tap-veth-1", mac_if = "enp2s0f1np1", ipnet = "10.10.10.31/24", checksum_offload = false },
 ]
 umem= [
@@ -17,8 +17,8 @@ xsk= [
     { iface = "veth_wabrix_1", queues = [0], umem = 2, rxq_size = 4096, txq_size = 4096, zerocopy = false, xdp_mode = "auto" },
 ]
 workers= [
-    { id = 0, core = 7, partitions = [{ umem = 0, count = 1 }, { umem = 2, count = 1 }] },
-    { id = 1, core = 9, partitions = [{ umem = 1, count = 1 }, { umem = 2, count = 1 }] },
+    { id = 0, core = 6, partitions = [{ umem = 0, count = 1 }, { umem = 2, count = 1 }] },
+    { id = 1, core = 8, partitions = [{ umem = 1, count = 1 }, { umem = 2, count = 1 }] },
 ]
 
 # ===================================================================
@@ -74,7 +74,7 @@ src_ip = "10.10.10.222"
 [pipelines.nodes.hot_wasm_data]
 syn_limit = "10M"
 close_timeout = "100"
-syn_rate = "1800k"
+syn_rate = "1600k"
 
 [[pipelines.nodes]]
 id = "nd_parser_veth"
