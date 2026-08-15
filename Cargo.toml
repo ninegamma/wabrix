@@ -20,9 +20,7 @@ wabrix_base = { path = "wabrix_base" }
 wabrix_wasm = { path = "wabrix_wasm" }
 libbpf-rs = "^0.26.2"
 libbpf-sys = { version = "1.7", default-features = false }
-#xsk-rs = { git = "https://github.com/rstade/xsk-rs.git", branch = "rstade" }
-#xsk-rs = { git = "https://github.com/DouglasGray/xsk-rs.git", branch = "fix-dangling-pointers" }
-xsk-rs = { path = "../xsk-rs" }
+xsk-rs = { version = "0.8" }
 # Add these for the Wasm side of the house:
 wit-bindgen = "0.60.0"
 wasmtime = { version = "43.0", features = ["component-model"] }
@@ -46,3 +44,8 @@ spin = "0.10"
 env_logger = { version = "0.11", default-features = false }
 libc = "0.2"
 libbpf-cargo = "0.27.0"
+
+
+[patch.crates-io]
+xsk-rs = { git = "https://github.com/rstade/xsk-rs.git", branch = "rstade" }
+#xsk-rs = { path= "../xsk-rs" }
