@@ -21,6 +21,7 @@ wabrix_wasm = { path = "wabrix_wasm" }
 libbpf-rs = "^0.26.2"
 libbpf-sys = { version = "1.7", default-features = false }
 xsk-rs = { version = "0.8" }
+#xsk-rs = { git = "https://github.com/rstade/xsk-rs.git", branch = "rstade" }
 # Add these for the Wasm side of the house:
 wit-bindgen = "0.60.0"
 wasmtime = { version = "43.0", features = ["component-model"] }
@@ -48,4 +49,5 @@ libbpf-cargo = "0.27.0"
 
 [patch.crates-io]
 xsk-rs = { git = "https://github.com/rstade/xsk-rs.git", branch = "rstade" }
+libxdp-sys = { git = "https://github.com/ninegamma/libxdp-sys.git", branch = "ninegamma" }
 #xsk-rs = { path= "../xsk-rs" }
