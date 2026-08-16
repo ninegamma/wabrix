@@ -3,7 +3,10 @@ use core::mem::size_of;
 use std::collections::HashMap;
 use std::mem::MaybeUninit;
 use std::sync::atomic::Ordering;
-use wabrix_api::{BatchMetadata, MAX_BATCH_SIZE};
+use wabrix_api::helpers::parse_suffixed_number;
+use wabrix_api::{
+    BatchMetadata, MAX_BATCH_SIZE, TIMER_KIND_NONE, TIMER_KIND_SYN, TIMER_KIND_TIMEOUT,
+};
 use wasmtime::component::{bindgen, ResourceTable};
 use wasmtime::Store;
 use wasmtime_wasi::WasiCtxBuilder;
@@ -59,6 +62,22 @@ pub struct WasmEngine {
     /// Set permanently true after WASM returns a malformed response.
     /// All further WASM calls are skipped to prevent SIGSEGV from bad UMEM writes.
     poisoned: bool,
+    /// Timer-path diagnostics. These are cumulative and emitted periodically.
+    timer_requested_frames: u64,
+    timer_allocated_frames: u64,
+    timer_routed_frames: u64,
+    timer_retained_frames: u64,
+    timer_allocation_shortfalls: u64,
+    timer_batch_mismatches: u64,
+    mailbox_conservation_failures: u64,
+    timer_route_counts: Vec<u64>,
+    /// Route carrying timer-generated TCP transmissions (shared_tx_sink in tcp2.toml).
+    timer_syn_route_index: usize,
+    tsc_frequency: u64,
+    last_timer_diagnostics_tsc: Option<u64>,
+    last_timer_diagnostics_syn_count: u64,
+    timer_diagnostics_enabled: bool,
+    timer_diagnostics_active: bool,
 }
 
 impl WasmEngine {
@@ -75,6 +94,11 @@ impl WasmEngine {
         platform_data: &PlatformData,
         mailbox_offset: u32,
     ) -> Result<Self, String> {
+        let timer_diagnostics_enabled = wasm_data
+            .get("syn_rate")
+            .and_then(|rate| parse_suffixed_number(rate).ok())
+            .is_some_and(|rate| rate > 0);
+
         // 1. Fetch the Component from the Manager's DashMap cache
         // This takes nanoseconds if already loaded, avoiding disk I/O.
         let component = manager
@@ -149,6 +173,12 @@ impl WasmEngine {
             }
         }
 
+        let route_count = routing_table.len();
+        let timer_syn_route_index = routing_table
+            .iter()
+            .position(|route| route.id == "shared_tx_sink")
+            .unwrap_or(0);
+
         Ok(Self {
             id,
             store,
@@ -164,6 +194,20 @@ impl WasmEngine {
             umem_id,
             supports_oob_telemetry: false,
             poisoned: false,
+            timer_requested_frames: 0,
+            timer_allocated_frames: 0,
+            timer_routed_frames: 0,
+            timer_retained_frames: 0,
+            timer_allocation_shortfalls: 0,
+            timer_batch_mismatches: 0,
+            mailbox_conservation_failures: 0,
+            timer_route_counts: vec![0; route_count],
+            timer_syn_route_index,
+            tsc_frequency: platform_data.tsc_frequency,
+            last_timer_diagnostics_tsc: None,
+            last_timer_diagnostics_syn_count: 0,
+            timer_diagnostics_enabled,
+            timer_diagnostics_active: false,
         })
     }
 
@@ -222,6 +266,18 @@ impl WasmEngine {
             });
 
         if status == u32::MAX {
+            batch.clear();
+            self.poisoned = true;
+            return Directive::Stop;
+        }
+
+        if status != len as u32 {
+            log::error!(
+                "NODE {}: WASM process_batch processed {} frames, expected {}; rejecting batch",
+                self.id,
+                status,
+                len
+            );
             batch.clear();
             self.poisoned = true;
             return Directive::Stop;
@@ -318,6 +374,36 @@ impl WasmEngine {
             }
         });
 
+        // A mailbox entry must have exactly one owner after routing: either it
+        // was moved to one output batch, or it remains in `batch` because the
+        // route was invalid / the destination batch was full.  This is the
+        // conservation check that catches mailbox/action-length mismatches
+        // without confusing an intentionally retained packet with a loss.
+        let routed_frames: usize = outputs.iter().map(Batch::len).sum();
+        let retained_frames = batch.len();
+        if routed_frames.saturating_add(retained_frames) != len || pdu_index != len {
+            self.mailbox_conservation_failures =
+                self.mailbox_conservation_failures.saturating_add(1);
+            log::error!(
+                "NODE {}: mailbox conservation failure: input={}, actions_read={}, routed={}, retained={}; rejecting batch",
+                self.id,
+                len,
+                pdu_index,
+                routed_frames,
+                retained_frames
+            );
+            batch.clear();
+            return Directive::Stop;
+        }
+
+        if self.timer_diagnostics_active {
+            self.timer_routed_frames += routed_frames as u64;
+            self.timer_retained_frames += retained_frames as u64;
+            for (route_idx, output_batch) in outputs.iter().enumerate() {
+                self.timer_route_counts[route_idx] += output_batch.len() as u64;
+            }
+        }
+
         // ==========================================
         // 5. DISPATCH DIRECTIVES
         // ==========================================
@@ -359,6 +445,13 @@ impl Node for WasmEngine {
             self.id
         );
 
+        // Normal ingress must never inherit a timer classification from a
+        // recycled UMEM frame. Timer batches are explicitly marked in
+        // `poll_timers` below.
+        for pdu in batch.iter_mut() {
+            pdu.w.set_timer_kind(TIMER_KIND_NONE);
+        }
+
         self.processed_packets += batch.len() as u64;
 
         // Hand off to the shared logic
@@ -389,14 +482,21 @@ impl Node for WasmEngine {
 
         // Evaluate the core logic into a single variable using a block expression
         let directive = {
-            let n_requested_frames = self
+            let timer_plan = match self
                 .bindings
                 .wabrix_plugins_packet_engine()
                 .call_process_timers(&mut self.store, current_tsc)
-                .unwrap_or_else(|err| {
+            {
+                Ok(plan) => plan,
+                Err(err) => {
                     log::error!("NODE {}: Error processing poll_timers: {}", self.id, err);
-                    0
-                });
+                    return Directive::Stop;
+                }
+            };
+
+            let timeout_frames_requested = timer_plan.timeout_frames;
+            let syn_frames_requested = timer_plan.syn_frames;
+            let n_requested_frames = timeout_frames_requested.saturating_add(syn_frames_requested);
 
             if n_requested_frames == 0 {
                 // Service force_sync_flag even when idle so final WASM state is
@@ -433,10 +533,25 @@ impl Node for WasmEngine {
                 let registry = unsafe { &mut *get_worker_frame_registry() };
                 let mut scratch: [MaybeUninit<Pdu>; MAX_BATCH_SIZE] =
                     core::array::from_fn(|_| MaybeUninit::uninit());
-                let frames_to_allocate = std::cmp::min(n_requested_frames as usize, MAX_BATCH_SIZE);
+                if n_requested_frames > MAX_BATCH_SIZE as u32 {
+                    self.timer_batch_mismatches = self.timer_batch_mismatches.saturating_add(1);
+                    log::error!(
+                        "NODE {}: timer requested {} frames, exceeding MAX_BATCH_SIZE {}; rejecting request",
+                        self.id,
+                        n_requested_frames,
+                        MAX_BATCH_SIZE
+                    );
+                    return Directive::Stop;
+                }
+                let frames_to_allocate = n_requested_frames as usize;
+                self.timer_requested_frames += n_requested_frames as u64;
 
                 let allocated = registry
                     .allocate_pdus_into(self.umem_id as usize, &mut scratch[..frames_to_allocate]);
+                self.timer_allocated_frames += allocated as u64;
+                if allocated < frames_to_allocate {
+                    self.timer_allocation_shortfalls += 1;
+                }
 
                 if allocated == 0 {
                     log::warn!("NODE {}: Timer starved of UMEM frames!", self.id);
@@ -444,7 +559,14 @@ impl Node for WasmEngine {
                 } else {
                     // 2. Load and initialize the freshly allocated PDUs into the Batch
                     batch.clear();
-                    for slot in scratch[..allocated].iter() {
+                    // SYN frames are placed first so an UMEM shortfall cannot
+                    // consume the SYN reservation with timeout work.
+                    let allocated_syn_frames = allocated.min(syn_frames_requested as usize);
+                    let allocated_timeout_frames = allocated
+                        .saturating_sub(allocated_syn_frames)
+                        .min(timeout_frames_requested as usize);
+
+                    for (index, slot) in scratch[..allocated].iter().enumerate() {
                         let mut pdu = unsafe { slot.assume_init_read() };
                         let umem_addr = pdu.umem_addr();
                         let data_ptr = pdu.data_ptr(umem_addr);
@@ -456,16 +578,109 @@ impl Node for WasmEngine {
                         }
 
                         pdu.w.set_data_length(64);
-                        let _ = batch.push(pdu);
+                        let timer_kind = if index < allocated_syn_frames {
+                            TIMER_KIND_SYN
+                        } else if index < allocated_syn_frames + allocated_timeout_frames {
+                            TIMER_KIND_TIMEOUT
+                        } else {
+                            TIMER_KIND_NONE
+                        };
+                        pdu.w.set_timer_kind(timer_kind);
+                        if batch.push(pdu).is_err() {
+                            self.timer_batch_mismatches =
+                                self.timer_batch_mismatches.saturating_add(1);
+                            log::error!(
+                                "NODE {}: timer batch overflow while inserting {} allocated frames",
+                                self.id,
+                                allocated
+                            );
+                            batch.clear();
+                            return Directive::Stop;
+                        }
+                    }
+
+                    if batch.len() != allocated {
+                        self.timer_batch_mismatches = self.timer_batch_mismatches.saturating_add(1);
+                        log::error!(
+                            "NODE {}: timer batch length mismatch: allocated={}, batch_len={}",
+                            self.id,
+                            allocated,
+                            batch.len()
+                        );
+                        batch.clear();
+                        return Directive::Stop;
                     }
 
                     self.processed_packets += allocated as u64;
 
                     // 3. Hand off to WASM execution (evaluates to Directive)
-                    self.execute_wasm_and_route(batch)
+                    self.timer_diagnostics_active = true;
+                    let directive = self.execute_wasm_and_route(batch);
+                    self.timer_diagnostics_active = false;
+                    directive
                 }
             }
         }; // <-- The block ends here, yielding the final Directive
+
+        let should_log_timer_diagnostics = self.timer_diagnostics_enabled
+            && (self.last_timer_diagnostics_tsc.is_none()
+                || current_tsc
+                    .saturating_sub(self.last_timer_diagnostics_tsc.unwrap_or(current_tsc))
+                    >= 30 * self.tsc_frequency);
+
+        if should_log_timer_diagnostics {
+            // Report elapsed time from the worker's run start, rather than
+            // wall-clock epoch. Three decimal places after milliseconds
+            // provide microsecond resolution: 1234.567 ms.
+            let run_start_tsc = wabrix_base::frame_registry::get_tsc_start();
+            let elapsed_tsc_from_start = current_tsc.saturating_sub(run_start_tsc);
+            let elapsed_micros = if self.tsc_frequency > 0 {
+                (elapsed_tsc_from_start as u128 * 1_000_000) / self.tsc_frequency as u128
+            } else {
+                0
+            };
+            let timestamp_ms = elapsed_micros / 1_000;
+            let timestamp_ms_fraction = elapsed_micros % 1_000;
+
+            let routed_syns = self
+                .timer_route_counts
+                .get(self.timer_syn_route_index)
+                .copied()
+                .unwrap_or(0);
+            let (syn_rate_per_second, elapsed_tsc) =
+                if let Some(previous_tsc) = self.last_timer_diagnostics_tsc {
+                    let elapsed_tsc = current_tsc.saturating_sub(previous_tsc);
+                    let elapsed_syns =
+                        routed_syns.saturating_sub(self.last_timer_diagnostics_syn_count);
+                    if elapsed_tsc > 0 && self.tsc_frequency > 0 {
+                        (
+                            elapsed_syns as f64 * self.tsc_frequency as f64 / elapsed_tsc as f64,
+                            elapsed_tsc,
+                        )
+                    } else {
+                        (0.0, elapsed_tsc)
+                    }
+                } else {
+                    (0.0, 0)
+                };
+            let elapsed_ms = if self.tsc_frequency > 0 {
+                elapsed_tsc as f64 * 1_000.0 / self.tsc_frequency as f64
+            } else {
+                0.0
+            };
+            self.last_timer_diagnostics_tsc = Some(current_tsc);
+            self.last_timer_diagnostics_syn_count = routed_syns;
+
+            log::debug!(
+                "NODE {}: timer diagnostics: timestamp_ms={}.{:03}, routed_syns={}, routed_syn_rate_per_sec={:.3}, elapsed_ms={:.3}",
+                self.id,
+                timestamp_ms,
+                timestamp_ms_fraction,
+                routed_syns,
+                syn_rate_per_second,
+                elapsed_ms,
+            );
+        }
 
         // Exactly one exit point for profiling
         #[cfg(feature = "profiling")]

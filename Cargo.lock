@@ -2717,7 +2717,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
@@ -4013,8 +4013,8 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "xsk-rs"
-version = "0.8.0"
-source = "git+https://github.com/rstade/xsk-rs.git?branch=rstade#4ae11484a1110af9f59f352382253677a18aca74"
+version = "0.9.0"
+source = "git+https://github.com/ninegamma/xsk-rs.git?branch=master#0589c965d5f9999afaaca9458f1187819cfec81a"
 dependencies = [
  "bitflags 2.13.1",
  "cfg-if",

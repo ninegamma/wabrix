@@ -958,6 +958,7 @@ pub struct PipelineRunner {
     packets_processed: u64,
     runs_with_work: u64,
     runs_idle: u64,
+    timer_only_runs: u64,
     full_batch_count: usize,
     /// Cache the indices of nodes that need timers
     timer_indices: Vec<usize>,
@@ -1028,6 +1029,7 @@ impl PipelineRunner {
             packets_processed: 0,
             runs_with_work: 0,
             runs_idle: 0,
+            timer_only_runs: 0,
             full_batch_count,
             last_timer_poll: 0,
             timer_indices,
@@ -1115,10 +1117,10 @@ impl PipelineRunner {
     /// 3. Follow directive to next node(s)
     /// 4. Continue until Stop directive or error
     ///
-    /// Returns (packets_processed, status_code)
+    /// Returns (packets_processed, status_code, timer_work_done)
     /// - packets_processed: number of packets handled in this run
     /// - status_code: 0 for success, negative for errors, positive for specific statuses
-    pub fn run_iteration(&mut self) -> (u32, i32) {
+    pub fn run_iteration(&mut self) -> (u32, i32, bool) {
         let mut total_packets_this_iteration = 0;
         let mut timer_work_done = false;
 
@@ -1127,7 +1129,7 @@ impl PipelineRunner {
         match hot.lifecycle_state.as_ref() {
             Some(PipelineLifecycle::Paused) => {
                 // Pipeline intentionally disabled.
-                return (0, 0);
+                return (0, 0, false);
             }
 
             _ => {
@@ -1211,10 +1213,13 @@ impl PipelineRunner {
         if total_packets_this_iteration > 0 || timer_work_done {
             self.packets_processed += total_packets_this_iteration as u64;
             self.runs_with_work += 1;
-            (total_packets_this_iteration, 0)
+            if timer_work_done && total_packets_this_iteration == 0 {
+                self.timer_only_runs += 1;
+            }
+            (total_packets_this_iteration, 0, timer_work_done)
         } else {
             self.runs_idle += 1;
-            (0, 1)
+            (0, 1, false)
         }
     }
 
@@ -1314,6 +1319,7 @@ impl PipelineRunner {
             packets_processed: self.packets_processed,
             runs_with_work: self.runs_with_work,
             runs_idle: self.runs_idle,
+            timer_only_runs: self.timer_only_runs,
             node_stats,
         }
     }
@@ -1357,6 +1363,7 @@ pub struct PipelineStats {
     pub packets_processed: u64,
     pub runs_with_work: u64,
     pub runs_idle: u64,
+    pub timer_only_runs: u64,
     pub node_stats: Vec<NodeStats>,
 }
 
@@ -1367,10 +1374,11 @@ impl PipelineStats {
             worker_idx, self.pipeline_name
         );
         info!(
-            "  {} packets, {} runs ({} idle)",
+            "  {} packets, {} runs ({} idle, {} timer-only)",
             self.packets_processed.separated_string(),
             self.runs_with_work.separated_string(),
-            self.runs_idle.separated_string()
+            self.runs_idle.separated_string(),
+            self.timer_only_runs.separated_string()
         );
 
         for node_stat in &self.node_stats {
@@ -1615,9 +1623,10 @@ pub fn spawn_worker_pipelines(
                 }
 
                 // Run the iteration and see how much work it did
-                let mut packets_processed = runners[i].run_iteration().0 as usize;
+                let (packets_processed, _, timer_work_done) = runners[i].run_iteration();
+                let mut packets_processed = packets_processed as usize;
 
-                if packets_processed > 0 {
+                if packets_processed > 0 || timer_work_done {
                     _work_done_this_tick = true; // Mark that the core did actual work
                                                  // TRAFFIC DETECTED! Reset all penalties.
                     idle_streaks[i] = 0;
@@ -1634,7 +1643,8 @@ pub fn spawn_worker_pipelines(
                     {
                         // CRITICAL: Empty the return channel so we don't deadlock!
                         frame_registry.process_returns();
-                        packets_processed = runners[i].run_iteration().0 as usize;
+                        let (next_packets, _, _) = runners[i].run_iteration();
+                        packets_processed = next_packets as usize;
                         bursts += 1;
                     }
                 } else {
