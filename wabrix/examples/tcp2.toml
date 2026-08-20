@@ -74,7 +74,7 @@ src_ip = "10.10.10.222"
 [pipelines.nodes.hot_wasm_data]
 syn_limit = "500M"
 close_timeout = "100"
-syn_rate = "1200k"
+syn_rate = "1100k"
 
 [[pipelines.nodes]]
 id = "nd_parser_veth"
@@ -153,6 +153,9 @@ hot_args= {}
 src_ip = "10.10.10.31"
 src_mac = "44:49:88:06:63:39"
 dst_mac = "44:49:88:06:63:38"
+
+[pipelines.nodes.hot_wasm_data]
+close_timeout = "200"
 
 [[pipelines.nodes]]
 id = "nd_parser_veth"

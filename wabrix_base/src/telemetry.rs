@@ -389,6 +389,11 @@ pub fn spawn_telemetry_ice_for_ifaces(
                 registry.clone(),
                 shutdown_signal.clone(),
             )?;
+        } else {
+            log::debug!(
+                "Skipping ICE telemetry for interface {} (driver is not ice)",
+                iface
+            );
         }
     }
     Ok(())
@@ -401,6 +406,8 @@ pub fn spawn_telemetry_ice(
     shutdown_signal: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     tokio::spawn(async move {
+        log::trace!("Starting ICE telemetry for interface {}", iface_name);
+
         // Real-time data-plane activity baseline (summed pipeline pkt counters).
         // The LIVE/IDLE state is driven from userspace pipeline activity rather
         // than `ethtool -S` deltas: on the `ice` driver those counters only
@@ -583,12 +590,19 @@ pub fn spawn_telemetry_ice(
                         rates_bytes: vec![],
                         is_active_run: in_run,
                     };
+                    log::trace!(
+                        "ICE telemetry {}: sw_drops={}, hw_drops={}, active={}",
+                        iface_name,
+                        run_sw_drops,
+                        run_hw_drops,
+                        in_run
+                    );
                     // Ignore errors (this just means no browsers are currently connected to the WebSocket)
                     let _ = telemetry_tx.send(stats);
                 }
             }
 
-            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
         }
     });
     Ok(())

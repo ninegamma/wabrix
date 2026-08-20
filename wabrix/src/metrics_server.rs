@@ -46,11 +46,6 @@ pub fn spawn_metrics_server(mut tm_rx: Receiver<TMLiveStats>) {
         // Background task to map Wabrix telemetry to Prometheus metrics
         tokio::spawn(async move {
             while let Ok(stats) = tm_rx.recv().await {
-                // Skip updating gauges if the pipeline isn't actively running
-                if !stats.is_active_run {
-                    continue;
-                }
-
                 let tmstats_name = &stats.tmstats_name;
 
                 // Iterate over the labels and safely update the corresponding data vectors

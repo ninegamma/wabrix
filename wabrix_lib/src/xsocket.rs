@@ -427,7 +427,6 @@ impl XSocketRx {
             );
         }
 
-        // Idiomatic way to clamp an upper bound in Rust
         let requested_count = requested_count.min(MAX_FILL);
 
         // Access Thread-Local Registry
@@ -454,8 +453,7 @@ impl XSocketRx {
 
         // Check Capacity
         // nb_free() tells us how many slots are open in the ring
-        let nb_free = fq.nb_free(available as u32);
-        // nb_free() is currently NOT clamping to the requested amount(error), so we need to clamp it ourselves.
+        let nb_free = fq.nb_free_exact();
         let batch_size = std::cmp::min(nb_free, available as u32);
 
         if batch_size > 0 {
@@ -909,7 +907,7 @@ impl BatchTx for XSocketTx {
             return Ok(0);
         }
         let mut tx_guard = self.tx_queue.lock();
-        let free_slots = tx_guard.nb_free(original_batch_len as u32) as usize;
+        let free_slots = tx_guard.nb_free_exact() as usize;
 
         if free_slots == 0 {
             // The ring is completely jammed. Force a kernel wakeup to try and clear it.
@@ -938,17 +936,6 @@ impl BatchTx for XSocketTx {
             );
         }
 
-        // ==========================================================
-        //  THE BURST THRESHOLD (Fixes the 21,000-cycle Syscall Storm)
-        // ==========================================================
-        // If the queue has very little room, do not send 1 packet at a time!
-        // The overhead of the system call outweighs the benefit.
-        // Return instantly, and the Sink node will `bulk_drop` the batch.
-        // we removed this, as this can result in a stalled tx queue at low traffic,
-        // as the kernel may sleep forever, and the TX queue will never be drained.
-        //if free_slots < 16 {
-        //    return Ok(0);
-        //}
 
         let count_to_send = std::cmp::min(original_batch_len, free_slots);
         let mut valid_to_send = 0;

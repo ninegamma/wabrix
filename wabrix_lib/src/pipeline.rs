@@ -16,6 +16,7 @@ use crossbeam_channel::Receiver;
 use separator::Separatable;
 use wabrix_api::helpers::parse_suffixed_number;
 use wabrix_api::MAX_BATCH_SIZE;
+use wabrix_base::common::formatting::PreciseSeparator;
 use wabrix_base::frame_registry::{set_tsc_frequency, set_worker_frame_registry};
 use wabrix_base::node_instance_id::NodeInstanceId;
 use wabrix_base::system::PlatformData;
@@ -959,6 +960,8 @@ pub struct PipelineRunner {
     runs_with_work: u64,
     runs_idle: u64,
     timer_only_runs: u64,
+    load_cycles: u64,
+    idle_cycles: u64,
     full_batch_count: usize,
     /// Cache the indices of nodes that need timers
     timer_indices: Vec<usize>,
@@ -1030,6 +1033,8 @@ impl PipelineRunner {
             runs_with_work: 0,
             runs_idle: 0,
             timer_only_runs: 0,
+            load_cycles: 0,
+            idle_cycles: 0,
             full_batch_count,
             last_timer_poll: 0,
             timer_indices,
@@ -1121,6 +1126,7 @@ impl PipelineRunner {
     /// - packets_processed: number of packets handled in this run
     /// - status_code: 0 for success, negative for errors, positive for specific statuses
     pub fn run_iteration(&mut self) -> (u32, i32, bool) {
+        let iteration_start = unsafe { std::arch::x86_64::_rdtsc() };
         let mut total_packets_this_iteration = 0;
         let mut timer_work_done = false;
 
@@ -1129,6 +1135,7 @@ impl PipelineRunner {
         match hot.lifecycle_state.as_ref() {
             Some(PipelineLifecycle::Paused) => {
                 // Pipeline intentionally disabled.
+                self.idle_cycles += unsafe { std::arch::x86_64::_rdtsc() } - iteration_start;
                 return (0, 0, false);
             }
 
@@ -1210,15 +1217,19 @@ impl PipelineRunner {
         // =========================================================
         //    STATISTICS & ADAPTIVE POLLING
         // =========================================================
+        let iteration_cycles =
+            unsafe { std::arch::x86_64::_rdtsc() }.saturating_sub(iteration_start);
         if total_packets_this_iteration > 0 || timer_work_done {
             self.packets_processed += total_packets_this_iteration as u64;
             self.runs_with_work += 1;
+            self.load_cycles = self.load_cycles.saturating_add(iteration_cycles);
             if timer_work_done && total_packets_this_iteration == 0 {
                 self.timer_only_runs += 1;
             }
             (total_packets_this_iteration, 0, timer_work_done)
         } else {
             self.runs_idle += 1;
+            self.idle_cycles = self.idle_cycles.saturating_add(iteration_cycles);
             (0, 1, false)
         }
     }
@@ -1316,10 +1327,13 @@ impl PipelineRunner {
 
         PipelineStats {
             pipeline_name: self.name.clone(),
+            tsc_frequency: self.tsc_freq,
             packets_processed: self.packets_processed,
             runs_with_work: self.runs_with_work,
             runs_idle: self.runs_idle,
             timer_only_runs: self.timer_only_runs,
+            load_cycles: self.load_cycles,
+            idle_cycles: self.idle_cycles,
             node_stats,
         }
     }
@@ -1360,10 +1374,13 @@ impl PipelineRunner {
 #[derive(Debug, Clone)]
 pub struct PipelineStats {
     pub pipeline_name: String,
+    pub tsc_frequency: u64,
     pub packets_processed: u64,
     pub runs_with_work: u64,
     pub runs_idle: u64,
     pub timer_only_runs: u64,
+    pub load_cycles: u64,
+    pub idle_cycles: u64,
     pub node_stats: Vec<NodeStats>,
 }
 
@@ -1380,9 +1397,14 @@ impl PipelineStats {
             self.runs_idle.separated_string(),
             self.timer_only_runs.separated_string()
         );
+        info!(
+            "  {} CPU seconds load, {} CPU seconds idle",
+            cpu_seconds(self.load_cycles, self.tsc_frequency),
+            cpu_seconds(self.idle_cycles, self.tsc_frequency)
+        );
 
         for node_stat in &self.node_stats {
-            node_stat.print_stats();
+            node_stat.print_stats(self.tsc_frequency);
         }
     }
 }
@@ -1408,17 +1430,20 @@ pub struct NodeStats {
 }
 
 impl NodeStats {
-    pub fn print_stats(&self) {
+    pub fn print_stats(&self, tsc_frequency: u64) {
+        #[cfg(not(feature = "profiling"))]
+        let _ = tsc_frequency;
+
         #[cfg(feature = "profiling")]
         {
             if let Some(cycles_per_packet) =
                 self.profiling_cycles.checked_div(self.packets_processed)
             {
                 info!(
-                    "    Node {:20}: {} cycles/packet ({} total cycles, {} packets)",
+                    "    Node {:20}: {} cycles/packet ({} total CPU seconds, {} packets)",
                     self.node_id,
                     cycles_per_packet.separated_string(),
-                    self.profiling_cycles.separated_string(),
+                    cpu_seconds(self.profiling_cycles, tsc_frequency),
                     self.packets_processed.separated_string()
                 );
             } else {
@@ -1429,14 +1454,14 @@ impl NodeStats {
             if let (Some(loaded), Some(empty)) = (self.rx_loaded_cycles, self.rx_empty_cycles) {
                 if let Some(loaded_per_packet) = loaded.checked_div(self.packets_processed) {
                     info!(
-                        "      RX loaded runs: {} cycles/packet ({} total cycles)",
+                        "      RX loaded runs: {} cycles/packet ({} total CPU seconds)",
                         loaded_per_packet.separated_string(),
-                        loaded.separated_string()
+                        cpu_seconds(loaded, tsc_frequency)
                     );
                 }
                 info!(
-                    "      RX empty runs: {} total cycles",
-                    empty.separated_string()
+                    "      RX empty runs: {} total CPU seconds",
+                    cpu_seconds(empty, tsc_frequency)
                 );
             }
 
@@ -1446,9 +1471,9 @@ impl NodeStats {
                     (self.rx_replenish_total_cycles, self.rx_replenish_calls)
                 {
                     info!(
-                        "      RX replenish_fill_queue: {} avg cycles/call ({} total cycles, {} calls)",
+                        "      RX replenish_fill_queue: {} avg cycles/call ({} total CPU seconds, {} calls)",
                         replenish_avg.separated_string(),
-                        total.separated_string(),
+                        cpu_seconds(total, tsc_frequency),
                         calls.separated_string()
                     );
                 }
@@ -1463,6 +1488,14 @@ impl NodeStats {
             );
         }
     }
+}
+
+fn cpu_seconds(cycles: u64, tsc_frequency: u64) -> String {
+    if tsc_frequency == 0 {
+        return "0.000".to_string();
+    }
+
+    (cycles as f64 / tsc_frequency as f64).separate_with_precision(3)
 }
 
 /// Spawn multiple pipeline runners for a worker
