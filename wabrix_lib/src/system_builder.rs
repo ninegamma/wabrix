@@ -89,7 +89,7 @@ impl SystemBuilder {
             for worker in &self.workers {
                 for pipeline in &worker.pipelines {
                     for node in &pipeline.node_instances {
-                        if node.node_config.args.contains_key("wasm_file_path") {
+                        if node.node_config.effective_arg("wasm_file_path").is_some() {
                             if let Some(id_str) = node.node_config.args.get("umem") {
                                 if let Ok(uid) = id_str.parse::<usize>() {
                                     if uid < MAX_UMEM {

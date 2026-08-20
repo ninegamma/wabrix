@@ -1135,7 +1135,7 @@ impl XSocketTx {
                 let pending_in_hardware = self.total_sent_packets - self.total_consumed;
 
                 // Only warn if a massive number of packets are stuck in limbo
-                if pending_in_hardware > 4000 {
+                if pending_in_hardware > 10000 {
                     log::warn!(
                         "👻 [CQ GHOST TOWN] Worker {} Queue {}: {} packets sent to TX, but NIC has not completed them! Hardware stall imminent.",
                         self.config.worker_id, self.config.queue_id, pending_in_hardware
