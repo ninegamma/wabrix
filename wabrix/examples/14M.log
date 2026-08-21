@@ -1,0 +1,129 @@
+This is the log of my generator_engine plugin. May be we can build on this. I was thinking of using another core on the second NIC interface to read and count the packets again. Then we could demonstrate something like  filtering, counting or similar. sudo RUST_LOG="info" ./target/release/wabrix -c wabrix/examples/gen_engine.toml
+[2026-08-20T19:35:30Z INFO  wabrix] Starting Wabrix Engine...
+[2026-08-20T19:35:30Z INFO  wabrix] TSC frequency: 3,417,600,000 Hz
+[2026-08-20T19:35:30Z INFO  wabrix::metrics_server] Prometheus Metrics Exporter listening on http://0.0.0.0:9090/metrics
+[2026-08-20T19:35:30Z INFO  wabrix_base::system] === Physical Interface XDP Capabilities ===
+[2026-08-20T19:35:30Z INFO  wabrix_base::system] Interface            Driver       Version                  XDP Native   ZeroCopy     Ring Max RX Ring Max TX
+[2026-08-20T19:35:30Z INFO  wabrix_base::system] ────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[2026-08-20T19:35:30Z INFO  wabrix_base::system] eno1                 atlantic     6.17.0-42-generic        yes          no                 8184       8184
+[2026-08-20T19:35:30Z INFO  wabrix_base::system] eno2                 igc          6.17.0-42-generic        yes          yes                4096       4096
+[2026-08-20T19:35:30Z INFO  wabrix_base::system] enp2s0f0np0          ice          6.17.0-42-generic        yes          yes                8160       8160
+[2026-08-20T19:35:30Z INFO  wabrix_base::system] enp2s0f1np1          ice          6.17.0-42-generic        yes          yes                8160       8160
+[2026-08-20T19:35:30Z INFO  wabrix_base::system] enxb04f13dc3671      r8152        v1.12.13                 no           no                 4096          ?
+[2026-08-20T19:35:30Z INFO  wabrix_base::system] wlp0s20f3            iwlwifi      6.17.0-42-generic        no           no                    ?          ?
+[2026-08-20T19:35:30Z INFO  wabrix_base::system] ────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[2026-08-20T19:35:30Z INFO  wabrix] Evaluating configuration from: wabrix/examples/gen_engine.toml
+[2026-08-20T19:35:30Z INFO  wabrix_lib::toml_parser] ✓ UMEM 0 memory math verified (Total: 524288, Hardware Locked: 262144, Free for app: 262144)
+[2026-08-20T19:35:30Z INFO  wabrix_lib::toml_parser] ✓ UMEM 1 memory math verified (Total: 524288, Hardware Locked: 131072, Free for app: 393216)
+[2026-08-20T19:35:30Z INFO  wabrix_lib::toml_parser] ✓ UMEM 2 memory math verified (Total: 131072, Hardware Locked: 59392, Free for app: 71680)
+[2026-08-20T19:35:30Z INFO  wabrix] Configuration loaded and validated successfully. Initiating START sequence.
+[2026-08-20T19:35:30Z INFO  wabrix] --- Initializing Data Plane ---
+=========================================
+Wabrix Declarative CLI Ready.
+Prometheus Exporter: http://localhost:9090/metrics
+Working directory is: /home/rainer1956/wabrix_prj/wabrix
+Commands: start, stop, apply <file.toml>, check, ctrl <address> <opcode>, shutdown
+=========================================
+[2026-08-20T19:35:30Z INFO  wabrix_lib::toml_parser] ✓ UMEM 0 memory math verified (Total: 524288, Hardware Locked: 262144, Free for app: 262144)
+[2026-08-20T19:35:30Z INFO  wabrix_lib::toml_parser] ✓ UMEM 1 memory math verified (Total: 524288, Hardware Locked: 131072, Free for app: 393216)
+[2026-08-20T19:35:30Z INFO  wabrix_lib::toml_parser] ✓ UMEM 2 memory math verified (Total: 131072, Hardware Locked: 59392, Free for app: 71680)
+[2026-08-20T19:35:30Z INFO  wabrix] Configuration reloaded from: wabrix/examples/gen_engine.toml
+[2026-08-20T19:35:30Z INFO  wabrix_base::system] === wabrix Pre-Flight System Check ===
+[2026-08-20T19:35:30Z INFO  wabrix_base::system] ✓ 'irdma' module is not loaded (Clean).
+[2026-08-20T19:35:30Z INFO  wabrix_base::system] ✓ irqbalance is inactive.
+[2026-08-20T19:35:30Z INFO  wabrix_base::system] ✓ Core 7 is properly isolated.
+[2026-08-20T19:35:30Z INFO  wabrix_base::system] ✓ Core 9 is properly isolated.
+[2026-08-20T19:35:30Z WARN  wabrix_base::system] ⚠️  LATENCY WARNING: Core 7 is set to 'powersave' mode.
+[2026-08-20T19:35:30Z WARN  wabrix_base::system]    Run 'cpupower frequency-set -g performance' for zero-drop stability.
+[2026-08-20T19:35:30Z WARN  wabrix_base::system] ⚠️  LATENCY WARNING: Core 9 is set to 'powersave' mode.
+[2026-08-20T19:35:30Z WARN  wabrix_base::system]    Run 'cpupower frequency-set -g performance' for zero-drop stability.
+[2026-08-20T19:35:30Z INFO  wabrix_base::system] ✓ No IRQ conflicts found.
+[2026-08-20T19:35:30Z INFO  wabrix_base::system] ✓ No IRQ conflicts found.
+[2026-08-20T19:35:30Z INFO  wabrix_base::system] ✓ No IRQ conflicts found.
+[2026-08-20T19:35:30Z INFO  wabrix_base::system] ✓ No IRQ conflicts found.
+[2026-08-20T19:35:30Z INFO  wabrix_base::system] ======== System Check Completed =======
+[2026-08-20T19:35:30Z INFO  wabrix] Configuring network interfaces...
+[2026-08-20T19:35:30Z INFO  wabrix_lib::config::interface_setup] Validating interface existence...
+[2026-08-20T19:35:30Z INFO  wabrix_lib::config::interface_setup] ✓ All interface(s) validated
+[2026-08-20T19:35:30Z INFO  wabrix_lib::config::interface_setup] Configuring interface enp2s0f0np0...
+[2026-08-20T19:35:30Z INFO  wabrix_lib::config::interface_setup] Setting TX checksum offload off on enp2s0f0np0
+[2026-08-20T19:35:30Z INFO  wabrix_lib::config::interface_setup] ✓ TX checksum offload off on enp2s0f0np0
+[2026-08-20T19:35:30Z INFO  wabrix_lib::config::interface_setup] ✓ Interface enp2s0f0np0 is already UP
+[2026-08-20T19:35:30Z INFO  wabrix_lib::config::interface_setup] ✓ Promiscuous mode enabled on enp2s0f0np0
+[2026-08-20T19:35:30Z INFO  wabrix_lib::config::interface_setup] Interface enp2s0f0np0 already has 2 queues configured
+[2026-08-20T19:35:30Z INFO  wabrix_lib::config::interface_setup] Interface enp2s0f0np0 already has ring sizes configured (RX=8160, TX=8160)
+[2026-08-20T19:35:31Z INFO  wabrix_lib::config::interface_setup] ✓ Interface enp2s0f0np0 has link (carrier detected)
+[2026-08-20T19:35:31Z INFO  wabrix_lib::config::interface_setup] ✓ Interface enp2s0f0np0 configured successfully
+[2026-08-20T19:35:31Z INFO  wabrix_base::system] Setting IRQ affinity for enp2s0f0np0 to core 2...
+[2026-08-20T19:35:31Z INFO  wabrix_base::system] ✓ Set IRQ 235 (enp2s0f0np0) affinity to core 2
+[2026-08-20T19:35:31Z INFO  wabrix_base::system] ✓ Set IRQ 236 (enp2s0f0np0) affinity to core 2
+[2026-08-20T19:35:31Z INFO  wabrix_base::system] ✓ Set 2 IRQ(s) for enp2s0f0np0 to core 2
+[2026-08-20T19:35:31Z INFO  wabrix_lib::config::interface_setup] Configuring interface veth_wabrix...
+[2026-08-20T19:35:31Z INFO  wabrix_lib::config::interface_setup] Setting up veth pair: veth_wabrix <-> tap-veth-0 (namespace: ns-wabrix)
+[2026-08-20T19:35:31Z INFO  wabrix_lib::config::interface_setup] ✓ Veth pair veth_wabrix already exists with 2 queues
+[2026-08-20T19:35:31Z INFO  wabrix_lib::config::interface_setup] ✓ Set IP address 10.10.10.222/24 on tap-veth-0
+[2026-08-20T19:35:31Z INFO  wabrix_lib::config::interface_setup] Setting TX checksum offload off on tap-veth-0
+[2026-08-20T19:35:31Z INFO  wabrix_lib::config::interface_setup] ✓ TX checksum offload off on tap-veth-0
+[2026-08-20T19:35:31Z INFO  wabrix_lib::config::interface_setup] ✓ Interface veth_wabrix is already UP
+[2026-08-20T19:35:31Z INFO  wabrix_lib::config::interface_setup] ✓ Promiscuous mode enabled on veth_wabrix
+[2026-08-20T19:35:31Z INFO  wabrix_lib::config::interface_setup] ✓ Interface veth_wabrix has link (carrier detected)
+[2026-08-20T19:35:31Z INFO  wabrix_lib::config::interface_setup] ✓ Interface veth_wabrix configured successfully
+[2026-08-20T19:35:31Z INFO  wabrix_lib::config::configure_bpf] Loading dedicated BPF skeleton for interface: enp2s0f0np0
+[2026-08-20T19:35:31Z INFO  wabrix_lib::config::configure_bpf] ✓ XDP program attached to enp2s0f0np0 (Index 4)
+[2026-08-20T19:35:31Z INFO  wabrix_lib::config::configure_bpf] Loading dedicated BPF skeleton for interface: veth_wabrix
+[2026-08-20T19:35:31Z INFO  wabrix_lib::config::configure_bpf] ✓ XDP program attached to veth_wabrix (Index 26)
+[2026-08-20T19:35:31Z INFO  wabrix] Building XDP system from configuration...
+[2026-08-20T19:35:31Z INFO  wabrix_lib::system_builder] UMEM 0: 2 WASM instance(s): control_block=34 frames, 65519 scratchpad frames each
+[2026-08-20T19:35:31Z INFO  wabrix_lib::xsocket] Worker 0: Pre-filled FQ ring with 32768 empty frames.
+[2026-08-20T19:35:31Z INFO  wabrix_lib::xsocket] Worker 1: Pre-filled FQ ring with 32768 empty frames.
+[2026-08-20T19:35:31Z INFO  wabrix_lib::xsocket] Auto-detected virtual interface veth_wabrix, using SKB/generic XDP mode
+[2026-08-20T19:35:31Z INFO  wabrix_lib::xsocket] Worker 0: Pre-filled FQ ring with 16384 empty frames.
+[2026-08-20T19:35:31Z INFO  wabrix_lib::xsocket] Auto-detected virtual interface veth_wabrix, using SKB/generic XDP mode
+[2026-08-20T19:35:31Z INFO  wabrix_lib::xsocket] Worker 1: Pre-filled FQ ring with 16384 empty frames.
+[2026-08-20T19:35:31Z INFO  wabrix_lib::config::configure_bpf] Registering 4 sockets in BPF maps...
+[2026-08-20T19:35:31Z INFO  wabrix_lib::config::configure_bpf] ✓ All sockets registered successfully.
+[2026-08-20T19:35:31Z INFO  wabrix_lib::system_builder] Initialized 4 XDP sockets and 2 worker frame registries from configuration
+[2026-08-20T19:35:31Z INFO  wabrix_wasm::wasm_manager] Compiling WASM component (this may take a few seconds): /home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/generator_engine.wasm
+[2026-08-20T19:35:31Z INFO  wabrix_wasm::wasm_manager] WASM compiled artifact cached at "/tmp/wabrix-wasm-cache/generator_engine-1787254348.cwasm"
+[2026-08-20T19:35:31Z INFO  wabrix_wasm::wasm_engine] NODE 0: generator_engine: Partition start bytes: 0
+[2026-08-20T19:35:31Z INFO  wabrix_wasm::wasm_engine] NODE 0: generator_engine: Partition start bytes: 134182912
+[2026-08-20T19:35:31Z INFO  wabrix_base::system] Waiting for physical link training to complete on enp2s0f0np0...
+[2026-08-20T19:35:31Z INFO  wabrix_base::system] Physical link is UP! Hardware is ready.
+[2026-08-20T19:35:31Z INFO  wabrix_base::system] Waiting for physical link training to complete on veth_wabrix...
+[2026-08-20T19:35:31Z INFO  wabrix_base::system] Physical link is UP! Hardware is ready.
+[2026-08-20T19:35:32Z INFO  wabrix_lib::system_runner] Spawning pipeline worker threads...
+[2026-08-20T19:35:32Z INFO  wabrix_lib::system_runner] Spawned worker 0 on core 7 with 1 pipeline(s)
+[2026-08-20T19:35:32Z INFO  wabrix_lib::system_runner] Spawned worker 1 on core 9 with 1 pipeline(s)
+[2026-08-20T19:35:32Z INFO  wabrix] All 2 worker threads spawned. Data Plane is LIVE.
+Successfully pinned worker to isolated core 7
+[2026-08-20T19:35:32Z INFO  wabrix_lib::pipeline] Worker 0 scheduling policy set to SCHED_FIFO (priority 50)
+[2026-08-20T19:35:32Z INFO  wabrix_lib::pipeline] Worker 0 with 1 pipelines is running with OS TID 195944 on core 7
+Successfully pinned worker to isolated core 9
+[2026-08-20T19:35:32Z INFO  wabrix_lib::pipeline] Worker 1 scheduling policy set to SCHED_FIFO (priority 50)
+[2026-08-20T19:35:32Z INFO  wabrix_lib::pipeline] Worker 1 with 1 pipelines is running with OS TID 195945 on core 9
+[2026-08-20T19:36:39Z INFO  wabrix_wasm::wasm_manager] WASM Node: generator_engine: generation run complete: packets=1,000,000,000, elapsed=67,748,584us, speed=14,760,456 packets/s
+[2026-08-20T19:36:40Z INFO  wabrix_wasm::wasm_manager] WASM Node: generator_engine: generation run complete: packets=1,000,000,000, elapsed=68,327,498us, speed=14,635,396 packets/s
+^C[2026-08-20T19:36:53Z INFO  wabrix] Stopping data plane workers...
+[2026-08-20T19:36:53Z INFO  wabrix_lib::pipeline] Worker 0: Shutdown complete
+[2026-08-20T19:36:53Z INFO  wabrix_lib::pipeline] Worker 0 pipeline 'generator_pipe' stopped:
+[2026-08-20T19:36:53Z INFO  wabrix_lib::pipeline]   0 packets, 1,953,125 runs (9,266,986 idle, 1,953,125 timer-only)
+[2026-08-20T19:36:53Z INFO  wabrix_lib::pipeline]   65.690 CPU seconds load, 0.898 CPU seconds idle
+[2026-08-20T19:36:53Z INFO  wabrix_lib::pipeline]     Node 0: generator_engine : 187 cycles/packet (54.927 total CPU seconds, 1,000,000,000 packets)
+[2026-08-20T19:36:53Z INFO  wabrix_lib::pipeline]     Node 1: shared_tx_sink   : 29 cycles/packet (8.758 total CPU seconds, 1,000,000,000 packets)
+[2026-08-20T19:36:53Z INFO  wabrix_lib::pipeline]     Node 2: veth_sink        : 0 packets processed
+[2026-08-20T19:36:53Z INFO  wabrix_lib::pipeline]     Node 3: drop             : 0 packets processed
+!!! KERNEL NOTIFY: Umem Group 0 is physically DEALLOCATING now !!!
+!!! KERNEL NOTIFY: Umem Group 1 is physically DEALLOCATING now !!!
+!!! KERNEL NOTIFY: Umem Group 2 is physically DEALLOCATING now !!!
+[2026-08-20T19:36:53Z INFO  wabrix_lib::pipeline] Worker 1: Shutdown complete
+[2026-08-20T19:36:53Z INFO  wabrix_lib::pipeline] Worker 1 pipeline 'generator_pipe' stopped:
+[2026-08-20T19:36:53Z INFO  wabrix_lib::pipeline]   0 packets, 1,953,125 runs (8,741,247 idle, 1,953,125 timer-only)
+[2026-08-20T19:36:53Z INFO  wabrix_lib::pipeline]   66.165 CPU seconds load, 0.861 CPU seconds idle
+[2026-08-20T19:36:53Z INFO  wabrix_lib::pipeline]     Node 0: generator_engine : 186 cycles/packet (54.514 total CPU seconds, 1,000,000,000 packets)
+[2026-08-20T19:36:53Z INFO  wabrix_lib::pipeline]     Node 1: shared_tx_sink   : 33 cycles/packet (9.710 total CPU seconds, 1,000,000,000 packets)
+[2026-08-20T19:36:53Z INFO  wabrix_lib::pipeline]     Node 2: veth_sink        : 0 packets processed
+[2026-08-20T19:36:53Z INFO  wabrix_lib::pipeline]     Node 3: drop             : 0 packets processed
+[2026-08-20T19:36:53Z INFO  wabrix] Userspace destroyed. Yielding to kernel for graceful AF_XDP unbind...
+[2026-08-20T19:36:54Z INFO  wabrix] Data plane teardown complete.
+[2026-08-20T19:36:54Z INFO  wabrix] Received SHUTDOWN command. Exiting application...
+[2026-08-20T19:36:54Z INFO  wabrix] Wabrix shut down gracefully.

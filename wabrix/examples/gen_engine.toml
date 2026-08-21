@@ -40,8 +40,10 @@ labels = ["SentSyn", "SentSynAck", "SentSynAck2", "SentFin", "SentFinPssv", "Sen
 # Node-level state override
 desired_state = "Running"
 args= { umem = "0" }
-#hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/generator_engine.wasm" }
-hot_args = { wasm_file_path = "/tmp/wabrix_api-baseline/target/wasm32-wasip2/release/generator_engine.wasm" }
+hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/generator_engine.wasm" }
+#hot_args = { wasm_file_path = "/tmp/wabrix_api-14m-baseline/target/wasm32-wasip2/release/generator_engine.wasm" }
+
+#hot_args = { wasm_file_path = "/tmp/wabrix_api-14m-baseline/target/wasm32-wasip2/release/generator_engine.wasm" }
 
 [pipelines.nodes.wasm_data]
 prot = "SYN"

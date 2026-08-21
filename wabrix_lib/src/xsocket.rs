@@ -454,6 +454,7 @@ impl XSocketRx {
         // Check Capacity
         // nb_free() tells us how many slots are open in the ring
         let nb_free = fq.nb_free_exact();
+        //let nb_free = fq.nb_free(available as u32);
         let batch_size = std::cmp::min(nb_free, available as u32);
 
         if batch_size > 0 {
@@ -907,6 +908,7 @@ impl BatchTx for XSocketTx {
             return Ok(0);
         }
         let mut tx_guard = self.tx_queue.lock();
+        //let free_slots = tx_guard.nb_free(original_batch_len as u32) as usize;
         let free_slots = tx_guard.nb_free_exact() as usize;
 
         if free_slots == 0 {
