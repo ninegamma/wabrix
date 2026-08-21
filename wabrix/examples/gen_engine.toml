@@ -43,15 +43,15 @@ args= { umem = "0" }
 hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/generator_engine.wasm" }
 
 [pipelines.nodes.wasm_data]
+prot = "SYN"
 dst_ip = "10.10.10.31"
 src_mac = "44:49:88:06:63:38"
 dst_mac = "44:49:88:06:63:39"
 src_ip = "10.10.10.222"
 
 [pipelines.nodes.hot_wasm_data]
-syn_limit = "1000M"
-close_timeout = "100"
-syn_rate = "15M"
+generation_limit = "500M"
+generation_rate = "15M"
 
 [[pipelines.nodes]]
 id = "shared_tx_sink"

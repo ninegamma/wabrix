@@ -16,7 +16,7 @@ use wabrix_api::MAX_BATCH_SIZE;
 use wabrix_api::{PluginOpcode, StandardOpcode};
 
 use wabrix_api::tcp_common::{
-    run_tcp_state_machine, write_tcp_reply, EngineConfig, SynGenerator, TimeoutStack, FLAG_ACK,
+    run_tcp_state_machine, write_tcp_reply, SynGenerator, TcpEngineConfig, TimeoutStack, FLAG_ACK,
     FLAG_FIN, FLAG_RST, FLAG_SYN, PORT_END_RANGE, PORT_START_RANGE, STAT_COUNT, STAT_DROP,
     STAT_RECV_RST, STAT_RECV_SYN, STAT_SENT_FIN, STAT_SENT_RST, STAT_SENT_SYN, STAT_SENT_SYNACK,
     STAT_TO_LINUX, STAT_UNEXPECTED,
@@ -31,7 +31,7 @@ pub struct TcpNode {
     id: NodeId,
     routing_table: Vec<NodeId>,
     umem_group_id: usize,
-    config: EngineConfig,
+    config: TcpEngineConfig,
     connections: ConnectionPool,
     timeout_queue: TimeoutStack,
     syn_gen: SynGenerator,
@@ -60,8 +60,11 @@ impl TcpNode {
         counters_pkts: Vec<Arc<CachePadded<AtomicU64>>>,
         tm_force_sync: Arc<AtomicBool>,
     ) -> Self {
-        let mut config = EngineConfig {
-            tsc_frequency,
+        let mut config = TcpEngineConfig {
+            common: wabrix_api::tcp_common::CommonEngineConfig {
+                tsc_frequency,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let mut raw_src_ip: Option<alloc::string::String> = None;
@@ -600,7 +603,7 @@ impl Node for TcpNode {
 unsafe fn handle_tcp_packet(
     pdu: &mut Pdu,
     pool: &mut ConnectionPool,
-    config: &EngineConfig,
+    config: &TcpEngineConfig,
     stats: &mut [u64; STAT_COUNT],
     current_tsc: u64,
 ) -> u32 {

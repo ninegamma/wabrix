@@ -936,7 +936,6 @@ impl BatchTx for XSocketTx {
             );
         }
 
-
         let count_to_send = std::cmp::min(original_batch_len, free_slots);
         let mut valid_to_send = 0;
         let mut descs = [FrameDesc::default(); MAX_BATCH_SIZE];

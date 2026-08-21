@@ -29,7 +29,7 @@ The `SystemBuilder` interacts with the Linux kernel and `xsk-rs` to allocate phy
 
 Translates the static blueprints into the executable runtime structures.
 
-* **Node Instantiation:** Iterates over the `NodeConfig` definitions and creates the actual executable logic (`Box<dyn Node>`), such as `BatchRxNode`, `WasmEngine`, or `PacketGenerator`.
+* **Node Instantiation:** Iterates over the `NodeConfig` definitions and creates the actual executable logic (`Box<dyn Node>`), such as `BatchRxNode`, `WasmEngine`, or `SynGenerator`.
 * **Rich Identity Generation (`NodeInstanceId`):** Assigns a globally unique, structural identity to every node: `{worker_id}/{pipeline_name}/{node_name}/{node_type}`.
 * **DAG Resolution:** Translates string-based routes into fast, integer-based indices for zero-cost routing during the packet loop.
 
