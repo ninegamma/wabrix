@@ -204,13 +204,13 @@ dst_mac = "08:bf:b8:0a:0b:0c"
 
 | Node type | Key | Description |
 |-----------|-----|-------------|
-| `SynGenerator` | `pps` | Packets per second. Same format as `args.pps`. |
-| `SynGenerator` | `batch_size` | Packets generated per batch. Must be 1–512. |
-| `SynGenerator` | `packet_count` | Total packets per run before stopping. `0` = unlimited. |
-| `SynGenerator` | `dst_ip` | Destination IP address for generated packets. |
-| `SynGenerator` | `dst_mac` | Destination MAC address for generated packets. |
+| `PacketGenerator` | `pps` | Packets per second. Same format as `args.pps`. |
+| `PacketGenerator` | `batch_size` | Packets generated per batch. Must be 1–512. |
+| `PacketGenerator` | `packet_count` | Total packets per run before stopping. `0` = unlimited. |
+| `PacketGenerator` | `dst_ip` | Destination IP address for generated packets. |
+| `PacketGenerator` | `dst_mac` | Destination MAC address for generated packets. |
 
-> **Note:** For `SynGenerator`, the inter-batch gap is derived from both `pps` and `batch_size` together (`gap = tsc_freq / pps * batch_size`). Both must be updated consistently: setting `pps=16` with `batch_size=256` (default) produces a 16-second gap, not a 1-second gap.
+> **Note:** For `PacketGenerator`, the inter-batch gap is derived from both `pps` and `batch_size` together (`gap = tsc_freq / pps * batch_size`). Both must be updated consistently: setting `pps=16` with `batch_size=256` (default) produces a 16-second gap, not a 1-second gap.
 
 ---
 
@@ -239,7 +239,7 @@ Transmits packets through an AF_XDP socket.
 
 ---
 
-#### `SynGenerator` — Synthetic traffic source
+#### `PacketGenerator` — Synthetic traffic source
 
 Generates packets at a configurable rate. Does not use `queues`.
 

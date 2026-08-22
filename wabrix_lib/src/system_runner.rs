@@ -9,7 +9,7 @@ use wabrix_base::system::PlatformData;
 use wabrix_base::telemetry::TelemetryRegistry;
 use xsk_rs::Umem;
 
-pub struct XBricksSystem {
+pub struct WabrixSystem {
     pub(crate) xsocket_registry: XSocketRegistry,
     /// Indexed by worker_id (0..num_workers).
     pub(crate) frame_registries: Vec<Option<FrameRegistry>>,
@@ -22,7 +22,7 @@ pub struct XBricksSystem {
     pub umems: Vec<Option<Arc<Umem>>>,
 }
 
-impl XBricksSystem {
+impl WabrixSystem {
     /// returns handles of all spawned worker threads, telemetry logger thread, and dst port stats
     /// consumes itself (XBricksSystem)
     #[allow(clippy::type_complexity)]

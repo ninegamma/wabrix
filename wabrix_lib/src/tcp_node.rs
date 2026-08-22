@@ -16,7 +16,7 @@ use wabrix_api::MAX_BATCH_SIZE;
 use wabrix_api::{PluginOpcode, StandardOpcode};
 
 use wabrix_api::tcp_common::{
-    run_tcp_state_machine, write_tcp_reply, SynGenerator, TcpEngineConfig, TimeoutStack, FLAG_ACK,
+    run_tcp_state_machine, write_tcp_reply, PacketGenerator, TcpEngineConfig, TimeoutStack, FLAG_ACK,
     FLAG_FIN, FLAG_RST, FLAG_SYN, PORT_END_RANGE, PORT_START_RANGE, STAT_COUNT, STAT_DROP,
     STAT_RECV_RST, STAT_RECV_SYN, STAT_SENT_FIN, STAT_SENT_RST, STAT_SENT_SYN, STAT_SENT_SYNACK,
     STAT_TO_LINUX, STAT_UNEXPECTED,
@@ -34,7 +34,7 @@ pub struct TcpNode {
     config: TcpEngineConfig,
     connections: ConnectionPool,
     timeout_queue: TimeoutStack,
-    syn_gen: SynGenerator,
+    syn_gen: PacketGenerator,
     current_tsc: u64,
     last_timeout_scan: u64,
     stats: [u64; STAT_COUNT],
@@ -105,13 +105,13 @@ impl TcpNode {
             config,
             connections: ConnectionPool::new(MAX_CONNECTIONS, node_name.clone()),
             timeout_queue: TimeoutStack::new(),
-            syn_gen: SynGenerator {
+            syn_gen: PacketGenerator {
                 last_tsc: 0,
                 cycle_accumulator: 0,
                 port_counter: PORT_START_RANGE,
                 ip_offset: 0,
                 prng_state: 1,
-                syns_sent: 0,
+                packets_sent: 0,
                 activated: false,
             },
             current_tsc: 0,
@@ -149,7 +149,7 @@ impl TcpNode {
         self.set_state(0);
         self.connections.clear();
         self.timeout_queue.clear();
-        self.syn_gen.syns_sent = 0;
+        self.syn_gen.packets_sent = 0;
         self.syn_gen.cycle_accumulator = 0;
         self.syn_gen.last_tsc = 0;
         if mode == 1 {
@@ -367,7 +367,7 @@ impl Node for TcpNode {
             let syn_rate = self.config.syn_rate.unwrap_or(0);
             if syn_rate > 0 && self.syn_gen.activated {
                 let allowed = match self.config.syn_limit {
-                    Some(max) => self.syn_gen.syns_sent < max || max == 0,
+                    Some(max) => self.syn_gen.packets_sent < max || max == 0,
                     None => true,
                 };
                 if allowed {
@@ -392,7 +392,7 @@ impl Node for TcpNode {
                     self.syn_gen.cycle_accumulator += (delta as u128) * (syn_rate as u128);
                     let mut n = (self.syn_gen.cycle_accumulator / (tsc_freq as u128)) as u32;
                     if let Some(max) = self.config.syn_limit {
-                        let remaining = max.saturating_sub(self.syn_gen.syns_sent);
+                        let remaining = max.saturating_sub(self.syn_gen.packets_sent);
                         if (n as u64) > remaining {
                             n = remaining as u32;
                         }
@@ -504,7 +504,7 @@ impl Node for TcpNode {
             while frame_idx < allocated {
                 let allowed = self.syn_gen.activated
                     && match self.config.syn_limit {
-                        Some(max) => self.syn_gen.syns_sent < max || max == 0,
+                        Some(max) => self.syn_gen.packets_sent < max || max == 0,
                         None => true,
                     };
                 if !allowed {
@@ -514,7 +514,7 @@ impl Node for TcpNode {
                 let mut pdu = self.scratch_pdus[frame_idx].assume_init_read();
                 frame_idx += 1;
 
-                self.syn_gen.syns_sent += 1;
+                self.syn_gen.packets_sent += 1;
                 self.syn_gen.prng_state = self
                     .syn_gen
                     .prng_state

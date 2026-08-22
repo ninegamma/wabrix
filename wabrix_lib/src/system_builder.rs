@@ -11,7 +11,7 @@ use wabrix_base::frame_registry::RETURN_QUEUE_CAPACITY;
 use xsk_rs::config::{FrameSize, QueueSize};
 use xsk_rs::Umem;
 //use wabrix_wasm::wasm_manager::WasmManager;
-use crate::system_runner::XBricksSystem;
+use crate::system_runner::WabrixSystem;
 use crate::toml_parser::{PartitionRequest, WorkerBuilderConfig};
 use crate::xscrubber_skel::XscrubberSkel;
 use crate::xsocket::{XSocket, XSocketRx, XSocketTx, XdpSocketConfig};
@@ -48,10 +48,10 @@ impl SystemBuilder {
         interface_skels: Option<&HashMap<String, Arc<XscrubberSkel<'static>>>>,
         platform_data: PlatformData,
         ctrl_rx: Option<Receiver<Arc<ControlEvent>>>,
-    ) -> Result<Box<XBricksSystem>, Box<dyn std::error::Error>> {
+    ) -> Result<Box<WabrixSystem>, Box<dyn std::error::Error>> {
         use crate::config::hot_config::SharedSystemState;
         let num_workers = self.workers.len();
-        let mut xbricks_system = Box::new(XBricksSystem {
+        let mut wabrix_system = Box::new(WabrixSystem {
             xsocket_registry: XSocketRegistry::default(),
             frame_registries: (0..num_workers).map(|_| None).collect(),
             telemetry_registry: Arc::new(TelemetryRegistry::default()),
@@ -253,7 +253,7 @@ impl SystemBuilder {
         // Store all UMEM handles in XBricksSystem and propagate to each worker's registry.
         for (group_id, entry) in initialized_umems.iter().enumerate() {
             if let Some((umem, _)) = entry {
-                xbricks_system.umems[group_id] = Some(umem.clone());
+                wabrix_system.umems[group_id] = Some(umem.clone());
                 umem_addr[group_id] = Some(umem.as_ptr() as usize);
             }
         }
@@ -282,11 +282,11 @@ impl SystemBuilder {
                 system_bus.clone(),
                 self.runtime_umems.clone(),
             );
-            xbricks_system.frame_registries[*worker_id] = Some(frame_registry);
+            wabrix_system.frame_registries[*worker_id] = Some(frame_registry);
         }
 
         // Give every worker registry the physical UMEM handle (cheap Arc clone).
-        for frame_registry in xbricks_system.frame_registries.iter_mut().flatten() {
+        for frame_registry in wabrix_system.frame_registries.iter_mut().flatten() {
             for (group_id, entry) in initialized_umems.iter().enumerate() {
                 if let Some((umem, _)) = entry {
                     frame_registry.active_umems[group_id] = Some(umem.clone());
@@ -312,7 +312,7 @@ impl SystemBuilder {
                 let mut initial_descs = Vec::new();
                 if shared_rings.is_none() {
                     if let Some(registry) =
-                        xbricks_system.frame_registries[config.worker_id].as_mut()
+                        wabrix_system.frame_registries[config.worker_id].as_mut()
                     {
                         let mut global_frames = vec![0u32; umem_conf.fq_size as usize];
                         let allocated = registry.allocate_batch_into(group_id, &mut global_frames);
@@ -410,7 +410,7 @@ impl SystemBuilder {
         }
 
         let num_sockets = xsockets.len();
-        let num_active_workers = xbricks_system
+        let num_active_workers = wabrix_system
             .frame_registries
             .iter()
             .filter(|e| e.is_some())
@@ -421,7 +421,7 @@ impl SystemBuilder {
         );
 
         // Create socket registry for pipeline construction
-        xbricks_system.xsocket_registry = crate::system_builder::XSocketRegistry::new(xsockets);
+        wabrix_system.xsocket_registry = crate::system_builder::XSocketRegistry::new(xsockets);
         // Create telemetry registry
         let mut telemetry_registry = TelemetryRegistry::new();
         // Create dst port stats registry
@@ -450,7 +450,7 @@ impl SystemBuilder {
         let shared_state = SharedSystemState::new(rcu_pipelines);
 
         // Attach it to the system so main.rs can retrieve it later for the Axum API
-        xbricks_system.shared_state = shared_state.clone();
+        wabrix_system.shared_state = shared_state.clone();
         // ==========================================================
 
         // Reuse the wasm_counts computed in the pre-scan above.
@@ -493,9 +493,9 @@ impl SystemBuilder {
                 let (nodes, source_indices) = crate::pipeline::PipelineFactory::build(
                     pipeline_instance_cfg,
                     worker_id,
-                    &mut xbricks_system.xsocket_registry,
+                    &mut wabrix_system.xsocket_registry,
                     Some(&mut telemetry_registry),
-                    &xbricks_system.platform_data,
+                    &wabrix_system.platform_data,
                     #[cfg(feature = "wasm")]
                     &self.wasm_managers,
                     shared_state.clone(),
@@ -520,14 +520,14 @@ impl SystemBuilder {
                     source_indices,
                     node_identities,
                     Some(runner_control_rx),
-                    xbricks_system.platform_data.tsc_frequency,
+                    wabrix_system.platform_data.tsc_frequency,
                     pipeline_rcu,
                 )
                 .map_err(|e| anyhow::anyhow!(e))?;
 
                 runners.push(runner);
             }
-            xbricks_system.worker_runners[worker_id] = Some((core_id, runners));
+            wabrix_system.worker_runners[worker_id] = Some((core_id, runners));
         }
 
         if let Some(control_rx) = ctrl_rx {
@@ -540,9 +540,9 @@ impl SystemBuilder {
             });
         }
 
-        xbricks_system.telemetry_registry = Arc::new(telemetry_registry);
+        wabrix_system.telemetry_registry = Arc::new(telemetry_registry);
 
-        Ok(xbricks_system)
+        Ok(wabrix_system)
     }
 }
 
