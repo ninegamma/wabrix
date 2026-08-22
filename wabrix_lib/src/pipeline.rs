@@ -1252,6 +1252,15 @@ impl PipelineRunner {
         self.worker_id
     }
 
+    /// Timer-driven pipelines must be polled at their configured frequency.
+    /// Applying the worker's exponential idle backoff to them turns a timer
+    /// that is not due yet into a false idle signal and makes subsequent ticks
+    /// late.
+    #[inline(always)]
+    pub fn has_timer_nodes(&self) -> bool {
+        !self.timer_indices.is_empty()
+    }
+
     /// Get statistics
     pub fn stats(&mut self) -> PipelineStats {
         use std::any::Any;
@@ -1650,7 +1659,7 @@ pub fn spawn_worker_pipelines(
 
             for i in 0..num_pipelines {
                 // If this pipeline is being penalized for being empty, skip it
-                if skip_counters[i] > 0 {
+                if !runners[i].has_timer_nodes() && skip_counters[i] > 0 {
                     skip_counters[i] -= 1;
                     continue;
                 }
@@ -1680,6 +1689,13 @@ pub fn spawn_worker_pipelines(
                         packets_processed = next_packets as usize;
                         bursts += 1;
                     }
+                } else if runners[i].has_timer_nodes() {
+                    // A timer that is not due yet is not an idle pipeline.
+                    // Keep it eligible so the next deadline is observed without
+                    // exponential scheduling jitter.
+                    idle_streaks[i] = 0;
+                    skip_counters[i] = 0;
+                    std::hint::spin_loop();
                 } else {
                     // PIPELINE IS EMPTY. Apply exponential backoff.
                     // 1st empty -> skip 1 loop. 2nd empty -> skip 2 loops. 3rd -> skip 4...
