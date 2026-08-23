@@ -195,11 +195,56 @@ fn default_poll_frequency() -> u64 {
     1000
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
+#[derive(Debug, Clone, PartialEq, TS)]
 pub enum PipelineLifecycle {
     Running,
+    RunningDelayed(u64),
     Paused,
     Stopping,
+}
+
+impl Serialize for PipelineLifecycle {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Running => serializer.serialize_str("Running"),
+            Self::RunningDelayed(delay_ms) => {
+                serializer.serialize_str(&format!("Running delay={delay_ms}"))
+            }
+            Self::Paused => serializer.serialize_str("Paused"),
+            Self::Stopping => serializer.serialize_str("Stopping"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PipelineLifecycle {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.as_str() {
+            "Running" => Ok(Self::Running),
+            "Paused" => Ok(Self::Paused),
+            "Stopping" => Ok(Self::Stopping),
+            _ => {
+                if let Some(delay) = value.strip_prefix("Running delay=") {
+                    let delay_ms = delay.parse::<u64>().map_err(|_| {
+                        serde::de::Error::custom(format!(
+                            "invalid pipeline state '{value}': delay must be milliseconds"
+                        ))
+                    })?;
+                    Ok(Self::RunningDelayed(delay_ms))
+                } else {
+                    Err(serde::de::Error::custom(format!(
+                        "invalid pipeline state '{value}'"
+                    )))
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
@@ -1610,6 +1655,34 @@ mod tests {
             config.pipelines[0].nodes[0].desired_state,
             Some(PipelineLifecycle::Running)
         );
+    }
+
+    #[test]
+    fn test_delayed_running_desired_state() {
+        #[allow(dead_code)]
+        #[derive(serde::Deserialize)]
+        struct StateConfig {
+            #[allow(dead_code)]
+            state: PipelineLifecycle,
+        }
+
+        let state = toml::from_str::<StateConfig>(r#"state = "Running delay=1000""#)
+            .unwrap()
+            .state;
+
+        assert_eq!(state, PipelineLifecycle::RunningDelayed(1000));
+    }
+
+    #[test]
+    fn test_delayed_running_rejects_non_numeric_delay() {
+        #[derive(serde::Deserialize)]
+        struct StateConfig {
+            #[allow(dead_code)]
+            state: PipelineLifecycle,
+        }
+
+        let result = toml::from_str::<StateConfig>(r#"state = "Running delay=soon""#);
+        assert!(result.is_err());
     }
 
     #[test]

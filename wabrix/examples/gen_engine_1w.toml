@@ -1,23 +1,23 @@
 [wabrix]
 ifaces= [
-    { name = "enp2s0f0np0", rxd = 8160, txd = 8160, irq_core = 2 },
-    { name = "veth_wabrix", rxd = 1024, txd = 1024, type = "veth", namespace = "ns-wabrix", peer = "tap-veth-0", mac_if = "enp2s0f0np0", ipnet = "10.10.10.222/24", checksum_offload = false },
-#    { name = "enp2s0f1np1", rxd = 8160, txd = 8160, irq_core = 4 },
-#    { name = "veth_wabrix_1", rxd = 1024, txd = 1024, type = "veth", namespace = "ns-wabrix-1", peer = "tap-veth-1", mac_if = "enp2s0f1np1", ipnet = "10.10.10.31/24", checksum_offload = false },
+    { name = "enp2s0f0np0", rxd = 8160, txd = 8160, irq_core = 0 },
+    { name = "enp2s0f1np1", rxd = 8160, txd = 8160, irq_core = 2 },
 ]
 umem= [
-    { id = 0, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 1, reserved = 131072 },
+    { id = 0, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 2, reserved = 131072 },
     { id = 1, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 1, reserved = 131072 },
-    { id = 2, frame_size = 2048, frame_count = 131072, fq_size = 16384, cq_size = 16384, head_room = 128, partitions = 1, reserved = 10240 },
+    { id = 2, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 1, reserved = 131072 },
 ]
 xsk= [
-    { iface = "enp2s0f0np0", queues = [0], umem = 0, rxq_size = 16384, txq_size = 16384, zerocopy = true, xdp_mode = "auto" },
-    { iface = "veth_wabrix", queues = [0], umem = 2, rxq_size = 4096, txq_size = 4096, zerocopy = false, xdp_mode = "auto" },
-#    { iface = "enp2s0f1np1", queues = [0], umem = 1, rxq_size = 16384, txq_size = 16384, zerocopy = true, xdp_mode = "auto" },
-#    { iface = "veth_wabrix_1", queues = [0], umem = 2, rxq_size = 4096, txq_size = 4096, zerocopy = false, xdp_mode = "auto" },
+    { iface = "enp2s0f0np0", queues = [0, 1], umem = 0, rxq_size = 16384, txq_size = 16384, zerocopy = true, xdp_mode = "auto" },
+    { iface = "enp2s0f1np1", queues = [0], umem = 1, rxq_size = 16384, txq_size = 16384, zerocopy = true, xdp_mode = "auto" },
+  #  { iface = "enp2s0f1np1", queues = [1], umem = 2, rxq_size = 16384, txq_size = 16384, zerocopy = true, xdp_mode = "auto" },
 ]
 workers= [
-    { id = 0, core = 7, partitions = [{ umem = 0, count = 1 }, { umem = 2, count = 1 }] },
+    { id = 0, core = 7, partitions = [{ umem = 0, count = 1 }] },
+    { id = 1, core = 9, partitions = [{ umem = 0, count = 1 }] },
+    { id = 2, core = 5, partitions = [{ umem = 1, count = 1 }] },
+  #  { id = 3, core = 3, partitions = [{ umem = 2, count = 1 }] },
 ]
 
 # ===================================================================
@@ -25,25 +25,27 @@ workers= [
 # ===================================================================
 [[pipelines]]
 name = "generator_pipe"
-workers = [0]
-poll_frequency = 30000
+workers = [0, 1]
+poll_frequency = 40000
 # Target lifecycle state for this pipeline
 # Valid values: "Running", "Paused",
-desired_state = "Running"
+desired_state = "Running delay=1000"
 
 [[pipelines.nodes]]
 id = "generator_engine"
 type = "WasmEngine"
-routes = ["shared_tx_sink", "veth_sink", "drop"]
+routes = ["tx_sink_0", "drop", "drop"]
 labels = ["SentSyn", "SentSynAck", "SentSynAck2", "SentFin", "SentFinPssv", "SentAck4Fin", "SentAck", "SentRst", "RecvSyn", "RecvSynAck", "RecvSynAck2", "RecvFin", "RecvFinPssv", "RecvAck4Fin", "RecvAck", "RecvRst", "Unexpected", "RecvPayload", "SentPayload", "TickDrop", "ToLinux", "Drop", "Watermark"]
 # Node-level state override
 desired_state = "Running"
-args = { umem =0 }
+args= { umem = "0" }
 hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/generator_engine.wasm" }
-#args = { umem = "0", wasm_file_path = "/tmp/wabrix_api-14m-baseline/target/wasm32-wasip2/release/generator_engine.wasm" }
+#hot_args = { wasm_file_path = "/tmp/wabrix_api-14m-baseline/target/wasm32-wasip2/release/generator_engine.wasm" }
+
+#hot_args = { wasm_file_path = "/tmp/wabrix_api-14m-baseline/target/wasm32-wasip2/release/generator_engine.wasm" }
 
 [pipelines.nodes.wasm_data]
-prot = "SYN"
+prot = "UDP"
 dst_ip = "10.10.10.31"
 src_mac = "44:49:88:06:63:38"
 dst_mac = "44:49:88:06:63:39"
@@ -51,22 +53,71 @@ src_ip = "10.10.10.222"
 
 [pipelines.nodes.hot_wasm_data]
 syn_limit = "500M"
-syn_rate = "15M"
+syn_rate = "8000K"
 
 [[pipelines.nodes]]
-id = "shared_tx_sink"
+id = "tx_sink_0"
 type = "BatchTxNode"
 routes = []
-queues = [0]
+queues = [0, 1]
 args= { interface = "enp2s0f0np0", sink_type = "xsk" }
 hot_args= {}
 
 [[pipelines.nodes]]
-id = "veth_sink"
+id = "drop"
+type = "DropNode"
+routes = []
+args= {}
+hot_args= {}
+
+
+[[pipelines]]
+name = "inspector_pipe"
+workers = [2]
+poll_frequency = 1000
+# Target lifecycle state for this pipeline
+# Valid values: "Running", "Paused",
+desired_state = "Running"
+
+[[pipelines.nodes]]
+id = "rx_source"
+type = "BatchRxNode"
+routes = ["rx_parser"]
+queues = [0]
+args= { interface = "enp2s0f1np1", batch_size = "256" }
+hot_args= {}
+
+[[pipelines.nodes]]
+id = "rx_parser"
+type = "FastParserNode"
+routes = ["inspector"]
+args= {}
+hot_args= {}
+
+[[pipelines.nodes]]
+id = "inspector"
+type = "WasmEngine"
+routes = ["drop", "drop", "drop"]
+labels = ["SentSyn", "SentSynAck", "SentSynAck2", "SentFin", "SentFinPssv", "SentAck4Fin", "SentAck", "SentRst", "RecvSyn", "RecvSynAck", "RecvSynAck2", "RecvFin", "RecvFinPssv", "RecvAck4Fin", "RecvAck", "RecvRst", "Unexpected", "RecvPayload", "SentPayload", "TickDrop", "ToLinux", "Drop", "Watermerk"]
+# Node-level state override
+desired_state = "Running"
+args= { umem = "1", wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/inspector_engine.wasm" }
+hot_args= {}
+
+[pipelines.nodes.wasm_data]
+src_ip = "10.10.10.31"
+src_mac = "44:49:88:06:63:39"
+dst_mac = "44:49:88:06:63:38"
+
+[pipelines.nodes.hot_wasm_data]
+
+
+[[pipelines.nodes]]
+id = "tx_sink_1"
 type = "BatchTxNode"
 routes = []
 queues = [0]
-args= { interface = "veth_wabrix" }
+args= { sink_type = "xsk", interface = "enp2s0f1np1" }
 hot_args= {}
 
 [[pipelines.nodes]]

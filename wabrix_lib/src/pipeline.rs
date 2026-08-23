@@ -7,6 +7,7 @@ use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::config::hot_config::{HotNodeData, HotPipelineConfig, NodeDynamicState};
 use crate::generator_node::{GenState, GeneratorNode};
@@ -882,11 +883,19 @@ impl PipelineFactory {
         let final_nodes = built_nodes.into_iter().map(|n| n.unwrap()).collect();
 
         // Store the fully-populated hot config now that all nodes have been initialised.
+        let (lifecycle_state, startup_delay_ms) = match pipeline_instance.desired_state.as_ref() {
+            Some(PipelineLifecycle::RunningDelayed(delay_ms)) => {
+                (Some(PipelineLifecycle::Paused), Some(*delay_ms))
+            }
+            state => (state.cloned(), None),
+        };
         pipeline_rcu.store(Arc::new(HotPipelineConfig {
             fast_nodes,
             name_to_index,
             poll_frequency: pipeline_instance.poll_frequency,
-            lifecycle_state: pipeline_instance.desired_state.clone(),
+            lifecycle_state,
+            startup_delay_ms,
+            delayed_start_at: None,
         }));
 
         // =========================================================
@@ -1113,7 +1122,6 @@ impl PipelineRunner {
             }
         }
     }
-
     /// Execute one iteration of the pipeline
     ///
     /// This follows the Run-To-Completion (RTC) model:
@@ -1123,93 +1131,99 @@ impl PipelineRunner {
     /// 4. Continue until Stop directive or error
     ///
     /// Returns (packets_processed, status_code, timer_work_done)
-    /// - packets_processed: number of packets handled in this run
-    /// - status_code: 0 for success, negative for errors, positive for specific statuses
     pub fn run_iteration(&mut self) -> (u32, i32, bool) {
-        let iteration_start = unsafe { std::arch::x86_64::_rdtsc() };
-        let mut total_packets_this_iteration = 0;
-        let mut timer_work_done = false;
+        // Isolate unsafe hardware intrinsic into a zero-cost local closure
+        let rdtsc = || unsafe { std::arch::x86_64::_rdtsc() };
+        let iteration_start = rdtsc();
 
-        let hot = self.pipeline_rcu.load();
+        let mut hot = self.pipeline_rcu.load_full();
 
-        match hot.lifecycle_state.as_ref() {
-            Some(PipelineLifecycle::Paused) => {
-                // Pipeline intentionally disabled.
-                self.idle_cycles += unsafe { std::arch::x86_64::_rdtsc() } - iteration_start;
+        // Lifecycle Check: Fast-path early return using `if let`
+        if let Some(PipelineLifecycle::Paused) = hot.lifecycle_state.as_ref() {
+            if let Some(delay_ms) = hot.startup_delay_ms {
+                match hot.delayed_start_at {
+                    None => {
+                        let mut scheduled = (*hot).clone();
+                        scheduled.delayed_start_at =
+                            Some(Instant::now() + Duration::from_millis(delay_ms));
+                        self.pipeline_rcu.store(Arc::new(scheduled));
+                    }
+                    Some(deadline) if Instant::now() >= deadline => {
+                        let mut running = (*hot).clone();
+                        running.lifecycle_state = Some(PipelineLifecycle::Running);
+                        running.startup_delay_ms = None;
+                        running.delayed_start_at = None;
+                        self.pipeline_rcu.store(Arc::new(running));
+                        hot = self.pipeline_rcu.load_full();
+                    }
+                    Some(_) => {}
+                }
+            }
+            if matches!(
+                hot.lifecycle_state.as_ref(),
+                Some(PipelineLifecycle::Paused)
+            ) {
+                self.idle_cycles += rdtsc() - iteration_start;
                 return (0, 0, false);
             }
-
-            _ => {
-                // Online
-            }
         }
+
+        let mut total_packets = 0;
+        let mut timer_work_done = false;
 
         // =========================================================
         //    INGRESS: Process all entry points in the DAG
         // =========================================================
-        for i in 0..self.source_indices.len() {
-            let source_idx = self.source_indices[i];
-
+        for source_pos in 0..self.source_indices.len() {
+            let source_idx = self.source_indices[source_pos];
             self.working_batch.clear();
-            log::trace!(
-                "Pipeline '{}': Processing batch from source {}",
-                self.name,
-                source_idx
-            );
+            log::trace!("Pipeline '{}': Processing batch from source {}", self.name, source_idx);
+
             let directive = self.nodes[source_idx].process(&mut self.working_batch);
+            total_packets += self.working_batch.len() as u32;
 
-            let initial_packet_count = self.working_batch.len() as u32;
-            total_packets_this_iteration += initial_packet_count;
-
-            // Route the packets through the rest of the DAG
             self.execute_directive_chain(directive);
         }
 
-        let now = unsafe { std::arch::x86_64::_rdtsc() };
-
+        let now = rdtsc();
         let poll_frequency = hot.poll_frequency.max(1);
-        if now - self.last_timer_poll > self.tsc_freq / poll_frequency {
-            // =========================================================
-            //    TIMERS: Process asynchronous events (e.g., TCP Retransmits)
-            // =========================================================
+
+        // Safely check elapsed time, preventing potential underflow
+        if now.saturating_sub(self.last_timer_poll) > self.tsc_freq / poll_frequency {
             self.last_timer_poll = now;
 
-            for i in 0..self.timer_indices.len() {
-                let idx = self.timer_indices[i];
-
+            // =========================================================
+            //    TIMERS: Process asynchronous events
+            // =========================================================
+            for timer_pos in 0..self.timer_indices.len() {
+                let idx = self.timer_indices[timer_pos];
                 self.working_batch.clear();
 
-                // Call the timer, which may allocate new packets into working_batch
                 let directive = self.nodes[idx].poll_timers(&mut self.working_batch, now);
 
-                // WasmEngine::poll_timers drains working_batch into Directive::Split
-                // sub-batches, so guard on the directive, not working_batch.len().
                 if !matches!(directive, Directive::Stop) {
-                    // We generated packets via a timer! Do not go to sleep!
                     timer_work_done = true;
                     self.execute_directive_chain(directive);
                 }
             }
+
             // =========================================================
-            //    CONTROL EVENTS: Runner acts as the Router at poll_frequency
+            //    CONTROL EVENTS: Runner acts as the Router
             // =========================================================
             if let Some(rx) = &mut self.control_rx {
-                // Drain all pending commands from the Axum API
                 while let Ok(event) = rx.try_recv() {
-                    // Evaluate the wildcard pattern against every node in this pipeline
-                    for (idx, identity) in self.node_identities.iter().enumerate() {
-                        // Assuming you moved the matches_pattern() method onto NodeInstanceId
-                        if identity.matches_pattern(&event.address_pattern) {
+                    // Functional approach: filter and process without nested loops
+                    self.node_identities
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, identity)| identity.matches_pattern(&event.address_pattern))
+                        .for_each(|(idx, identity)| {
                             log::info!(
-                                "Runner routing event opcode {} to node {}",
-                                event.opcode,
-                                identity.node_name
-                            );
-
-                            // Directly invoke the handler on the matched node
+                            "Runner routing event opcode {} to node {}",
+                            event.opcode, identity.node_name
+                        );
                             self.nodes[idx].handle_control_event(&event);
-                        }
-                    }
+                        });
                 }
             }
         }
@@ -1217,16 +1231,17 @@ impl PipelineRunner {
         // =========================================================
         //    STATISTICS & ADAPTIVE POLLING
         // =========================================================
-        let iteration_cycles =
-            unsafe { std::arch::x86_64::_rdtsc() }.saturating_sub(iteration_start);
-        if total_packets_this_iteration > 0 || timer_work_done {
-            self.packets_processed += total_packets_this_iteration as u64;
+        let iteration_cycles = rdtsc().saturating_sub(iteration_start);
+
+        if total_packets > 0 || timer_work_done {
+            self.packets_processed += total_packets as u64;
             self.runs_with_work += 1;
             self.load_cycles = self.load_cycles.saturating_add(iteration_cycles);
-            if timer_work_done && total_packets_this_iteration == 0 {
+
+            if timer_work_done && total_packets == 0 {
                 self.timer_only_runs += 1;
             }
-            (total_packets_this_iteration, 0, timer_work_done)
+            (total_packets, 0, timer_work_done)
         } else {
             self.runs_idle += 1;
             self.idle_cycles = self.idle_cycles.saturating_add(iteration_cycles);

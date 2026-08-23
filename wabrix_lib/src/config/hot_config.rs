@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::time::Instant;
 use wabrix_api::helpers::parse_suffixed_number;
 use wabrix_api::MAX_BATCH_SIZE;
 use wabrix_base::NodeId;
@@ -126,6 +127,10 @@ pub struct HotPipelineConfig {
     pub name_to_index: HashMap<String, usize>,
     /// Hot-changeable — workers read this on each iteration.
     pub lifecycle_state: Option<PipelineLifecycle>,
+    /// Startup delay. While present, lifecycle_state is Paused until the
+    /// monotonic deadline is reached.
+    pub startup_delay_ms: Option<u64>,
+    pub delayed_start_at: Option<Instant>,
     /// Timer poll frequency in Hz. - Hot-changeable
     pub poll_frequency: u64,
 }

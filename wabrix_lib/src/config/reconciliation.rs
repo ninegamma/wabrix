@@ -1,5 +1,5 @@
 use crate::config::hot_config::SharedSystemState;
-use crate::toml_parser::{NodeConfig, PipelineConfig, WabricksConfig};
+use crate::toml_parser::{NodeConfig, PipelineConfig, PipelineLifecycle, WabricksConfig};
 use hashbrown::HashMap as WasmHashMap;
 use postcard::to_allocvec;
 use std::collections::HashMap;
@@ -152,7 +152,18 @@ pub fn reconcile_config(
             let current_ptr = rcu.load();
             let mut offline_config = (**current_ptr).clone();
 
-            offline_config.lifecycle_state = target_pipeline.lifecycle_state.clone();
+            match target_pipeline.lifecycle_state.as_ref() {
+                Some(PipelineLifecycle::RunningDelayed(delay_ms)) => {
+                    offline_config.lifecycle_state = Some(PipelineLifecycle::Paused);
+                    offline_config.startup_delay_ms = Some(*delay_ms);
+                    offline_config.delayed_start_at = None;
+                }
+                state => {
+                    offline_config.lifecycle_state = state.cloned();
+                    offline_config.startup_delay_ms = None;
+                    offline_config.delayed_start_at = None;
+                }
+            }
 
             for target_node in &target_pipeline.nodes {
                 if let Some(idx) = offline_config.name_to_index.get(&target_node.id) {
