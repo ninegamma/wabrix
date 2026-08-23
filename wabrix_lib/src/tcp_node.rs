@@ -10,22 +10,33 @@ use wabrix_base::interface::Pdu;
 use wabrix_base::{ControlEvent, Directive, Node, NodeId};
 
 use wabrix_api::connections::{ConnectionPool, FlowKey, TcpState};
+use wabrix_api::exports::Pdu0;
 use wabrix_api::headers::{IpHeader, MacHeader, TcpHeader};
 use wabrix_api::helpers::{parse_ip, parse_mac, parse_suffixed_number};
+use wabrix_api::packet::Packet;
 use wabrix_api::MAX_BATCH_SIZE;
 use wabrix_api::{PluginOpcode, StandardOpcode};
 
 use wabrix_api::tcp_common::{
-    run_tcp_state_machine, write_tcp_reply, PacketGenerator, TcpEngineConfig, TimeoutStack, FLAG_ACK,
-    FLAG_FIN, FLAG_RST, FLAG_SYN, PORT_END_RANGE, PORT_START_RANGE, STAT_COUNT, STAT_DROP,
-    STAT_RECV_RST, STAT_RECV_SYN, STAT_SENT_FIN, STAT_SENT_RST, STAT_SENT_SYN, STAT_SENT_SYNACK,
-    STAT_TO_LINUX, STAT_UNEXPECTED,
+    run_tcp_state_machine, write_tcp_packet, PacketGenerator, TcpEngineConfig, TimeoutStack,
+    FLAG_ACK, FLAG_FIN, FLAG_RST, FLAG_SYN, PORT_END_RANGE, PORT_START_RANGE, STAT_COUNT,
+    STAT_DROP, STAT_RECV_RST, STAT_RECV_SYN, STAT_SENT_FIN, STAT_SENT_RST, STAT_SENT_SYN,
+    STAT_SENT_SYNACK, STAT_TO_LINUX, STAT_UNEXPECTED,
 };
 
 const MAX_CONNECTIONS: usize = 524_288;
 const ROUTE_TX: u32 = 0;
 const ROUTE_LINUX: u32 = 1;
 const ROUTE_DROP: u32 = 2;
+
+/// Creates a stack-only high-level packet view over a native PDU.
+///
+/// `Pdu` and `Pdu0` intentionally have the same `repr(C)` layout. Native
+/// UMEM addresses are already absolute, so the packet view uses a zero base.
+#[inline(always)]
+unsafe fn packet_view(pdu: &mut Pdu) -> Packet<'_> {
+    Packet::new(&mut *(pdu as *mut Pdu as *mut Pdu0), 0)
+}
 
 pub struct TcpNode {
     id: NodeId,
@@ -453,16 +464,15 @@ impl Node for TcpNode {
                 continue;
             }
 
-            let data_ptr = pdu.data_address(0);
-
             unsafe {
                 if state == TcpState::Established || state == TcpState::SynReceived {
                     if let Some(conn) = self.connections.get_mut(&flow_key) {
                         conn.state = TcpState::FinWait1;
                         conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
                     }
-                    let len = write_tcp_reply(
-                        data_ptr,
+                    let mut packet = packet_view(&mut pdu);
+                    write_tcp_packet(
+                        &mut packet,
                         reply_src_mac,
                         reply_dst_mac,
                         flow_key.2,
@@ -473,14 +483,14 @@ impl Node for TcpNode {
                         rcv_nxt,
                         FLAG_FIN | FLAG_ACK,
                     );
-                    pdu.w.set_data_length(len);
                     self.stats[STAT_SENT_FIN] += 1;
                     batch.push(pdu).ok();
                     generated += 1;
                 } else {
                     self.connections.remove(&flow_key);
-                    let len = write_tcp_reply(
-                        data_ptr,
+                    let mut packet = packet_view(&mut pdu);
+                    write_tcp_packet(
+                        &mut packet,
                         reply_src_mac,
                         reply_dst_mac,
                         flow_key.2,
@@ -491,7 +501,6 @@ impl Node for TcpNode {
                         rcv_nxt,
                         FLAG_RST | FLAG_ACK,
                     );
-                    pdu.w.set_data_length(len);
                     self.stats[STAT_SENT_RST] += 1;
                     batch.push(pdu).ok();
                     generated += 1;
@@ -544,9 +553,9 @@ impl Node for TcpNode {
                     current_tsc,
                 );
 
-                let data_ptr = pdu.data_address(0);
-                let len = write_tcp_reply(
-                    data_ptr,
+                let mut packet = packet_view(&mut pdu);
+                write_tcp_packet(
+                    &mut packet,
                     reply_src_mac,
                     reply_dst_mac,
                     our_ip,
@@ -557,7 +566,6 @@ impl Node for TcpNode {
                     0,
                     FLAG_SYN,
                 );
-                pdu.w.set_data_length(len);
                 self.stats[STAT_SENT_SYN] += 1;
                 batch.push(pdu).ok();
                 generated += 1;
@@ -710,8 +718,9 @@ unsafe fn handle_tcp_packet(
     if let Some((reply_flags, reply_seq, reply_ack)) = action_opt {
         let reply_dst_mac = incoming_src_mac;
         let reply_src_mac = config.src_mac.unwrap_or(incoming_dst_mac);
-        let len = write_tcp_reply(
-            data,
+        let mut packet = packet_view(pdu);
+        write_tcp_packet(
+            &mut packet,
             reply_src_mac,
             reply_dst_mac,
             dst_ip,
@@ -722,7 +731,6 @@ unsafe fn handle_tcp_packet(
             reply_ack,
             reply_flags,
         );
-        pdu.w.set_data_length(len);
         return ROUTE_TX;
     }
 

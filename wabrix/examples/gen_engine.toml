@@ -27,7 +27,7 @@ workers= [
 [[pipelines]]
 name = "generator_pipe"
 workers = [0, 1]
-poll_frequency = 30000
+poll_frequency = 40000
 # Target lifecycle state for this pipeline
 # Valid values: "Running", "Paused",
 desired_state = "Running"
@@ -53,8 +53,8 @@ dst_mac = "44:49:88:06:63:39"
 src_ip = "10.10.10.222"
 
 [pipelines.nodes.hot_wasm_data]
-syn_limit = "1000M"
-syn_rate = "15M"
+syn_limit = "500M"
+syn_rate = "20000K"
 
 [[pipelines.nodes]]
 id = "shared_tx_sink"

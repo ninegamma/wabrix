@@ -809,7 +809,11 @@ impl BatchRx for XSocketRx {
             let local_idx = (desc.addr() as u32) >> frame_size_log2; // local_idx is wrt. current Umem
             let global_idx = encode_global_frame(self.config.umem_config.group_id, local_idx);
 
-            let pdu = Pdu::new(*desc, global_idx, worker_id, bus_ptr, frame_size_log2);
+            let mut pdu = Pdu::new(*desc, global_idx, worker_id, bus_ptr, frame_size_log2);
+            // Capture the host TSC when the RX descriptor is converted into a
+            // pipeline packet. The Wasm-facing timestamp is carried with the
+            // PDU for downstream telemetry and processing.
+            pdu.w.timestamp = unsafe { core::arch::x86_64::_rdtsc() };
 
             // Since we ALREADY calculated max_to_pull to guarantee capacity,
             // we can confidently unwrap/ignore the error branch.
