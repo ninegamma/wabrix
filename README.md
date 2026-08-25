@@ -38,6 +38,28 @@ cd wabrix
 cargo build -p wabrix --release --features wasm
 ```
 
+### Runtime Diagnostics
+
+The generator’s optional `runtime-diagnostics` feature records timer scheduling
+data for rate-control investigations, including timer calls, credited cycles,
+available-frame histograms, cap hits, timestamps, and the final accumulator.
+The host-side feature also adds final timer counter summaries with pipeline and
+worker identity. These diagnostics are disabled by default because they add
+state and work to the timer path.
+
+Enable host diagnostics when building Wabrix:
+
+```bash
+cargo build -p wabrix --release --features "wasm,runtime-diagnostics"
+```
+
+Build the generator plugin with its extended completion log separately:
+
+```bash
+cargo build -p generator_engine --release \
+  --target wasm32-wasip2 --features runtime-diagnostics
+```
+
 *(Detailed installation instructions for XDP drivers and NIC-specific tuning are located in `/docs`.)*
 
 ## 🏢 The Ecosystem & Enterprise

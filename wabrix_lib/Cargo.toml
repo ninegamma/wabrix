@@ -54,6 +54,7 @@ libbpf-cargo = { workspace = true }
 [features]
 performance = []
 profiling = []
+runtime-diagnostics = ["wabrix_wasm/runtime-diagnostics"]
 # Create a 'wasm' feature that enables the dependency
 wasm = ["dep:wabrix_wasm"]
 default = ["profiling", "wasm"]

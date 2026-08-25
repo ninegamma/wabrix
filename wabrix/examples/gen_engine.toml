@@ -54,7 +54,7 @@ src_ip = "10.10.10.222"
 
 [pipelines.nodes.hot_wasm_data]
 syn_limit = "500M"
-syn_rate = "1000K"
+syn_rate = "8000K"
 
 [[pipelines.nodes]]
 id = "tx_sink_0"

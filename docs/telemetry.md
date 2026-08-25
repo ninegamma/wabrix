@@ -8,6 +8,30 @@ The telemetry system bridges this ultra-fast "data plane" with the much slower "
 
 `TelemetryMetrics` is the internal link directly to the high-performance worker threads.
 
+## Runtime diagnostics
+
+The optional `runtime-diagnostics` feature provides timer-path diagnostics for
+the generator engine. It reports the number of `process_timers()` calls,
+rate-weighted timer cycles credited, requested and available frames, cap-hit
+counts, maximum available frames, first and last timer TSC values, the final
+cycle accumulator, and available/final-frame histograms when a generation run
+completes.
+
+The host `wabrix_wasm` crate exposes a matching `runtime-diagnostics` feature
+through `wabrix_lib` and the `wabrix` binary. When enabled, it logs final timer
+counters for each WASM node, including pipeline name, worker ID, worker index,
+allocation shortfalls, routing totals, and mailbox errors.
+
+Diagnostics are disabled by default. Enable host-side logging with:
+
+```bash
+cargo build -p wabrix --release --features "wasm,runtime-diagnostics"
+```
+
+Enable the extended generator-plugin completion log separately with
+`--features runtime-diagnostics` when building `generator_engine` for
+`wasm32-wasip2`.
+
 Notice that it doesn't hold standard numbers (`u64`); instead, it holds `Arc<AtomicU64>`.
 * **What it is:** A collection of thread-safe memory pointers.
 * **How it's used:** When a Wasm plugin or native node is created, it allocates an `AtomicU64` counter. It keeps one pointer for itself (to increment during packet processing) and gives a clone of that pointer to `TelemetryMetrics`.

@@ -24,4 +24,5 @@ path = "src/lib.rs"
 [features]
 performance = []
 profiling = []
+runtime-diagnostics = []
 default = ["profiling"]

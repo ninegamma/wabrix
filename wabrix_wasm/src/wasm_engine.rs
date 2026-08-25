@@ -37,8 +37,11 @@ bindgen!({
 
 pub struct WasmEngine {
     id: NodeId,
+    #[cfg(feature = "runtime-diagnostics")]
     pipeline_name: String,
+    #[cfg(feature = "runtime-diagnostics")]
     worker_id: usize,
+    #[cfg(feature = "runtime-diagnostics")]
     worker_index: usize,
     /// Wasmtime state: Store holds the UMEM handle via MyHostState
     store: Store<MyHostState>,
@@ -100,6 +103,9 @@ impl WasmEngine {
         platform_data: &PlatformData,
         mailbox_offset: u32,
     ) -> Result<Self, String> {
+        #[cfg(not(feature = "runtime-diagnostics"))]
+        let _ = (&pipeline_name, worker_id, worker_index);
+
         let timer_diagnostics_enabled = wasm_data
             .get("syn_rate")
             .and_then(|rate| parse_suffixed_number(rate).ok())
@@ -187,8 +193,11 @@ impl WasmEngine {
 
         Ok(Self {
             id,
+            #[cfg(feature = "runtime-diagnostics")]
             pipeline_name,
+            #[cfg(feature = "runtime-diagnostics")]
             worker_id,
+            #[cfg(feature = "runtime-diagnostics")]
             worker_index,
             store,
             bindings,
@@ -735,6 +744,7 @@ impl Drop for WasmEngine {
             return;
         }
 
+        #[cfg(feature = "runtime-diagnostics")]
         log::info!(
             "NODE {}: final timer runtime counters: pipeline='{}', worker_id={}, worker_index={}, requested={}, allocated={}, unallocated={}, routed={}, retained={}, allocation_shortfalls={}, batch_mismatches={}, mailbox_conservation_failures={}, route_counts={:?}",
             self.id,
