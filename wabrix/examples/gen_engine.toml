@@ -6,8 +6,6 @@ ifaces= [
 umem= [
     { id = 0, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 2, reserved = 131072 },
     { id = 1, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 2, reserved = 131072 },
-    { id = 2, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 1, reserved = 131072 },
-#    { id = 2, frame_size = 2048, frame_count = 131072, fq_size = 16384, cq_size = 16384, head_room = 128, partitions = 4, reserved = 20480 },
 ]
 xsk= [
     { iface = "enp2s0f0np0", queues = [0, 1], umem = 0, rxq_size = 16384, txq_size = 16384, zerocopy = true, xdp_mode = "auto" },
@@ -18,7 +16,6 @@ workers= [
     { id = 0, core = 2, partitions = [{ umem = 0, count = 1 }] },
     { id = 1, core = 3, partitions = [{ umem = 0, count = 1 }] },
     { id = 2, core = 4, partitions = [{ umem = 1, count = 1 }] },
-  #  { id = 3, core = 5, partitions = [{ umem = 1, count = 1 }] },
 ]
 
 # ===================================================================
@@ -54,7 +51,7 @@ src_ip = "10.10.10.222"
 
 [pipelines.nodes.hot_wasm_data]
 syn_limit = "500M"
-syn_rate = "8000K"
+syn_rate = "8500K"
 
 [[pipelines.nodes]]
 id = "tx_sink_0"
