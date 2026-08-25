@@ -197,7 +197,7 @@ impl Display for NodeId {
 ///no support of cloning here, because we use Arc
 #[derive(Debug)]
 pub struct ControlEvent {
-    /// address pattern like "w0/*/rx_node" or "*/*/*/WasmInspectorNode"
+    /// address pattern like "w0/*/rx_node" or "*/*/*/WasmEngine"
     /// The format is: {worker}/{pipeline}/{node_name}/{node_type}
     /// Missing trailing segments are implicitly treated as wildcards.
     pub address_pattern: String,

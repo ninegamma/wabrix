@@ -48,6 +48,7 @@ pub struct XSocket {
 }
 
 const MAX_FILL: usize = 4096;
+const RX_DIAGNOSTIC_LOG_INTERVAL: u64 = 10_000;
 /// Split components for independent RX and TX access
 /// These DO NOT own the frame registry - it's accessed via thread-local storage
 pub struct XSocketRx {
@@ -68,7 +69,17 @@ pub struct XSocketRx {
     #[allow(dead_code)]
     last_logged_block: usize, // helper for logging
     fill_deficit: usize, // for more targeted replenishing
-    fd: RawFd,           // file descriptor of the AF_XDP socket
+    // RX Fill Queue diagnostics. These counters are deliberately local to the
+    // socket/worker so they can be updated without atomics in the hot path.
+    fill_replenish_attempts: u64,
+    fill_lock_busy: u64,
+    fill_registry_empty: u64,
+    fill_ring_full: u64,
+    fill_zero_produced: u64,
+    fill_partial_submissions: u64,
+    max_fill_deficit: usize,
+    //last_diagnostic_received: u64,
+    fd: RawFd, // file descriptor of the AF_XDP socket
     // Profiling fields
     pub prof_reclaim_replenish_cycles: u64,
     pub prof_replenish_cycles: u64,
@@ -312,6 +323,14 @@ impl XSocket {
             empty_spins: 0,
             last_logged_block: 0,
             fill_deficit: 0,
+            fill_replenish_attempts: 0,
+            fill_lock_busy: 0,
+            fill_registry_empty: 0,
+            fill_ring_full: 0,
+            fill_zero_produced: 0,
+            fill_partial_submissions: 0,
+            max_fill_deficit: 0,
+            //last_diagnostic_received: 0,
             fd,
             prof_reclaim_replenish_cycles: 0,
             prof_replenish_cycles: 0,
@@ -419,12 +438,20 @@ impl XSocketRx {
             return 0;
         }
 
+        self.fill_replenish_attempts += 1;
+
         if requested_count > MAX_FILL {
-            log::warn!(
-                "Requested {} frames to replenish Fill Queue, but max is {}",
-                requested_count,
-                MAX_FILL
-            );
+            if self
+                .fill_replenish_attempts
+                .is_multiple_of(RX_DIAGNOSTIC_LOG_INTERVAL)
+            {
+                log::warn!(
+                    "Requested {} frames to replenish Fill Queue, but max is {} (attempt {})",
+                    requested_count,
+                    MAX_FILL,
+                    self.fill_replenish_attempts
+                );
+            }
         }
 
         let requested_count = requested_count.min(MAX_FILL);
@@ -433,6 +460,17 @@ impl XSocketRx {
         let registry_ptr = get_worker_frame_registry();
         if registry_ptr.is_null() {
             // This happens if called before worker initialization is complete
+            self.fill_registry_empty += 1;
+            if self
+                .fill_registry_empty
+                .is_multiple_of(RX_DIAGNOSTIC_LOG_INTERVAL)
+            {
+                log::warn!(
+                    "{}: Fill Queue replenishment has no worker registry ({} occurrences)",
+                    self.source_id(),
+                    self.fill_registry_empty
+                );
+            }
             return 0;
         }
         let frame_registry = unsafe { &mut *registry_ptr };
@@ -448,7 +486,21 @@ impl XSocketRx {
         // This absolutely eliminates the 30,000 cycle OS context-switch penalty.
         let mut fq = match self.fill_queue.try_lock() {
             Some(guard) => guard,
-            None => return 0,
+            None => {
+                self.fill_lock_busy += 1;
+                if self
+                    .fill_lock_busy
+                    .is_multiple_of(RX_DIAGNOSTIC_LOG_INTERVAL)
+                {
+                    log::warn!(
+                        "{}: Fill Queue replenishment skipped because queue lock was busy ({} occurrences, deficit={})",
+                        self.source_id(),
+                        self.fill_lock_busy,
+                        self.fill_deficit
+                    );
+                }
+                return 0;
+            }
         };
 
         // Check Capacity
@@ -468,6 +520,20 @@ impl XSocketRx {
         }
 
         if batch_size == 0 {
+            self.fill_ring_full += 1;
+            if self
+                .fill_ring_full
+                .is_multiple_of(RX_DIAGNOSTIC_LOG_INTERVAL)
+            {
+                log::warn!(
+                    "{}: Fill Queue has no free slots while replenishing ({} occurrences, requested={}, nb_free={}, deficit={})",
+                    self.source_id(),
+                    self.fill_ring_full,
+                    requested_count,
+                    nb_free,
+                    self.fill_deficit
+                );
+            }
             return 0; // Ring is full, nothing to do
         }
 
@@ -485,6 +551,20 @@ impl XSocketRx {
         if actual_batch == 0 {
             // No frames left! This implies the worker is processing too slowly
             // or holding too many frames in buffers.
+            self.fill_registry_empty += 1;
+            if self
+                .fill_registry_empty
+                .is_multiple_of(RX_DIAGNOSTIC_LOG_INTERVAL)
+            {
+                log::warn!(
+                    "{}: Frame registry returned no frames for Fill Queue ({} occurrences, requested={}, free_frames={}, deficit={})",
+                    self.source_id(),
+                    self.fill_registry_empty,
+                    batch_size,
+                    frame_registry.total_free_frames(),
+                    self.fill_deficit
+                );
+            }
             return 0;
         }
 
@@ -548,6 +628,37 @@ impl XSocketRx {
             );
 
             self.total_produced += produced;
+        } else {
+            self.fill_zero_produced += 1;
+            if self
+                .fill_zero_produced
+                .is_multiple_of(RX_DIAGNOSTIC_LOG_INTERVAL)
+            {
+                log::warn!(
+                    "{}: Fill Queue produced zero frames despite {} prepared ({} occurrences, deficit={})",
+                    self.source_id(),
+                    actual_batch,
+                    self.fill_zero_produced,
+                    self.fill_deficit
+                );
+            }
+        }
+
+        if produced < actual_batch && produced > 0 {
+            self.fill_partial_submissions += 1;
+            if self
+                .fill_partial_submissions
+                .is_multiple_of(RX_DIAGNOSTIC_LOG_INTERVAL)
+            {
+                log::warn!(
+                    "{}: Partial Fill Queue submission: produced {} of {} frames ({} occurrences, deficit={})",
+                    self.source_id(),
+                    produced,
+                    actual_batch,
+                    self.fill_partial_submissions,
+                    self.fill_deficit
+                );
+            }
         }
 
         let t6 = unsafe { std::arch::x86_64::_rdtsc() };
@@ -566,7 +677,8 @@ impl XSocketRx {
 
                 // Only print if the spike is absurdly high (e.g., > 50,000 cycles)
                 log::warn!(
-                    "MONSTER SPIKE DETECTED: Replenish of {} frames took {} cycles!",
+                    "MONSTER SPIKE DETECTED on socket {}: Replenish of {} frames took {} cycles!",
+                    self.source_id(),
                     produced,
                     duration
                 );
@@ -625,17 +737,31 @@ impl BatchRx for XSocketRx {
             }
             frame_registry.process_returns();
         }
+        const FILL_REPLENISH_THRESHOLD: usize = 1024;
 
         // 2. Replenish fill queue so NIC has buffers to write into
         // AGGRESSIVE REPLENISHING
         // Always try to keep the fill queue as full as possible.
         // The kernel drops packets if the fill queue is empty when packets arrive.
         //let fq_size = self.config.umem_config.fq_size as usize;
-        if self.fill_deficit >= 1024 {
+        self.max_fill_deficit = self.max_fill_deficit.max(self.fill_deficit);
+        if self.fill_deficit >= FILL_REPLENISH_THRESHOLD {
             let produced = self.replenish_fill_queue(self.fill_deficit);
             self.fill_deficit = self.fill_deficit.saturating_sub(produced);
-            if self.fill_deficit > 2048 {
-                log::warn!("Fill deficit is too high: {}", self.fill_deficit);
+            if self.fill_deficit > 2048
+                && self
+                    .fill_replenish_attempts
+                    .is_multiple_of(RX_DIAGNOSTIC_LOG_INTERVAL)
+            {
+                log::warn!(
+                    "{}: Fill deficit is high: {} (max observed={}, replenishments={}, lock_busy={}, no_frames={})",
+                    self.source_id(),
+                    self.fill_deficit,
+                    self.max_fill_deficit,
+                    self.fill_replenish_attempts,
+                    self.fill_lock_busy,
+                    self.fill_registry_empty
+                );
             }
         }
 
@@ -773,9 +899,52 @@ impl BatchRx for XSocketRx {
             }
             self.empty_spins = 0;
         }
+        // The RX ring is no longer accessed after the consume/wakeup stage.
+        // Release its lock before periodic diagnostics query the socket stats.
+        drop(rx_guard);
         // ⏱️ END STAGE 3
 
         self.total_received += rcvd;
+
+        /*
+        // Emit a periodic summary rather than logging every normal refill.
+        // This gives enough information to correlate software drops with FQ
+        // starvation while keeping the packet path quiet.
+        let received = self.total_received as u64;
+        if received >= self.last_diagnostic_received + 100_000_000 {
+            self.last_diagnostic_received = received;
+            let xdp_stats = {
+                let rx_guard = self.rx_queue.lock();
+                rx_guard.fd().xdp_statistics()
+            };
+            match xdp_stats {
+                Ok(stats) => log::info!(
+                    "{}: RX diagnostics: received={}, produced={}, deficit={}, max_deficit={}, replenish_attempts={}, lock_busy={}, no_frames={}, ring_full={}, zero_produced={}, partial_submissions={}, xdp_dropped={}, xdp_invalid_descs={}, xdp_rx_ring_full={}, xdp_fill_ring_empty={}",
+                    self.source_id(),
+                    received,
+                    self.total_produced,
+                    self.fill_deficit,
+                    self.max_fill_deficit,
+                    self.fill_replenish_attempts,
+                    self.fill_lock_busy,
+                    self.fill_registry_empty,
+                    self.fill_ring_full,
+                    self.fill_zero_produced,
+                    self.fill_partial_submissions,
+                    stats.rx_dropped(),
+                    stats.rx_invalid_descs(),
+                    stats.rx_ring_full(),
+                    stats.rx_fill_ring_empty_descs()
+                ),
+                Err(error) => log::warn!(
+                    "{}: failed to read AF_XDP RX diagnostics after {} packets: {}",
+                    self.source_id(),
+                    received,
+                    error
+                ),
+            }
+        }
+        */
 
         // If the RX ring is STILL empty after the kick (or if no kick was needed),
         // return Ok(0) instantly and spin in zero-overhead user-space.
@@ -832,7 +1001,8 @@ impl BatchRx for XSocketRx {
             if self.prof_started {
                 self.prof_total_packets += rcvd as u64;
             }
-            const PRINT_INTERVAL_PACKETS: u64 = 10_240_000;
+            /*
+            const PRINT_INTERVAL_PACKETS: u64 = 102_400_000;
             // Print summary every PRINT_INTERVAL_PACKETS and reset counters
             if self.prof_started && self.prof_total_packets >= PRINT_INTERVAL_PACKETS {
                 let total = self.prof_total_packets;
@@ -844,7 +1014,7 @@ impl BatchRx for XSocketRx {
                 let s4_cpp = self.prof_pdu_batch_cycles / total;
                 let total_cpp = s1_cpp + s2_cpp + s3_cpp + s4_cpp;
 
-                log::trace!(
+                log::info!(
                     "\n=== CPU Cycle Breakdown (Per Packet Average over {} pkts) ===\n\
                      1. Reclaim & Replenish : {:>4} cycles\n\
                      2. Lockless Consume    : {:>4} cycles\n\
@@ -871,6 +1041,7 @@ impl BatchRx for XSocketRx {
                 self.prof_empty_spin_cycles = 0;
                 self.prof_total_packets = 0;
             }
+             */
         }
 
         Ok(rcvd)

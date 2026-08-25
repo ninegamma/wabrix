@@ -160,7 +160,7 @@ Each pipeline contains an array of node tables declared with `[[pipelines.nodes]
 | `type` | string | **yes** | Node type (see node types below). |
 | `routes` | array of strings | no | Node IDs that receive packets from this node. Default `[]`. All referenced IDs must exist in the same pipeline. |
 | `queues` | array of integers | no | Hardware queue IDs. Length must equal the pipeline's `workers` array length; `queues[i]` maps to `workers[i]`. Required for `BatchRxNode` and `BatchTxNode` when binding to a hardware queue. |
-| `labels` | array of strings | no | Metric label names (used by `WasmInspectorNode`). |
+| `labels` | array of strings | no | Metric label names for WASM output routes. |
 | `args` | inline table | no | Node-specific key/value arguments. Values may be strings, integers, floats, or booleans (non-string values are coerced to strings). Default `{}`. |
 | `hot_args` | inline table or table section | no | Live-updatable key/value arguments. Same value types as `args`. Take precedence over `args` for the same key. Always serialized as an inline table on save. See [Hot Args](#hot-args) below. |
 | `wasm_data` | inline table | no | Initial state/configuration passed into WASM modules. Same value types as `args`. |
@@ -271,22 +271,9 @@ Runs a WASM module that processes each incoming packet and routes output.
 | `args` key | Required | Description |
 |------------|----------|-------------|
 | `wasm_file_path` | **yes** | Absolute path to the `.wasm` module. |
-| `umem` | **yes** | UMEM `id` frames belong to. |
+| `umem` | **yes** | UMEM `id` frames belong to. For multi-worker pipelines, this may be an array with one value per worker. |
 
 `wasm_data` key/value pairs are passed as initial state to the WASM module.
-
----
-
-#### `WasmInspectorNode` — WASM-based packet classifier
-
-Classifies packets with a WASM module and routes them to one of several output nodes. All upstream nodes must deliver frames from the same UMEM.
-
-| `args` key | Required | Description |
-|------------|----------|-------------|
-| `umem` | **yes** | UMEM `id` frames belong to. Must match every upstream source. |
-| `wasm_file_path` | **yes** | Absolute path to the `.wasm` classifier module. |
-
-`labels` array provides metric names for each output route (index-aligned with `routes`).
 
 ---
 
@@ -411,5 +398,5 @@ workers = [1]
 | Worker `core` | < total logical CPUs on the system |
 | Node `queues` length | Must equal pipeline `workers` length |
 | `pps` format | Integer, decimal, `k`/`m`/`g` suffix, or `"max"` |
-| WasmInspectorNode UMEM | All upstream sources must use the same UMEM |
+| WasmEngine UMEM | All upstream sources must use a UMEM listed in the node binding; arrays map entries to pipeline workers |
 | Partition allocation | Total requested across workers ≤ UMEM `partitions` |

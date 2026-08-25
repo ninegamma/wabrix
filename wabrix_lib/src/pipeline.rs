@@ -718,9 +718,9 @@ impl PipelineFactory {
                     ))
                 }
 
-                // === 7. Wasm Nodes (Inspector & Engine) ===
+                // === 7. Wasm Engine ===
                 #[cfg(feature = "wasm")]
-                "WasmInspectorNode" | "WasmEngine" => {
+                "WasmEngine" => {
                     let node_type = node_instance.node_config.node_type.as_str();
 
                     let wasm_path = node_instance
@@ -853,9 +853,18 @@ impl PipelineFactory {
                         }
                     }
 
+                    // Engine plugins need the node batch size while planning timers,
+                    // before the first process-batch callback is made.
+                    if let Some(batch_size) = node_instance.node_config.args.get("batch_size") {
+                        combined_wasm_data.insert("batch_size".to_string(), batch_size.clone());
+                    }
+
                     use wabrix_wasm::WasmEngine;
                     Box::new(WasmEngine::new(
                         my_id.clone(),
+                        pipeline_instance.name.clone(),
+                        worker_id,
+                        pipeline_instance.worker_index,
                         manager,
                         wasm_path,
                         routing_table,
@@ -1177,7 +1186,11 @@ impl PipelineRunner {
         for source_pos in 0..self.source_indices.len() {
             let source_idx = self.source_indices[source_pos];
             self.working_batch.clear();
-            log::trace!("Pipeline '{}': Processing batch from source {}", self.name, source_idx);
+            log::trace!(
+                "Pipeline '{}': Processing batch from source {}",
+                self.name,
+                source_idx
+            );
 
             let directive = self.nodes[source_idx].process(&mut self.working_batch);
             total_packets += self.working_batch.len() as u32;
@@ -1219,9 +1232,10 @@ impl PipelineRunner {
                         .filter(|(_, identity)| identity.matches_pattern(&event.address_pattern))
                         .for_each(|(idx, identity)| {
                             log::info!(
-                            "Runner routing event opcode {} to node {}",
-                            event.opcode, identity.node_name
-                        );
+                                "Runner routing event opcode {} to node {}",
+                                event.opcode,
+                                identity.node_name
+                            );
                             self.nodes[idx].handle_control_event(&event);
                         });
                 }

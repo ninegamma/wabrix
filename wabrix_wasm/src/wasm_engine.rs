@@ -37,6 +37,9 @@ bindgen!({
 
 pub struct WasmEngine {
     id: NodeId,
+    pipeline_name: String,
+    worker_id: usize,
+    worker_index: usize,
     /// Wasmtime state: Store holds the UMEM handle via MyHostState
     store: Store<MyHostState>,
     /// The generated bindings struct (named after the 'world' in CamelCase)
@@ -84,6 +87,9 @@ impl WasmEngine {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: NodeId,
+        pipeline_name: String,
+        worker_id: usize,
+        worker_index: usize,
         manager: &WasmManager,
         wasm_file_path: &str,
         routing_table: Vec<NodeId>, // Accept any number of routes
@@ -181,6 +187,9 @@ impl WasmEngine {
 
         Ok(Self {
             id,
+            pipeline_name,
+            worker_id,
+            worker_index,
             store,
             bindings,
             routing_table,
@@ -495,8 +504,9 @@ impl Node for WasmEngine {
             };
 
             let timeout_frames_requested = timer_plan.timeout_frames;
-            let syn_frames_requested = timer_plan.syn_frames;
-            let n_requested_frames = timeout_frames_requested.saturating_add(syn_frames_requested);
+            let packet_frames_requested = timer_plan.packet_frames;
+            let n_requested_frames =
+                timeout_frames_requested.saturating_add(packet_frames_requested);
 
             if n_requested_frames == 0 {
                 // Service force_sync_flag even when idle so final WASM state is
@@ -561,7 +571,7 @@ impl Node for WasmEngine {
                     batch.clear();
                     // SYN frames are placed first so an UMEM shortfall cannot
                     // consume the SYN reservation with timeout work.
-                    let allocated_syn_frames = allocated.min(syn_frames_requested as usize);
+                    let allocated_syn_frames = allocated.min(packet_frames_requested as usize);
                     let allocated_timeout_frames = allocated
                         .saturating_sub(allocated_syn_frames)
                         .min(timeout_frames_requested as usize);
@@ -716,5 +726,31 @@ impl Node for WasmEngine {
     #[cfg(feature = "profiling")]
     fn profiling_cycles(&self) -> u64 {
         self.total_cycles
+    }
+}
+
+impl Drop for WasmEngine {
+    fn drop(&mut self) {
+        if !self.timer_diagnostics_enabled {
+            return;
+        }
+
+        log::info!(
+            "NODE {}: final timer runtime counters: pipeline='{}', worker_id={}, worker_index={}, requested={}, allocated={}, unallocated={}, routed={}, retained={}, allocation_shortfalls={}, batch_mismatches={}, mailbox_conservation_failures={}, route_counts={:?}",
+            self.id,
+            self.pipeline_name,
+            self.worker_id,
+            self.worker_index,
+            self.timer_requested_frames,
+            self.timer_allocated_frames,
+            self.timer_requested_frames
+                .saturating_sub(self.timer_allocated_frames),
+            self.timer_routed_frames,
+            self.timer_retained_frames,
+            self.timer_allocation_shortfalls,
+            self.timer_batch_mismatches,
+            self.mailbox_conservation_failures,
+            self.timer_route_counts,
+        );
     }
 }

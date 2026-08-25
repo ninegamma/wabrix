@@ -29,7 +29,7 @@ impl NodeInstanceId {
         }
     }
 
-    /// Evaluates a target pattern like "w0/*/rx_node" or "*/*/*/WasmInspectorNode"
+    /// Evaluates a target pattern like "w0/*/rx_node" or "*/*/*/WasmEngine"
     /// The format is: {worker}/{pipeline}/{node_name}/{node_type}
     /// Missing trailing segments are implicitly treated as wildcards.
     pub fn matches_pattern(&self, pattern: &str) -> bool {

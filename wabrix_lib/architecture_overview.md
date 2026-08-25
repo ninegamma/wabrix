@@ -53,7 +53,7 @@ The nervous system that allows the Axum GUI to modify the data plane at 40M+ pps
 ## 6. Telemetry & Observability
 
 * **`TelemetryRegistry`:** A centralized, thread-safe registry created during the `SystemBuilder` phase.
-* **Metrics Gathering:** Telemetry nodes (`TelemetryNode`, `WasmInspectorNode`) register atomic counters or localized metrics maps here.
+* **Metrics Gathering:** WASM engines register atomic counters or localized metrics maps here.
 * **Background Polling:** A dedicated Tokio background task periodically scrapes this registry and pushes formatted JSON statistics to the frontend via WebSockets, ensuring the fast path never wastes cycles formatting strings.
 
 ---

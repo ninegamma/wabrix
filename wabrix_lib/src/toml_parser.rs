@@ -282,6 +282,22 @@ where
                     toml::Value::Integer(i) => i.to_string(),
                     toml::Value::Float(f) => f.to_string(),
                     toml::Value::Boolean(b) => b.to_string(),
+                    toml::Value::Array(values) => {
+                        let values = values
+                            .into_iter()
+                            .map(|value| match value {
+                                toml::Value::String(s) => Ok(s),
+                                toml::Value::Integer(i) => Ok(i.to_string()),
+                                toml::Value::Float(f) => Ok(f.to_string()),
+                                toml::Value::Boolean(b) => Ok(b.to_string()),
+                                other => Err(serde::de::Error::custom(format!(
+                                    "unsupported array value type in args: {:?}",
+                                    other
+                                ))),
+                            })
+                            .collect::<Result<Vec<_>, M::Error>>()?;
+                        format!("[{}]", values.join(","))
+                    }
                     other => {
                         return Err(serde::de::Error::custom(format!(
                             "unsupported value type in args: {:?}",
@@ -386,6 +402,25 @@ impl NodeConfig {
     pub fn effective_arg(&self, key: &str) -> Option<&String> {
         self.hot_args.get(key).or_else(|| self.args.get(key))
     }
+
+    /// Resolve an argument which may be specified once per pipeline worker.
+    /// Scalar arguments retain their existing meaning; array arguments select
+    /// the value at the worker's position in the pipeline worker list.
+    pub fn worker_arg(&self, key: &str, worker_index: usize) -> Option<String> {
+        let value = self.effective_arg(key)?;
+        let trimmed = value.trim();
+        if !(trimmed.starts_with('[') && trimmed.ends_with(']')) {
+            return Some(value.clone());
+        }
+
+        let inner = &trimmed[1..trimmed.len() - 1];
+        inner
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .nth(worker_index)
+            .map(str::to_owned)
+    }
 }
 
 /// Represents a specific instance of a pipeline assigned to a worker.
@@ -393,6 +428,8 @@ impl NodeConfig {
 #[derive(Debug, Clone)]
 pub struct PipelineInstance {
     pub name: String,
+    /// Position of this worker in the pipeline's configured worker list.
+    pub worker_index: usize,
     pub node_instances: Vec<NodeInstance>,
     pub poll_frequency: u64,
     pub desired_state: Option<PipelineLifecycle>,
@@ -989,6 +1026,49 @@ impl WabricksConfig {
                     }
                 }
 
+                // WASM nodes may bind one UMEM per pipeline worker, for example
+                // `umem = [1, 1, 2, 2]`. Validate that mapping up front.
+                if node.node_type == "WasmEngine" {
+                    if let Some(raw_umem) = node.args.get("umem") {
+                        let values = raw_umem
+                            .strip_prefix('[')
+                            .and_then(|v| v.strip_suffix(']'))
+                            .map(|v| {
+                                v.split(',')
+                                    .map(str::trim)
+                                    .filter(|v| !v.is_empty())
+                                    .collect::<Vec<_>>()
+                            });
+                        if let Some(values) = values {
+                            if values.len() != pipeline.workers.len() {
+                                return Err(anyhow!(
+                                    "Pipeline '{}': node '{}' umem array length ({}) must match workers array length ({})",
+                                    pipeline.name, node.id, values.len(), pipeline.workers.len()
+                                ));
+                            }
+                            for value in values {
+                                value.parse::<usize>().map_err(|_| {
+                                    anyhow!(
+                                        "Pipeline '{}': node '{}' has invalid umem value '{}'",
+                                        pipeline.name,
+                                        node.id,
+                                        value
+                                    )
+                                })?;
+                            }
+                        } else {
+                            raw_umem.parse::<usize>().map_err(|_| {
+                                anyhow!(
+                                    "Pipeline '{}': node '{}' has invalid umem value '{}'",
+                                    pipeline.name,
+                                    node.id,
+                                    raw_umem
+                                )
+                            })?;
+                        }
+                    }
+                }
+
                 // Validate PacketGenerator specific requirements
                 if node.node_type == "PacketGenerator" {
                     // Accept pps from args (e.g. args = { pps = "1M" })
@@ -1072,9 +1152,7 @@ impl WabricksConfig {
                 }
             }
 
-            // Validate WasmInspectorNode upstream umem consistency via Graph Propagation:
-            // Any node that routes into a WasmInspectorNode (no matter how deep the chain)
-            // must deliver frames from the same UMEM the WasmInspectorNode is bound to.
+            // Validate WasmEngine upstream UMEM consistency via graph propagation.
             {
                 // Step A: Build interface -> umem mapping
                 let mut iface_umems: HashMap<&str, Vec<usize>> = HashMap::new();
@@ -1145,32 +1223,65 @@ impl WabricksConfig {
                     }
                 }
 
-                // Step E: Validate WasmInspectorNodes against propagated data
+                // Step E: Validate WASM engines against propagated data. A node
+                // may specify one UMEM per worker, so compare the complete set
+                // of configured values with the values that can reach it.
                 for node in &pipeline.nodes {
-                    if node.node_type == "WasmInspectorNode" {
+                    if node.node_type == "WasmEngine" {
                         let wasm_umem_str = node.args.get("umem").ok_or_else(|| {
                             anyhow!(
-                                "Pipeline '{}': WasmInspectorNode '{}' is missing 'umem' argument",
+                                "Pipeline '{}': {} '{}' is missing 'umem' argument",
                                 pipeline.name,
+                                node.node_type,
                                 node.id
                             )
                         })?;
 
-                        let wasm_umem = wasm_umem_str.parse::<usize>().map_err(|_| {
-                            anyhow!(
-                                "Pipeline '{}': Invalid 'umem' format for WasmInspectorNode '{}'",
-                                pipeline.name,
-                                node.id
-                            )
-                        })?;
+                        let configured_umems = wasm_umem_str
+                            .strip_prefix('[')
+                            .and_then(|v| v.strip_suffix(']'))
+                            .map(|v| {
+                                v.split(',')
+                                    .map(str::trim)
+                                    .filter(|entry| !entry.is_empty())
+                                    .map(|entry| entry.parse::<usize>())
+                                    .collect::<Result<Vec<_>, _>>()
+                            })
+                            .transpose()
+                            .map_err(|_| {
+                                anyhow!(
+                                    "Pipeline '{}': Invalid 'umem' format for {} '{}'",
+                                    pipeline.name,
+                                    node.node_type,
+                                    node.id
+                                )
+                            })?
+                            .unwrap_or_else(|| {
+                                wasm_umem_str
+                                    .parse::<usize>()
+                                    .map(|umem| vec![umem])
+                                    .unwrap_or_default()
+                            });
 
-                        // Check if any propagated UMEM reaching this node differs from its bound UMEM
+                        if configured_umems.is_empty() {
+                            return Err(anyhow!(
+                                "Pipeline '{}': Invalid 'umem' format for {} '{}'",
+                                pipeline.name,
+                                node.node_type,
+                                node.id
+                            ));
+                        }
+
+                        // Check that every possible incoming UMEM has a
+                        // corresponding binding. This permits different
+                        // workers of one node to use different UMEMs.
                         if let Some(reached_umems) = output_umems.get(node.id.as_str()) {
                             for &u in reached_umems {
-                                if u != wasm_umem {
+                                if !configured_umems.contains(&u) {
+                                    let bound = configured_umems[0];
                                     return Err(anyhow!(
-                                        "Pipeline '{}': WasmInspectorNode '{}' is bound to umem {}, but can receive PDUs from umem {} via upstream nodes.",
-                                        pipeline.name, node.id, wasm_umem, u
+                                        "Pipeline '{}': {} '{}' is bound to umem {}, but can receive PDUs from umem {} via upstream nodes.",
+                                        pipeline.name, node.node_type, node.id, bound, u
                                     ));
                                 }
                             }
@@ -1531,6 +1642,17 @@ impl WabricksConfig {
                         assigned_queue = Vec::from([queues[worker_idx_in_pipeline]]);
                     }
 
+                    // Resolve per-worker WASM arguments just like queues.
+                    let mut args = node_conf.args.clone();
+                    if node_conf.node_type == "WasmEngine" && args.contains_key("umem") {
+                        let umem = node_conf.worker_arg("umem", worker_idx_in_pipeline)
+                            .ok_or_else(|| anyhow!(
+                                "Pipeline '{}', node '{}': umem has no value for worker position {}",
+                                pipeline_conf.name, node_conf.id, worker_idx_in_pipeline
+                            ))?;
+                        args.insert("umem".to_string(), umem);
+                    }
+
                     // Create the node instance for the builder
                     pipeline_instance_nodes.push(NodeInstance {
                         node_config: NodeConfig {
@@ -1539,7 +1661,7 @@ impl WabricksConfig {
                             routes: node_conf.routes.clone(),
                             queues: Some(assigned_queue),
                             labels: node_conf.labels.clone(),
-                            args: node_conf.args.clone(),
+                            args,
                             hot_args: node_conf.hot_args.clone(),
                             wasm_data: node_conf.wasm_data.clone(),
                             hot_wasm_data: node_conf.hot_wasm_data.clone(),
@@ -1561,6 +1683,7 @@ impl WabricksConfig {
                     .pipelines
                     .push(PipelineInstance {
                         name: pipeline_conf.name.clone(),
+                        worker_index: worker_idx_in_pipeline,
                         node_instances: pipeline_instance_nodes,
                         poll_frequency: pipeline_conf.poll_frequency,
                         desired_state: pipeline_conf.lifecycle_state.clone(),
@@ -2396,7 +2519,7 @@ mod tests {
     }
 
     /// Helper that builds a minimal TOML config string containing a pipeline whose
-    /// PacketGenerator feeds a WasmInspectorNode.  The `gen_umem` / `wasm_umem`
+    /// PacketGenerator feeds a WasmEngine. The `gen_umem` / `wasm_umem`
     /// parameters control the `umem` arg on each node so we can provoke mismatches.
     fn wasm_umem_pipeline_toml(gen_umem: usize, wasm_umem: usize) -> String {
         format!(
@@ -2425,7 +2548,7 @@ mod tests {
 
                 [[pipelines.nodes]]
                 id = "wasm"
-                type = "WasmInspectorNode"
+                type = "WasmEngine"
                 routes = ["drop1", "drop2"]
                 args = {{ umem = "{wasm_umem}", wasm_file_path = "dummy.wasm" }}
 
@@ -2441,15 +2564,15 @@ mod tests {
     }
 
     #[test]
-    fn test_wasm_inspector_upstream_umem_match_is_accepted() {
+    fn test_wasm_engine_upstream_umem_match_is_accepted() {
         let toml_str = wasm_umem_pipeline_toml(0, 0);
         let config: WabricksConfig = toml::from_str(&toml_str).unwrap();
         assert!(config.validate().is_ok(), "identical umem should be valid");
     }
 
     #[test]
-    fn test_wasm_inspector_upstream_batchrx_umem_match_is_accepted() {
-        // XSK binds "lo" to umem 0; WasmInspectorNode also uses umem 0 → valid.
+    fn test_wasm_engine_upstream_batchrx_umem_match_is_accepted() {
+        // XSK binds "lo" to umem 0; WasmEngine also uses umem 0 → valid.
         let toml_str = r#"
             [wabrix]
             ifaces = [
@@ -2475,7 +2598,7 @@ mod tests {
 
                 [[pipelines.nodes]]
                 id = "wasm"
-                type = "WasmInspectorNode"
+                type = "WasmEngine"
                 routes = ["drop1", "drop2"]
                 args = { umem = "0", wasm_file_path = "dummy.wasm" }
 
@@ -2495,9 +2618,9 @@ mod tests {
     }
 
     #[test]
-    fn test_wasm_inspector_upstream_umem_mismatch() {
+    fn test_wasm_engine_upstream_umem_mismatch() {
         // We create a pipeline where:
-        // BatchRxNode (UMEM 0) -> FastParserNode -> WasmInspectorNode (UMEM 1)
+        // BatchRxNode (UMEM 0) -> FastParserNode -> WasmEngine (UMEM 1)
         // The validation must traverse FastParserNode and catch the 0 -> 1 mismatch.
         let toml_str = r#"
         [wabrix]
@@ -2554,7 +2677,7 @@ mod tests {
 
         [[pipelines.nodes]]
         id = "wasm"
-        type = "WasmInspectorNode"
+        type = "WasmEngine"
         [pipelines.nodes.args]
         umem = "1"
         "#;
@@ -2571,9 +2694,8 @@ mod tests {
 
         // Assert it threw the correct specific error
         assert!(
-            err_msg.contains(
-                "WasmInspectorNode 'wasm' is bound to umem 1, but can receive PDUs from umem 0"
-            ),
+            err_msg
+                .contains("WasmEngine 'wasm' is bound to umem 1, but can receive PDUs from umem 0"),
             "Error message did not match expected output. Got: {}",
             err_msg
         );

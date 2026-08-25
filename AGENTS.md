@@ -70,7 +70,7 @@ There is **no `ipblower` crate in this workspace.** In-tree traffic generation i
 | `wabrix_lib/src/bpf/` | eBPF source (`xscrubber.bpf.c`, `vmlinux.h`) compiled at build time |
 | `wabrix_wasm/src/wasm_manager.rs` | Plugin lifecycle: UMEM handles, host state, load/instantiate/call/unload |
 | `wabrix_wasm/src/wasm_engine.rs` | Wasmtime `Engine` + `Linker` setup, host-function registration |
-| `wabrix_wasm/src/wasm_inspector.rs` | `WasmInspectorNode` — pipeline node driving a WASM component |
+| `wabrix_wasm/src/wasm_engine.rs` | `WasmEngine` — pipeline node driving a WASM component |
 | `wabrix/src/main.rs` | Entry point: config load, platform detection, `SystemCommand` loop, pipeline launch |
 | `wabrix/src/metrics_server.rs` | `spawn_metrics_server` — Prometheus exporter over `axum` |
 | `wabrix/src/logger.rs` | Logging sink setup |
