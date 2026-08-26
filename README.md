@@ -62,6 +62,48 @@ cargo build -p generator_engine --release \
 
 *(Detailed installation instructions for XDP drivers and NIC-specific tuning are located in `/docs`.)*
 
+## 📈 Monitoring with Prometheus and Grafana
+
+Wabrix exposes its runtime telemetry as Prometheus metrics at
+`http://localhost:9090/metrics`. The repository includes a Docker Compose
+stack that collects these metrics with Prometheus and displays them in Grafana.
+
+### Install and start the monitoring stack
+
+Install Docker Engine with the Docker Compose plugin, then start the stack from
+the monitoring directory:
+
+```bash
+cd monitoring
+docker compose up -d
+```
+
+Start Wabrix separately so that its metrics endpoint is available on port
+`9090`. Prometheus polls that endpoint every five seconds. The Compose
+configuration maps the Prometheus web interface to port `9091` to avoid
+conflicting with Wabrix's metrics server.
+
+Open the following URLs in a browser:
+
+* **Grafana:** <http://localhost:3000> (default login: `admin` / `admin`)
+* **Prometheus:** <http://localhost:9091>
+* **Wabrix metrics:** <http://localhost:9090/metrics>
+
+Grafana is automatically configured with Prometheus as its data source and
+loads the dashboards from `monitoring/grafana/dashboards/`. If Wabrix is not
+running, Prometheus will show the target as down and Grafana will have no new
+data to display.
+
+To view the scrape status, open **Status → Targets** in Prometheus and check
+the `wabrix_engine` target. Stop the stack with:
+
+```bash
+docker compose down
+```
+
+The Grafana data is stored in the named `grafana-data` volume, so dashboards
+and Grafana settings persist when the containers are stopped.
+
 ## 🏢 The Ecosystem & Enterprise
 
 Wabrix follows an **Open-Core** model:

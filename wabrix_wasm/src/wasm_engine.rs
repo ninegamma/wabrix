@@ -302,7 +302,7 @@ impl WasmEngine {
         }
 
         // ==========================================================
-        // 2. HYBRID TELEMETRY EXTRACTION
+        //  HYBRID TELEMETRY EXTRACTION
         // ==========================================================
         self.batch_count = self.batch_count.wrapping_add(1);
 
@@ -344,7 +344,7 @@ impl WasmEngine {
         }
 
         // ==========================================
-        // 3. MUTATION PHASE — copy plugin-modified WPdu fields back into the host Batch
+        //  MUTATION PHASE — copy plugin-modified WPdu fields back into the host Batch
         // ==========================================
         // Only the WPdu core (56 bytes) is read back from each mailbox slot.
         // This preserves the original system_bus pointer in each batch Pdu — copying the

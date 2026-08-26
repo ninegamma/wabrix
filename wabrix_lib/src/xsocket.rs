@@ -982,7 +982,7 @@ impl BatchRx for XSocketRx {
             // Capture the host TSC when the RX descriptor is converted into a
             // pipeline packet. The Wasm-facing timestamp is carried with the
             // PDU for downstream telemetry and processing.
-            pdu.w.timestamp = unsafe { core::arch::x86_64::_rdtsc() };
+            pdu.w.set_timestamp( unsafe { core::arch::x86_64::_rdtsc() });
 
             // Since we ALREADY calculated max_to_pull to guarantee capacity,
             // we can confidently unwrap/ignore the error branch.
