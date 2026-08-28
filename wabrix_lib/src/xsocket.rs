@@ -30,6 +30,9 @@ pub struct XdpSocketConfig {
     pub zerocopy: bool,
     pub umem_config: Arc<RuntimeUmemConfig>,
     pub xdp_mode: String, // "native", "skb", or "auto"
+    pub poll_mode: String, // "userspace_ring_spin" or "napi_busy_poll"
+    pub busy_poll_us: i32,
+    pub busy_poll_budget: i32,
 }
 
 pub struct XSocket {
@@ -227,6 +230,28 @@ impl XSocket {
             config: Arc::new(config),
         };
 
+        match xdp_fm.config.poll_mode.as_str() {
+            "userspace_ring_spin" => {}
+            "napi_busy_poll" => xdp_fm
+                .configure_napi_busy_polling(
+                    xdp_fm.config.busy_poll_us,
+                    xdp_fm.config.busy_poll_budget,
+                )
+                .map_err(|error| {
+                    format!(
+                        "failed to configure NAPI busy polling for {} queue {}: {}",
+                        xdp_fm.config.interface, xdp_fm.config.queue_id, error
+                    )
+                })?,
+            mode => {
+                return Err(format!(
+                    "unsupported XSK poll_mode '{}' for {} queue {}; expected 'userspace_ring_spin' or 'napi_busy_poll'",
+                    mode, xdp_fm.config.interface, xdp_fm.config.queue_id
+                )
+                .into());
+            }
+        }
+
         debug!(
             "Worker {}: Created XSocket for {} queue {}",
             xdp_fm.config.worker_id, xdp_fm.config.interface, xdp_fm.config.queue_id
@@ -254,6 +279,98 @@ impl XSocket {
     #[inline]
     pub fn socket_fd(&self) -> i32 {
         self.fd
+    }
+
+    /// Configure kernel/NAPI busy polling for this AF_XDP socket.
+    ///
+    /// `timeout_us` is the maximum time, in microseconds, that a blocking
+    /// `poll()` may spend polling the device before sleeping. This setting is
+    /// effective only when the receive path uses `poll()` with a positive
+    /// timeout; it does not change the existing user-space ring-spinning path.
+    ///
+    /// The socket must be configured after creation and before it is split
+    /// into its RX and TX handles. The NIC driver and kernel must support NAPI
+    /// busy polling for this to have an effect.
+    pub fn configure_napi_busy_polling(
+        &self,
+        timeout_us: i32,
+        budget: i32,
+    ) -> std::io::Result<()> {
+        if timeout_us <= 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "busy-poll timeout must be positive",
+            ));
+        }
+
+        if budget <= 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "busy-poll budget must be positive",
+            ));
+        }
+
+        // SAFETY: `self.fd` is the live AF_XDP socket descriptor owned by this
+        // XSocket, and both option values remain valid for the duration of
+        // their respective setsockopt calls.
+        let result = unsafe {
+            libc::setsockopt(
+                self.fd,
+                libc::SOL_SOCKET,
+                libc::SO_BUSY_POLL,
+                &timeout_us as *const libc::c_int as *const libc::c_void,
+                std::mem::size_of_val(&timeout_us) as libc::socklen_t,
+            )
+        };
+
+        if result < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        // SAFETY: `self.fd` is the live AF_XDP socket descriptor owned by this
+        // XSocket, and `budget` remains valid for the duration of this call.
+        let result = unsafe {
+            libc::setsockopt(
+                self.fd,
+                libc::SOL_SOCKET,
+                libc::SO_BUSY_POLL_BUDGET,
+                &budget as *const libc::c_int as *const libc::c_void,
+                std::mem::size_of_val(&budget) as libc::socklen_t,
+            )
+        };
+
+        if result < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        // Prefer busy polling over interrupt-driven wakeups where supported.
+        // This is a preference rather than the mechanism that enables the
+        // per-socket busy-poll timeout, so retain compatibility with kernels
+        // that do not expose this option.
+        let prefer_busy_poll: libc::c_int = 1;
+        // SAFETY: `self.fd` is the live AF_XDP socket descriptor owned by this
+        // XSocket, and `prefer_busy_poll` remains valid for this call.
+        let result = unsafe {
+            libc::setsockopt(
+                self.fd,
+                libc::SOL_SOCKET,
+                libc::SO_PREFER_BUSY_POLL,
+                &prefer_busy_poll as *const libc::c_int as *const libc::c_void,
+                std::mem::size_of_val(&prefer_busy_poll) as libc::socklen_t,
+            )
+        };
+
+        if result < 0 {
+            let error = std::io::Error::last_os_error();
+            log::debug!(
+                "SO_PREFER_BUSY_POLL unavailable for {} queue {}: {}",
+                self.config.interface,
+                self.config.queue_id,
+                error
+            );
+        }
+
+        Ok(())
     }
 
     // IMPORTANT: Verify compatibility before TX
@@ -831,14 +948,20 @@ impl BatchRx for XSocketRx {
             if self.empty_spins.is_multiple_of(128) {
                 // Use try_lock! If another thread holds the lock, we just move on.
                 // Never block the hot path.
-                if let Some(fq) = self.fill_queue.try_lock() {
-                    if fq.needs_wakeup() {
-                        self.wakeup_rx_queue()?;
-                        rcvd = unsafe {
-                            rx_guard
-                                .consume(&mut self.scratch_descriptors_recv_batch[..max_to_pull])
-                        };
-                    }
+                let fq_needs_wakeup = if let Some(fq) = self.fill_queue.try_lock() {
+                    fq.needs_wakeup()
+                } else {
+                    false
+                };
+
+                // If the kernel went to sleep (needs_wakeup) OR we want to aggressively
+                // drive the NAPI busy-poll mechanism, we execute a non-blocking 0-timeout poll.
+                if fq_needs_wakeup || self.config.poll_mode == "napi_busy_poll" {
+                    // wakeup_rx_queue() already correctly uses a 0 timeout (Timespec {0, 0})
+                    self.wakeup_rx_queue()?;
+                    rcvd = unsafe {
+                        rx_guard.consume(&mut self.scratch_descriptors_recv_batch[..max_to_pull])
+                    };
                 }
             }
 

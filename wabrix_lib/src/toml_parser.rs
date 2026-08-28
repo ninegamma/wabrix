@@ -107,6 +107,11 @@ fn default_xsk_mappings() -> Vec<XskMapping> {
         txq_size: 8192,
         zerocopy: true,
         xdp_mode: default_xdp_mode(),
+        poll_mode: default_poll_mode(),
+        busy_poll_us: default_busy_poll_us(),
+        busy_poll_budget: default_busy_poll_budget(),
+        flush_timeout: default_flush_timeout(),
+        defer_irqs: default_defer_irqs(),
     }]
 }
 
@@ -170,10 +175,45 @@ pub struct XskMapping {
     /// XDP mode: "native" (driver), "skb" (generic), or "auto" (default: auto-detect based on interface type)
     #[serde(default = "default_xdp_mode")]
     pub xdp_mode: String,
+    /// RX polling mode: "userspace_ring_spin" (default) or "napi_busy_poll".
+    #[serde(default = "default_poll_mode")]
+    pub poll_mode: String,
+    /// Per-socket NAPI busy-poll timeout, in microseconds.
+    #[serde(default = "default_busy_poll_us")]
+    pub busy_poll_us: i32,
+    /// Maximum number of packets processed per NAPI busy-poll cycle.
+    #[serde(default = "default_busy_poll_budget")]
+    pub busy_poll_budget: i32,
+    /// Interface GRO flush timeout, in microseconds, while NAPI busy polling is active.
+    #[serde(default = "default_flush_timeout")]
+    pub flush_timeout: u64,
+    /// Number of deferred hard IRQs while NAPI busy polling is active.
+    #[serde(default = "default_defer_irqs")]
+    pub defer_irqs: u32,
 }
 
 fn default_xdp_mode() -> String {
     "auto".to_string()
+}
+
+fn default_poll_mode() -> String {
+    "userspace_ring_spin".to_string()
+}
+
+fn default_busy_poll_us() -> i32 {
+    20
+}
+
+fn default_busy_poll_budget() -> i32 {
+    64
+}
+
+fn default_flush_timeout() -> u64 {
+    0
+}
+
+fn default_defer_irqs() -> u32 {
+    0
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
@@ -545,6 +585,11 @@ impl WabricksConfig {
                 txq_size: 8192,
                 zerocopy: true,
                 xdp_mode: default_xdp_mode(),
+                poll_mode: default_poll_mode(),
+                busy_poll_us: default_busy_poll_us(),
+                busy_poll_budget: default_busy_poll_budget(),
+                flush_timeout: default_flush_timeout(),
+                defer_irqs: default_defer_irqs(),
             };
             self.wabrix.xsk.push(xsk_mapping);
         }
@@ -1543,6 +1588,9 @@ impl WabricksConfig {
                     zerocopy: xsk_map.zerocopy,
                     umem_config: umem_config.clone(),
                     xdp_mode: xsk_map.xdp_mode.clone(),
+                    poll_mode: xsk_map.poll_mode.clone(),
+                    busy_poll_us: xsk_map.busy_poll_us,
+                    busy_poll_budget: xsk_map.busy_poll_budget,
                 });
             }
         }

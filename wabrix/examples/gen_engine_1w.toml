@@ -7,10 +7,16 @@ umem= [
     { id = 0, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 1, reserved = 131072 },
     { id = 1, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 1, reserved = 131072 },
 ]
+
+# Optional XSK fields:
+# poll_mode = "napi_busy_poll" enables kernel/NAPI busy polling;
+# busy_poll_us = 20 sets its per-socket timeout. Missing poll_mode defaults to
+# "userspace_ring_spin".
 xsk= [
     { iface = "enp2s0f0np0", queues = [0], umem = 0, rxq_size = 16384, txq_size = 16384, zerocopy = true, xdp_mode = "auto" },
-    { iface = "enp2s0f1np1", queues = [0], umem = 1, rxq_size = 16384, txq_size = 16384, zerocopy = true, xdp_mode = "auto" },
+    { iface = "enp2s0f1np1", queues = [0], umem = 1, rxq_size = 16384, txq_size = 16384, zerocopy = true, xdp_mode = "auto",  poll_mode = "napi_busy_poll", busy_poll_us = 100, busy_poll_budget= 128, flush_timeout = 200000, defer_irqs = 4 },
 ]
+
 workers= [
     { id = 0, core = 2, partitions = [{ umem = 0, count = 1 }] },
     { id = 1, core = 3, partitions = [{ umem = 1, count = 1 }] },

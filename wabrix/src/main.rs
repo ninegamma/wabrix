@@ -77,6 +77,10 @@ impl Drop for NamespaceCleanup {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
+    let mut terminate_signal = tokio::signal::unix::signal(
+        tokio::signal::unix::SignalKind::terminate(),
+    )
+    .context("failed to install SIGTERM handler")?;
 
     // Telemetry stays Tokio broadcast (control plane only)
     let (telemetry_tx, _) = tokio::sync::broadcast::channel::<TMLiveStats>(100);
@@ -274,6 +278,14 @@ async fn main() -> anyhow::Result<()> {
                     namespace_cleanup.track(namespace.clone());
                 }
 
+                // NAPI sysctls are process-scoped while this dataplane run is live.
+                // The guard snapshots the original values and restores them on teardown
+                // or any subsequent startup error.
+                let _napi_sysctl_guard = wabrix_lib::config::napi_sysctl::NapiSysctlGuard::apply(
+                    &current_config.wabrix.xsk,
+                )
+                .context("Failed to configure NAPI system parameters")?;
+
                 // Setup BPF
                 let (interface_skels, _xdp_links) =
                     wabrix_lib::config::configure_bpf::setup_bpf(interfaces.clone())
@@ -341,6 +353,7 @@ async fn main() -> anyhow::Result<()> {
                 let cmd = loop {
                     tokio::select! {
                         _ = tokio::signal::ctrl_c() => break SystemCommand::Shutdown,
+                        _ = terminate_signal.recv() => break SystemCommand::Shutdown,
                         Some(c) = cmd_rx.recv() => {
                             match c {
                                 SystemCommand::Apply(new_path) => {
@@ -443,6 +456,7 @@ async fn main() -> anyhow::Result<()> {
 
             next_cmd = tokio::select! {
                 _ = tokio::signal::ctrl_c() => SystemCommand::Shutdown,
+                _ = terminate_signal.recv() => SystemCommand::Shutdown,
                 Some(c) = cmd_rx.recv() => c,
                 else => SystemCommand::Shutdown,
             };
