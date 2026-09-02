@@ -72,7 +72,6 @@ pub struct GeneratorNode {
     dst_mac: MacAddr6,
     next_log_threshold: u64,
     scratch_pdus: [core::mem::MaybeUninit<Pdu>; MAX_BATCH_SIZE],
-    #[cfg(feature = "profiling")]
     total_cycles: u64,
     // new fields for GUI controlled generator
     state: GenState,
@@ -189,7 +188,6 @@ impl GeneratorNode {
             dst_ip,
             next_log_threshold: 0,
             scratch_pdus: unsafe { MaybeUninit::uninit().assume_init() },
-            #[cfg(feature = "profiling")]
             total_cycles: 0,
             state: if autostart {
                 GenState::Generating
@@ -318,7 +316,6 @@ impl Node for GeneratorNode {
     }
 
     fn process(&mut self, batch: &mut Batch) -> Directive {
-        #[cfg(feature = "profiling")]
         let start_cycles = unsafe { _rdtsc() };
 
         // =========================================================
@@ -592,7 +589,7 @@ impl Node for GeneratorNode {
                     );
                 }
             }
-            #[cfg(feature = "profiling")]
+
             self.tm_avg_cycles
                 .store(self.total_cycles, Ordering::Relaxed);
 
@@ -606,11 +603,8 @@ impl Node for GeneratorNode {
                 self.next_log_threshold += LOG_INTERVAL;
             }
 
-            #[cfg(feature = "profiling")]
-            {
-                let end_cycles = unsafe { _rdtsc() };
-                self.total_cycles += end_cycles - start_cycles;
-            }
+            let end_cycles = unsafe { _rdtsc() };
+            self.total_cycles += end_cycles - start_cycles;
 
             Directive::Next(self.next_node.clone())
         } else {
@@ -627,7 +621,6 @@ impl Node for GeneratorNode {
         Some(self.batch_size)
     }
 
-    #[cfg(feature = "profiling")]
     fn profiling_cycles(&self) -> u64 {
         self.total_cycles
     }

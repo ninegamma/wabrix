@@ -2,7 +2,7 @@
 
 use crate::{probe_kernel_fds, Batch, BatchRx, BatchTx};
 use core::mem::MaybeUninit;
-use log::{debug, trace, warn};
+use log::{debug, info, trace, warn};
 use spin::Mutex;
 use std::ffi::CString;
 use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
@@ -29,10 +29,12 @@ pub struct XdpSocketConfig {
     pub tx_queue_size: u32,
     pub zerocopy: bool,
     pub umem_config: Arc<RuntimeUmemConfig>,
-    pub xdp_mode: String, // "native", "skb", or "auto"
+    pub xdp_mode: String,  // "native", "skb", or "auto"
     pub poll_mode: String, // "userspace_ring_spin" or "napi_busy_poll"
-    pub busy_poll_us: i32,
+    pub busy_poll_ns: u64,
     pub busy_poll_budget: i32,
+    /// GRO flush timeout in nanoseconds, used to derive the RX poll interval.
+    pub napi_flush_timeout_ns: u64,
 }
 
 pub struct XSocket {
@@ -50,12 +52,12 @@ pub struct XSocket {
     pub config: Arc<XdpSocketConfig>,
 }
 
-const MAX_FILL: usize = 4096;
+const MAX_FILL: usize = 2048;
 const RX_DIAGNOSTIC_LOG_INTERVAL: u64 = 10_000;
+const NAPI_DIAGNOSTIC_LOG_INTERVAL: u64 = 100_000;
 /// Split components for independent RX and TX access
 /// These DO NOT own the frame registry - it's accessed via thread-local storage
 pub struct XSocketRx {
-    umem: Arc<Umem>,
     fill_queue: Arc<Mutex<FillQueue>>,
     rx_queue: Arc<Mutex<RxQueue>>,
     // THE ANCHOR: Keeps the TX side alive even if the TX node is never built
@@ -81,7 +83,15 @@ pub struct XSocketRx {
     fill_zero_produced: u64,
     fill_partial_submissions: u64,
     max_fill_deficit: usize,
-    //last_diagnostic_received: u64,
+    // NAPI polling diagnostics. These are local to the RX worker and are only
+    // read on the cold diagnostic path, so no atomics are needed.
+    napi_poll_attempts: u64,
+    napi_poll_packets: u64,
+    napi_poll_empty: u64,
+    max_napi_poll_consume: usize,
+    napi_poll_timeout: rustix::time::Timespec,
+    napi_busy_poll: bool,
+    receive_calls: u64,
     fd: RawFd, // file descriptor of the AF_XDP socket
     // Profiling fields
     pub prof_reclaim_replenish_cycles: u64,
@@ -93,6 +103,7 @@ pub struct XSocketRx {
     pub prof_empty_spin_cycles: u64,
     pub prof_total_packets: u64,
     pub prof_max_replenish_cycles: u64,
+    pub prof_monster_spikes: u64,
     pub prof_burst_start: u64,
     pub prof_started: bool,
 }
@@ -234,7 +245,7 @@ impl XSocket {
             "userspace_ring_spin" => {}
             "napi_busy_poll" => xdp_fm
                 .configure_napi_busy_polling(
-                    xdp_fm.config.busy_poll_us,
+                    xdp_fm.config.busy_poll_ns,
                     xdp_fm.config.busy_poll_budget,
                 )
                 .map_err(|error| {
@@ -291,17 +302,22 @@ impl XSocket {
     /// The socket must be configured after creation and before it is split
     /// into its RX and TX handles. The NIC driver and kernel must support NAPI
     /// busy polling for this to have an effect.
-    pub fn configure_napi_busy_polling(
-        &self,
-        timeout_us: i32,
-        budget: i32,
-    ) -> std::io::Result<()> {
-        if timeout_us <= 0 {
+    pub fn configure_napi_busy_polling(&self, timeout_ns: u64, budget: i32) -> std::io::Result<()> {
+        if timeout_ns == 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "busy-poll timeout must be positive",
             ));
         }
+
+        // SO_BUSY_POLL accepts microseconds. Round up so a positive nanosecond
+        // configuration never silently becomes a zero-microsecond timeout.
+        let timeout_us: i32 = timeout_ns.div_ceil(1_000).try_into().map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "busy-poll timeout is too large for SO_BUSY_POLL",
+            )
+        })?;
 
         if budget <= 0 {
             return Err(std::io::Error::new(
@@ -342,6 +358,11 @@ impl XSocket {
         if result < 0 {
             return Err(std::io::Error::last_os_error());
         }
+
+        info!(
+            "Configured NAPI busy polling for {} queue {}: busy_poll_ns={}, socket_busy_poll_us={}, busy_poll_budget={}",
+            self.config.interface, self.config.queue_id, timeout_ns, timeout_us, budget,
+        );
 
         // Prefer busy polling over interrupt-driven wakeups where supported.
         // This is a preference rather than the mechanism that enables the
@@ -424,8 +445,29 @@ impl XSocket {
     /// Frame registry is accessed via thread-local storage set by the worker
     pub fn split(self) -> (XSocketRx, XSocketTx) {
         let fd = self.socket_fd();
+        let target_us = self.config.napi_flush_timeout_ns / 1000 / 2; // Poll at 50% of the timeout
+                                                                      // Socket splitting can happen before the worker initializes its
+                                                                      // thread-local TSC frequency. Keep the same 2.5 GHz fallback used by
+                                                                      // `rdtsc_us()` so the NAPI poll interval never becomes zero.
+        let tsc_frequency = try_get_tsc_frequency().unwrap_or_else(|| 2_500_000_000);
+        let napi_poll_target_cycles =
+            (((target_us as u128) * (tsc_frequency as u128)) / 1_000_000).max(1) as u64;
+        let napi_poll_timeout = rustix::time::Timespec {
+            tv_sec: (self.config.busy_poll_ns / 1_000_000_000) as _,
+            tv_nsec: (self.config.busy_poll_ns % 1_000_000_000) as _,
+        };
+        let napi_busy_poll = self.config.poll_mode == "napi_busy_poll";
+        if self.config.poll_mode == "napi_busy_poll" {
+            info!(
+                "NAPI poll interval for {} queue {}: flush_timeout_ns={}, poll_target_interval_cycles={}",
+                self.config.interface,
+                self.config.queue_id,
+                self.config.napi_flush_timeout_ns,
+                napi_poll_target_cycles,
+            );
+        }
+
         let rx = XSocketRx {
-            umem: self.umem.clone(),
             fill_queue: self.fill_queue.clone(),
             rx_queue: self.rx_queue.clone(),
             _tx_queue_keepalive: self.tx_queue.clone(),
@@ -447,7 +489,13 @@ impl XSocket {
             fill_zero_produced: 0,
             fill_partial_submissions: 0,
             max_fill_deficit: 0,
-            //last_diagnostic_received: 0,
+            napi_poll_attempts: 0,
+            napi_poll_packets: 0,
+            napi_poll_empty: 0,
+            max_napi_poll_consume: 0,
+            napi_poll_timeout,
+            napi_busy_poll,
+            receive_calls: 0,
             fd,
             prof_reclaim_replenish_cycles: 0,
             prof_replenish_cycles: 0,
@@ -458,6 +506,7 @@ impl XSocket {
             prof_empty_spin_cycles: 0,
             prof_total_packets: 0,
             prof_max_replenish_cycles: 0,
+            prof_monster_spikes: 0,
             prof_burst_start: 0,
             prof_started: false,
         };
@@ -488,7 +537,7 @@ use wabrix_api::MAX_BATCH_SIZE;
 use wabrix_base::frame_registry::{
     decode_global_frame, encode_global_frame, get_tsc_frequency, get_worker_frame_registry,
 };
-use wabrix_base::system::rdtsc_us;
+use wabrix_base::system::{rdtsc_us, try_get_tsc_frequency};
 use wabrix_base::{RuntimeUmemConfig, SystemBus};
 
 impl XSocketRx {
@@ -496,6 +545,12 @@ impl XSocketRx {
     #[inline]
     pub fn umem_group_id(&self) -> usize {
         self.config.umem_config.group_id
+    }
+
+    /// Returns the number of calls made to `receive_into_batch`.
+    #[inline]
+    pub fn receive_calls(&self) -> u64 {
+        self.receive_calls
     }
 
     #[cfg(feature = "profiling")]
@@ -543,6 +598,15 @@ impl XSocketRx {
         };
         poll(&mut poll_fds, Some(&timeout))?;
 
+        Ok(())
+    }
+
+    fn poll_for_napi_packets(&self, timeout: Option<&rustix::time::Timespec>) -> Result<(), Errno> {
+        // SAFETY: self.fd is a valid file descriptor for the lifetime of this call.
+        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(self.fd) };
+        let mut poll_fds = [PollFd::new(&borrowed_fd, PollFlags::IN)];
+
+        poll(&mut poll_fds, timeout)?;
         Ok(())
     }
 
@@ -594,6 +658,7 @@ impl XSocketRx {
 
         let available = requested_count;
 
+        #[cfg(feature = "profiling")]
         let t0 = unsafe { std::arch::x86_64::_rdtsc() };
 
         // Acquire Lock on the Fill Queue
@@ -655,6 +720,8 @@ impl XSocketRx {
         }
 
         // 1. Allocate Frames directly into our pre-allocated struct buffer (NO MEMSET!)
+
+        #[cfg(feature = "profiling")]
         let t1 = unsafe { std::arch::x86_64::_rdtsc() };
 
         let umem_id = self.umem_group_id();
@@ -663,6 +730,7 @@ impl XSocketRx {
             &mut self.scratch_frames[..batch_size as usize], // Use persistent struct Vec
         );
 
+        #[cfg(feature = "profiling")]
         let t2 = unsafe { std::arch::x86_64::_rdtsc() };
 
         if actual_batch == 0 {
@@ -700,6 +768,7 @@ impl XSocketRx {
             self.scratch_descriptors[i] = xsk_rs::FrameDesc::new(addr as usize);
         }
 
+        #[cfg(feature = "profiling")]
         let t3 = unsafe { std::arch::x86_64::_rdtsc() };
 
         // Produce unconditionally first
@@ -712,6 +781,7 @@ impl XSocketRx {
         drop(fq);
 
         // THEN wake the kernel if needed
+        #[cfg(feature = "profiling")]
         let t4 = unsafe { std::arch::x86_64::_rdtsc() };
 
         if needs_wakeup {
@@ -721,6 +791,7 @@ impl XSocketRx {
                 .expect("wakeup_fill_queue_force() failed");
         }
 
+        #[cfg(feature = "profiling")]
         let t5 = unsafe { std::arch::x86_64::_rdtsc() };
 
         if produced > 0 {
@@ -778,6 +849,7 @@ impl XSocketRx {
             }
         }
 
+        #[cfg(feature = "profiling")]
         let t6 = unsafe { std::arch::x86_64::_rdtsc() };
 
         #[cfg(feature = "profiling")]
@@ -790,16 +862,17 @@ impl XSocketRx {
 
             // Catch the Sledgehammer
             if duration > 50_000 {
-                self.prof_max_replenish_cycles = duration;
+                self.prof_monster_spikes += 1;
+                self.prof_max_replenish_cycles = self.prof_max_replenish_cycles.max(duration);
 
                 // Only print if the spike is absurdly high (e.g., > 50,000 cycles)
-                log::warn!(
+                log::trace!(
                     "MONSTER SPIKE DETECTED on socket {}: Replenish of {} frames took {} cycles!",
                     self.source_id(),
                     produced,
                     duration
                 );
-                log::info!(
+                log::trace!(
                     "\n=== Replenish X-Ray (Cycles) ===\n\
              Lock      : {}\n\
              Allocator : {}\n\
@@ -824,6 +897,8 @@ impl XSocketRx {
 // Implement BatchRx for XSocketRx
 impl BatchRx for XSocketRx {
     fn receive_into_batch(&mut self, batch: &mut Batch, max_count: usize) -> anyhow::Result<usize> {
+        self.receive_calls += 1;
+
         // Get the worker's frame registry from thread-local storage
         let frame_registry_ptr = get_worker_frame_registry();
 
@@ -865,7 +940,7 @@ impl BatchRx for XSocketRx {
         if self.fill_deficit >= FILL_REPLENISH_THRESHOLD {
             let produced = self.replenish_fill_queue(self.fill_deficit);
             self.fill_deficit = self.fill_deficit.saturating_sub(produced);
-            if self.fill_deficit > 2048
+            if self.fill_deficit > 4096
                 && self
                     .fill_replenish_attempts
                     .is_multiple_of(RX_DIAGNOSTIC_LOG_INTERVAL)
@@ -896,7 +971,7 @@ impl BatchRx for XSocketRx {
         if batch_len != 0 {
             warn!("Batch not empty on receive_into_batch");
         }
-        let max_to_pull = std::cmp::min(max_count, MAX_BATCH_SIZE) - batch_len;
+        let max_to_pull = std::cmp::min(max_count, MAX_BATCH_SIZE).saturating_sub(batch_len);
         if max_to_pull == 0 {
             return Ok(0);
         }
@@ -909,7 +984,7 @@ impl BatchRx for XSocketRx {
         // We slice into the buffer we already own. Zero memory allocation, zero memset overhead!
         // Lock the queue. It is uncontended, so it takes ~15 cycles.
         let mut rx_guard = self.rx_queue.lock();
-        let mut rcvd =
+        let mut rcvd=
             unsafe { rx_guard.consume(&mut self.scratch_descriptors_recv_batch[..max_to_pull]) };
 
         #[cfg(feature = "profiling")]
@@ -927,69 +1002,111 @@ impl BatchRx for XSocketRx {
         // SMART KERNEL WAKEUP LOGIC
         #[cfg(feature = "profiling")]
         let mut t3 = 0;
-
+        // Demand-Driven NAPI Polling
         if rcvd == 0 {
             self.empty_spins += 1;
-            if self.prof_started && self.empty_spins >= 51200 {
-                self.prof_started = false;
-                let now = unsafe { core::arch::x86_64::_rdtsc() };
-                log::debug!(
-                    "**** Traffic burst ended after ~ {} cycles ({} us)",
-                    (now - self.prof_burst_start).separated_string(),
-                    (((now - self.prof_burst_start) as f64
-                        * (1_000_000.0 / get_tsc_frequency() as f64)) as u64)
-                        .separated_string()
-                );
+            // LOCAL SPIN: Allow a brief window to catch fast-arriving packets
+            // completely locklessly without wasting cycles on a syscall.
+            if self.empty_spins < 64 && self.napi_busy_poll {
+                // Yield this tiny micro-window to the CPU pipeline
+                core::hint::spin_loop();
+                rcvd = unsafe {
+                    rx_guard.consume(&mut self.scratch_descriptors_recv_batch[..max_to_pull])
+                };
             }
 
-            // LOCKLESS/FAST-PATH WAKEUP CHECK
-            // We only attempt to lock and check the Fill Queue if we've been spinning empty for a while.
-            // This prevents atomic Mutex contention on every single microscopic loop.
-            if self.empty_spins.is_multiple_of(128) {
-                // Use try_lock! If another thread holds the lock, we just move on.
-                // Never block the hot path.
-                let fq_needs_wakeup = if let Some(fq) = self.fill_queue.try_lock() {
-                    fq.needs_wakeup()
-                } else {
-                    false
+            // Fallback to NAPI poll syscall ONLY if local spinning exhausts
+            if rcvd==0 && self.napi_busy_poll {
+                self.napi_poll_attempts += 1;
+
+                // Hand control to the kernel to spin safely on the hardware ring.
+                self.poll_for_napi_packets(Some(&self.napi_poll_timeout))?;
+
+                let newly_received = unsafe {
+                    rx_guard.consume(
+                        &mut self.scratch_descriptors_recv_batch[rcvd..max_to_pull],
+                    )
                 };
 
-                // If the kernel went to sleep (needs_wakeup) OR we want to aggressively
-                // drive the NAPI busy-poll mechanism, we execute a non-blocking 0-timeout poll.
-                if fq_needs_wakeup || self.config.poll_mode == "napi_busy_poll" {
-                    // wakeup_rx_queue() already correctly uses a 0 timeout (Timespec {0, 0})
-                    self.wakeup_rx_queue()?;
-                    rcvd = unsafe {
-                        rx_guard.consume(&mut self.scratch_descriptors_recv_batch[..max_to_pull])
+                if newly_received == 0 {
+                    self.napi_poll_empty += 1;
+                }
+
+                self.max_napi_poll_consume =
+                    self.max_napi_poll_consume.max(newly_received);
+                rcvd += newly_received;
+                self.napi_poll_packets += newly_received as u64;
+
+            }
+
+            // Legacy driver wakeup fallback if empty spins persist
+            if rcvd == 0 {
+                if self.prof_started && self.empty_spins >= 51200 {
+                    self.prof_started = false;
+                    let now = unsafe { core::arch::x86_64::_rdtsc() };
+                    log::debug!(
+                        "**** Traffic burst ended after ~ {} cycles ({} us)",
+                        (now - self.prof_burst_start).separated_string(),
+                        (((now - self.prof_burst_start) as f64
+                            * (1_000_000.0 / get_tsc_frequency() as f64)) as u64)
+                            .separated_string()
+                    );
+                }
+
+                if self.empty_spins.is_multiple_of(128) {
+                    // Use try_lock so the empty path never blocks on the fill queue.
+                    let fq_needs_wakeup = if let Some(fq) = self.fill_queue.try_lock() {
+                        fq.needs_wakeup()
+                    } else {
+                        false
                     };
+
+                    if fq_needs_wakeup {
+                        self.wakeup_rx_queue()?;
+                        rcvd = unsafe {
+                            rx_guard.consume(&mut self.scratch_descriptors_recv_batch[..max_to_pull])
+                        };
+                    }
+                }
+
+                #[cfg(feature = "profiling")]
+                {
+                    t3 = unsafe { core::arch::x86_64::_rdtsc() };
+                }
+
+                #[cfg(feature = "profiling")]
+                if self.prof_started {
+                    self.prof_wakeup_cycles += t3 - t2;
+                }
+
+                if log::log_enabled!(log::Level::Debug) && self.prof_started && rcvd > 0 && self.napi_poll_attempts.is_multiple_of(NAPI_DIAGNOSTIC_LOG_INTERVAL)
+                {
+                    debug!(
+                        "{}: [{} us] After Wakeup: Received {} packets. Empty spins= {}. Total rx: {}, Free frames: {}",
+                        self.source_id(),
+                        rdtsc_us().separate_with_precision(3),
+                        rcvd,
+                        self.empty_spins,
+                        self.total_received + rcvd,
+                        frame_registry.total_free_frames()
+                    );
                 }
             }
+        }
 
+        if rcvd > 0 {
             #[cfg(feature = "profiling")]
-            {
-                t3 = unsafe { core::arch::x86_64::_rdtsc() };
-            }
-
-            #[cfg(feature = "profiling")]
-            if self.prof_started {
-                self.prof_wakeup_cycles += t3 - t2;
-            }
-
-            if log::log_enabled!(log::Level::Debug) && self.prof_started && rcvd > 0 {
-                debug!(
-                    "{}: [{} us] After Wakeup: Received {} packets. Empty spins= {}. Total rx: {}, Free frames: {}",
-                    self.source_id(),
-                    rdtsc_us().separate_with_precision(3),
-                    rcvd,
-                    self.empty_spins,
-                    self.total_received + rcvd,
-                    frame_registry.total_free_frames()
-                );
-            }
-        } else {
             if !self.prof_started {
                 self.prof_started = true;
                 self.prof_burst_start = unsafe { core::arch::x86_64::_rdtsc() };
+
+                // Start a fresh NAPI diagnostic window for this traffic burst.
+                // The poll that discovers the first packet is intentionally not
+                // included because it happened before the burst was detected.
+                self.napi_poll_attempts = 0;
+                self.napi_poll_packets = 0;
+                self.napi_poll_empty = 0;
+                self.max_napi_poll_consume = 0;
                 self.empty_spins = 0;
             }
 
@@ -1029,19 +1146,43 @@ impl BatchRx for XSocketRx {
 
         self.total_received += rcvd;
 
+        if log::log_enabled!(log::Level::Debug)
+            && self.prof_started
+            && self.napi_poll_attempts > 0
+            && self
+            .napi_poll_attempts
+            .is_multiple_of(NAPI_DIAGNOSTIC_LOG_INTERVAL)
+        {
+            let average_napi_poll_consume =
+                self.napi_poll_packets as f64 / self.napi_poll_attempts as f64;
+            debug!(
+                            "{}: NAPI poll diagnostics: attempts={}, packets={}, average_consume_after_poll={:.2}, empty={}, max_consume_after_poll={}, receive_calls={}, total_rx={}, rcvd= {}",
+                            self.source_id(),
+                            self.napi_poll_attempts.separated_string(),
+                            self.napi_poll_packets.separated_string(),
+                            average_napi_poll_consume,
+                            self.napi_poll_empty.separated_string(),
+                            self.max_napi_poll_consume,
+                            self.receive_calls.separated_string(),
+                            (self.total_received + rcvd).separated_string(),
+                            rcvd
+                        );
+        }
+
+
         /*
         // Emit a periodic summary rather than logging every normal refill.
         // This gives enough information to correlate software drops with FQ
         // starvation while keeping the packet path quiet.
         let received = self.total_received as u64;
-        if received >= self.last_diagnostic_received + 100_000_000 {
+        if received >= self.last_diagnostic_received + 10_000_000 {
             self.last_diagnostic_received = received;
             let xdp_stats = {
                 let rx_guard = self.rx_queue.lock();
                 rx_guard.fd().xdp_statistics()
             };
             match xdp_stats {
-                Ok(stats) => log::info!(
+                Ok(stats) => log::debug!(
                     "{}: RX diagnostics: received={}, produced={}, deficit={}, max_deficit={}, replenish_attempts={}, lock_busy={}, no_frames={}, ring_full={}, zero_produced={}, partial_submissions={}, xdp_dropped={}, xdp_invalid_descs={}, xdp_rx_ring_full={}, xdp_fill_ring_empty={}",
                     self.source_id(),
                     received,
@@ -1069,6 +1210,7 @@ impl BatchRx for XSocketRx {
         }
         */
 
+
         // If the RX ring is STILL empty after the kick (or if no kick was needed),
         // return Ok(0) instantly and spin in zero-overhead user-space.
         if rcvd == 0 {
@@ -1089,9 +1231,9 @@ impl BatchRx for XSocketRx {
 
         // 6. Process the received packets
         let frame_size_log2 = self.config.umem_config.frame_size_log2;
-        let _umem_ptr = self.umem.as_ptr();
         let bus_ptr = &*self.bus as *const _;
         let worker_id = self.config.worker_id as u8;
+        let group_id = self.config.umem_config.group_id;
 
         // This guarantees zero bounds-checking overhead
         let received_descriptors = &self.scratch_descriptors_recv_batch[..rcvd];
@@ -1099,13 +1241,13 @@ impl BatchRx for XSocketRx {
             // BITWISE SHIFT INSTEAD OF DIVISION
             // Replaces ~20 cycle division with a 1 cycle shift
             let local_idx = (desc.addr() as u32) >> frame_size_log2; // local_idx is wrt. current Umem
-            let global_idx = encode_global_frame(self.config.umem_config.group_id, local_idx);
+            let global_idx = encode_global_frame(group_id, local_idx);
 
             let mut pdu = Pdu::new(*desc, global_idx, worker_id, bus_ptr, frame_size_log2);
             // Capture the host TSC when the RX descriptor is converted into a
             // pipeline packet. The Wasm-facing timestamp is carried with the
             // PDU for downstream telemetry and processing.
-            pdu.w.set_timestamp( unsafe { core::arch::x86_64::_rdtsc() });
+            pdu.w.set_timestamp(unsafe { core::arch::x86_64::_rdtsc() });
 
             // Since we ALREADY calculated max_to_pull to guarantee capacity,
             // we can confidently unwrap/ignore the error branch.
@@ -1124,10 +1266,10 @@ impl BatchRx for XSocketRx {
             if self.prof_started {
                 self.prof_total_packets += rcvd as u64;
             }
-            /*
-            const PRINT_INTERVAL_PACKETS: u64 = 102_400_000;
+
+            const PRINT_INTERVAL_PACKETS: u64 = 100_000_000;
             // Print summary every PRINT_INTERVAL_PACKETS and reset counters
-            if self.prof_started && self.prof_total_packets >= PRINT_INTERVAL_PACKETS {
+            if log::log_enabled!(log::Level::Debug) && self.prof_started && self.prof_total_packets >= PRINT_INTERVAL_PACKETS {
                 let total = self.prof_total_packets;
 
                 // Calculate cycles per packet for each stage
@@ -1137,7 +1279,7 @@ impl BatchRx for XSocketRx {
                 let s4_cpp = self.prof_pdu_batch_cycles / total;
                 let total_cpp = s1_cpp + s2_cpp + s3_cpp + s4_cpp;
 
-                log::info!(
+                log::debug!(
                     "\n=== CPU Cycle Breakdown (Per Packet Average over {} pkts) ===\n\
                      1. Reclaim & Replenish : {:>4} cycles\n\
                      2. Lockless Consume    : {:>4} cycles\n\
@@ -1145,15 +1287,23 @@ impl BatchRx for XSocketRx {
                      4. PDU Gen & Batch Push: {:>4} cycles\n\
                      --------------------------------------------------\n\
                      Total Active CPU Cost  : {:>4} cycles/packet\n\
-                     Total Empty Spins Cost : {:>10} cycles (Total for 1M period)\n\
+                     Total Empty Spins Cost : {:>10} cycles (Total for {} packets)\n\
                      ==================================================",
-                    total,
+                    total.separated_string(),
                     s1_cpp,
                     s2_cpp,
                     s3_cpp,
                     s4_cpp,
                     total_cpp,
-                    self.prof_empty_spin_cycles
+                    self.prof_empty_spin_cycles.separated_string(),
+                    total.separated_string()
+                );
+
+                log::debug!(
+                    "{}: Replenish diagnostics: monster_spikes={}, max_replenish_cycles={}",
+                    self.source_id(),
+                    self.prof_monster_spikes.separated_string(),
+                    self.prof_max_replenish_cycles.separated_string(),
                 );
 
                 // Reset counters
@@ -1163,8 +1313,10 @@ impl BatchRx for XSocketRx {
                 self.prof_pdu_batch_cycles = 0;
                 self.prof_empty_spin_cycles = 0;
                 self.prof_total_packets = 0;
+                self.prof_max_replenish_cycles = 0;
+                self.prof_monster_spikes = 0;
             }
-             */
+
         }
 
         Ok(rcvd)
@@ -1509,8 +1661,9 @@ impl XSocketTx {
 impl Drop for XSocketRx {
     fn drop(&mut self) {
         log::debug!(
-            "RUST DROP: XSocketRx (Queue {}) dropping. Refs remaining -> FQ: {}, CQ: {}, RX: {}, TX: {}",
+            "RUST DROP: XSocketRx (Queue {}) dropping after {} receive calls. Refs remaining -> FQ: {}, CQ: {}, RX: {}, TX: {}",
             self.config.queue_id,
+            self.receive_calls,
             Arc::strong_count(&self.fill_queue),
             Arc::strong_count(&self._comp_queue_keepalive),
             Arc::strong_count(&self.rx_queue),

@@ -38,6 +38,14 @@ Default: `[{ name = "lo" }]`
 | `mac_if` | string | no | MAC address source interface (veth inherits its MAC from this). |
 | `ipnet` | string | no | IP address and prefix length assigned to the interface, e.g. `"192.168.1.1/24"`. |
 | `checksum_offload` | boolean | no | Enable TX checksum offload. Default `false`. For veth, targets the peer. |
+| `napi` | table | no | Interface-wide Linux NAPI busy-poll settings. |
+
+Fields within `napi`:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `flush_timeout` | integer | `0` | Interface GRO flush timeout in microseconds. |
+| `defer_irqs` | integer | `0` | Number of deferred hard IRQs while NAPI busy polling is active. |
 
 **Validation:** Non-veth interfaces are checked via `ip link show`. Veth interfaces require `peer` and either `namespace` or `master`.
 
@@ -96,6 +104,9 @@ Default: `[{ iface = "lo", queues = [0], umem = 0, rxq_size = 8192, txq_size = 8
 | `txq_size` | integer | **yes** | TX ring size. Must be a power of 2 and > 0. |
 | `zerocopy` | boolean | **yes** | Enable AF_XDP zero-copy mode. Requires driver support; use `false` for veth. |
 | `xdp_mode` | string | no | XDP attachment mode: `"native"`, `"skb"`, or `"auto"`. Default `"auto"`. |
+| `poll_mode` | string | no | RX polling mode: `"userspace_ring_spin"` or `"napi_busy_poll"`. Default `"userspace_ring_spin"`. |
+| `busy_poll_ns` | integer | no | Per-socket NAPI busy-poll timeout in nanoseconds. Default `20_000`. |
+| `busy_poll_budget` | integer | no | Maximum packets processed per NAPI busy-poll cycle. Default `64`. |
 
 **Example:**
 ```toml

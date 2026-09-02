@@ -77,10 +77,9 @@ impl Drop for NamespaceCleanup {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
-    let mut terminate_signal = tokio::signal::unix::signal(
-        tokio::signal::unix::SignalKind::terminate(),
-    )
-    .context("failed to install SIGTERM handler")?;
+    let mut terminate_signal =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .context("failed to install SIGTERM handler")?;
 
     // Telemetry stays Tokio broadcast (control plane only)
     let (telemetry_tx, _) = tokio::sync::broadcast::channel::<TMLiveStats>(100);
@@ -282,6 +281,7 @@ async fn main() -> anyhow::Result<()> {
                 // The guard snapshots the original values and restores them on teardown
                 // or any subsequent startup error.
                 let _napi_sysctl_guard = wabrix_lib::config::napi_sysctl::NapiSysctlGuard::apply(
+                    &current_config.wabrix.ifaces,
                     &current_config.wabrix.xsk,
                 )
                 .context("Failed to configure NAPI system parameters")?;

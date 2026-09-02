@@ -57,6 +57,7 @@ profiling = []
 runtime-diagnostics = ["wabrix_wasm/runtime-diagnostics"]
 # Create a 'wasm' feature that enables the dependency
 wasm = ["dep:wabrix_wasm"]
+#default = ["wasm"]
 default = ["profiling", "wasm"]
 
 [lib]

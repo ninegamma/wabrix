@@ -82,6 +82,7 @@ fn default_ifaces() -> Vec<InterfaceConfig> {
         ipnet: None,
         master: None,
         checksum_offload: None,
+        napi: None,
     }]
 }
 fn default_umem_configs() -> Vec<UmemConfig> {
@@ -108,10 +109,8 @@ fn default_xsk_mappings() -> Vec<XskMapping> {
         zerocopy: true,
         xdp_mode: default_xdp_mode(),
         poll_mode: default_poll_mode(),
-        busy_poll_us: default_busy_poll_us(),
+        busy_poll_ns: default_busy_poll_ns(),
         busy_poll_budget: default_busy_poll_budget(),
-        flush_timeout: default_flush_timeout(),
-        defer_irqs: default_defer_irqs(),
     }]
 }
 
@@ -140,6 +139,19 @@ pub struct InterfaceConfig {
     /// Defaults to false. For veth interfaces the ethtool command targets the peer interface.
     #[serde(default)]
     pub checksum_offload: Option<bool>,
+    /// Interface-wide Linux NAPI busy-poll settings.
+    #[serde(default)]
+    pub napi: Option<NapiConfig>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
+pub struct NapiConfig {
+    /// Interface GRO flush timeout, in nanoseconds.
+    #[serde(default = "default_flush_timeout_ns")]
+    pub flush_timeout_ns: u64,
+    /// Number of deferred hard IRQs while NAPI busy polling is active.
+    #[serde(default = "default_defer_irqs")]
+    pub defer_irqs: u32,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
@@ -178,18 +190,12 @@ pub struct XskMapping {
     /// RX polling mode: "userspace_ring_spin" (default) or "napi_busy_poll".
     #[serde(default = "default_poll_mode")]
     pub poll_mode: String,
-    /// Per-socket NAPI busy-poll timeout, in microseconds.
-    #[serde(default = "default_busy_poll_us")]
-    pub busy_poll_us: i32,
+    /// Per-socket NAPI busy-poll timeout, in nanoseconds.
+    #[serde(default = "default_busy_poll_ns")]
+    pub busy_poll_ns: u64,
     /// Maximum number of packets processed per NAPI busy-poll cycle.
     #[serde(default = "default_busy_poll_budget")]
     pub busy_poll_budget: i32,
-    /// Interface GRO flush timeout, in microseconds, while NAPI busy polling is active.
-    #[serde(default = "default_flush_timeout")]
-    pub flush_timeout: u64,
-    /// Number of deferred hard IRQs while NAPI busy polling is active.
-    #[serde(default = "default_defer_irqs")]
-    pub defer_irqs: u32,
 }
 
 fn default_xdp_mode() -> String {
@@ -200,15 +206,15 @@ fn default_poll_mode() -> String {
     "userspace_ring_spin".to_string()
 }
 
-fn default_busy_poll_us() -> i32 {
-    20
+fn default_busy_poll_ns() -> u64 {
+    20_000
 }
 
 fn default_busy_poll_budget() -> i32 {
     64
 }
 
-fn default_flush_timeout() -> u64 {
+fn default_flush_timeout_ns() -> u64 {
     0
 }
 
@@ -586,10 +592,8 @@ impl WabricksConfig {
                 zerocopy: true,
                 xdp_mode: default_xdp_mode(),
                 poll_mode: default_poll_mode(),
-                busy_poll_us: default_busy_poll_us(),
+                busy_poll_ns: default_busy_poll_ns(),
                 busy_poll_budget: default_busy_poll_budget(),
-                flush_timeout: default_flush_timeout(),
-                defer_irqs: default_defer_irqs(),
             };
             self.wabrix.xsk.push(xsk_mapping);
         }
@@ -1589,8 +1593,16 @@ impl WabricksConfig {
                     umem_config: umem_config.clone(),
                     xdp_mode: xsk_map.xdp_mode.clone(),
                     poll_mode: xsk_map.poll_mode.clone(),
-                    busy_poll_us: xsk_map.busy_poll_us,
+                    busy_poll_ns: xsk_map.busy_poll_ns,
                     busy_poll_budget: xsk_map.busy_poll_budget,
+                    napi_flush_timeout_ns: self
+                        .wabrix
+                        .ifaces
+                        .iter()
+                        .find(|iface| iface.name == xsk_map.iface)
+                        .and_then(|iface| iface.napi.as_ref())
+                        .map(|napi| napi.flush_timeout_ns)
+                        .unwrap_or(0),
                 });
             }
         }
