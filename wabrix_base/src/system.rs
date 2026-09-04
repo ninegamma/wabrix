@@ -374,28 +374,184 @@ fn process_exists(name: &str) -> bool {
     false
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InterfaceCheckConfig {
+    pub name: String,
+    pub poll_mode: String,
+    pub irq_core: Option<usize>,
+    pub serving_worker_cores: Vec<usize>,
+}
+
+impl InterfaceCheckConfig {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            poll_mode: "userspace_ring_spin".to_string(),
+            irq_core: None,
+            serving_worker_cores: Vec::new(),
+        }
+    }
+
+    pub fn with_mode(
+        name: impl Into<String>,
+        poll_mode: impl Into<String>,
+        irq_core: Option<usize>,
+        serving_worker_cores: Vec<usize>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            poll_mode: poll_mode.into(),
+            irq_core,
+            serving_worker_cores,
+        }
+    }
+}
+
+impl From<&str> for InterfaceCheckConfig {
+    fn from(name: &str) -> Self {
+        Self::new(name)
+    }
+}
+
+impl From<String> for InterfaceCheckConfig {
+    fn from(name: String) -> Self {
+        Self::new(name)
+    }
+}
+
+impl From<&String> for InterfaceCheckConfig {
+    fn from(name: &String) -> Self {
+        Self::new(name.as_str())
+    }
+}
+
 pub fn check_irq_affinity(worker_core: usize, interface: &str) {
+    let iface = InterfaceCheckConfig::new(interface);
+    check_interface_irq_affinity(&iface, &[worker_core]);
+}
+
+pub fn check_interface_irq_affinity(
+    iface: &InterfaceCheckConfig,
+    all_worker_cores: &[usize],
+) {
+    let configured_irq_core_mismatch = iface.poll_mode == "napi_busy_poll"
+        && iface
+            .irq_core
+            .is_some_and(|irq_core| {
+                !iface.serving_worker_cores.is_empty()
+                    && !iface.serving_worker_cores.contains(&irq_core)
+            });
+
+    // 1. Configured irq_core check
+    match iface.poll_mode.as_str() {
+        "napi_busy_poll" => {
+            if let Some(irq_core) = iface.irq_core {
+                if !iface.serving_worker_cores.is_empty()
+                    && !iface.serving_worker_cores.contains(&irq_core)
+                {
+                    warn!(
+                        "⚠️ WARNING: Interface {} is in napi_busy_poll mode: configured irq_core ({}) does not match worker core {:?} serving that interface.",
+                        iface.name, irq_core, iface.serving_worker_cores
+                    );
+                } else if iface.serving_worker_cores.contains(&irq_core) {
+                    info!(
+                        "✓ Interface {} IRQ core {} matches serving worker core.",
+                        iface.name, irq_core
+                    );
+                }
+            } else if !iface.serving_worker_cores.is_empty() {
+                warn!(
+                    "⚠️ WARNING: Interface {} is in napi_busy_poll mode, but irq_core is not configured. It should be set to worker core {:?} serving that interface.",
+                    iface.name, iface.serving_worker_cores
+                );
+            } else {
+                warn!(
+                    "⚠️ WARNING: Interface {} is in napi_busy_poll mode, but irq_core is not configured.",
+                    iface.name
+                );
+            }
+        }
+        _ => {
+            // userspace_ring_spin (default)
+            if let Some(irq_core) = iface.irq_core {
+                if all_worker_cores.contains(&irq_core) {
+                    warn!(
+                        "⚠️ WARNING: Interface {} IRQs are configured on worker CPU {}. In userspace_ring_spin mode, move the IRQ to a different physical core to avoid contention.",
+                        iface.name, irq_core
+                    );
+                }
+            }
+        }
+    }
+
+    // 2. /proc/interrupts and smp_affinity_list check
     if let Ok(interrupts) = fs::read_to_string("/proc/interrupts") {
+        let mut found_irq = false;
         let mut b_warn = false;
         for line in interrupts.lines() {
-            if line.contains(interface) {
+            if line.contains(&iface.name) {
+                found_irq = true;
                 let irq_num = line.split(':').next().unwrap_or("").trim();
                 let affinity_path = format!("/proc/irq/{}/smp_affinity_list", irq_num);
 
                 if let Ok(affinity) = fs::read_to_string(&affinity_path) {
-                    if affinity.contains(&worker_core.to_string()) {
-                        warn!(
-                            "⚠️  IRQ CONFLICT: Interface {} (IRQ {}) is allowed on worker core {}!",
-                            interface, irq_num, worker_core
-                        );
-                        warn!("   Check your 'irqaffinity' or /proc/irq/ settings.");
-                        b_warn = true;
+                    let allowed_cpus = parse_cpu_list(affinity.trim());
+
+                    if iface.poll_mode == "napi_busy_poll" {
+                        for &serving_core in &iface.serving_worker_cores {
+                            if !configured_irq_core_mismatch
+                                && !allowed_cpus.contains(&serving_core)
+                            {
+                                warn!(
+                                    "⚠️  IRQ MISMATCH: Interface {} (IRQ {}) is in napi_busy_poll mode, but is NOT allowed on serving worker core {} (affinity: {})!",
+                                    iface.name, irq_num, serving_core, affinity.trim()
+                                );
+                                if let Some(target_core) = iface.irq_core {
+                                    warn!("   (IRQ affinity will be corrected to core {} during interface configuration).", target_core);
+                                } else {
+                                    warn!("   Check your 'irqaffinity' or /proc/irq/ settings.");
+                                }
+                                b_warn = true;
+                            }
+                        }
+
+                        for &worker_core in all_worker_cores {
+                            if !iface.serving_worker_cores.contains(&worker_core)
+                                && allowed_cpus.contains(&worker_core)
+                            {
+                                warn!(
+                                    "⚠️  IRQ CONFLICT: Interface {} (IRQ {}) is allowed on worker core {} (which does not serve this interface)!",
+                                    iface.name, irq_num, worker_core
+                                );
+                                if let Some(target_core) = iface.irq_core {
+                                    warn!("   (IRQ affinity will be corrected to core {} during interface configuration).", target_core);
+                                } else {
+                                    warn!("   Check your 'irqaffinity' or /proc/irq/ settings.");
+                                }
+                                b_warn = true;
+                            }
+                        }
+                    } else {
+                        for &worker_core in all_worker_cores {
+                            if allowed_cpus.contains(&worker_core) {
+                                warn!(
+                                    "⚠️  IRQ CONFLICT: Interface {} (IRQ {}) is allowed on worker core {}!",
+                                    iface.name, irq_num, worker_core
+                                );
+                                if let Some(target_core) = iface.irq_core {
+                                    warn!("   (IRQ affinity will be corrected to core {} during interface configuration).", target_core);
+                                } else {
+                                    warn!("   Check your 'irqaffinity' or /proc/irq/ settings.");
+                                }
+                                b_warn = true;
+                            }
+                        }
                     }
                 }
             }
         }
-        if !b_warn {
-            info!("✓ No IRQ conflicts found.");
+        if found_irq && !b_warn && !configured_irq_core_mismatch {
+            info!("✓ No IRQ conflicts found for {}.", iface.name);
         }
     }
 }
@@ -787,11 +943,11 @@ pub fn probe_xdp_interfaces() {
 ///
 /// # Arguments
 /// * `worker_cores` - List of CPU cores used by workers
-/// * `interfaces` - List of network interface names
+/// * `interfaces` - List of network interface check configurations
 /// * `irq_assignments` - Configured `(interface, CPU)` IRQ assignments
 pub fn check_system(
     worker_cores: &[usize],
-    interfaces: &[String],
+    interfaces: &[InterfaceCheckConfig],
     irq_assignments: &[(String, usize)],
 ) {
     info!("=== wabrix Pre-Flight System Check ===");
@@ -814,15 +970,62 @@ pub fn check_system(
         check_cpu_governor(core);
     }
 
-    // Check IRQ affinity for all interfaces and worker cores
+    // Check IRQ affinity for all interfaces
     for interface in interfaces {
-        for &core in worker_cores {
-            check_irq_affinity(core, interface);
-        }
+        check_interface_irq_affinity(interface, worker_cores);
     }
 
     // Check configured IRQ CPUs against SMT siblings of worker CPUs.
     check_smt_irq_affinity(worker_cores, irq_assignments);
 
     info!("======== System Check Completed =======");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_interface_check_config_constructors() {
+        let default_cfg = InterfaceCheckConfig::new("eth0");
+        assert_eq!(default_cfg.name, "eth0");
+        assert_eq!(default_cfg.poll_mode, "userspace_ring_spin");
+        assert_eq!(default_cfg.irq_core, None);
+        assert!(default_cfg.serving_worker_cores.is_empty());
+
+        let napi_cfg = InterfaceCheckConfig::with_mode("eth1", "napi_busy_poll", Some(3), vec![3]);
+        assert_eq!(napi_cfg.name, "eth1");
+        assert_eq!(napi_cfg.poll_mode, "napi_busy_poll");
+        assert_eq!(napi_cfg.irq_core, Some(3));
+        assert_eq!(napi_cfg.serving_worker_cores, vec![3]);
+
+        let from_str: InterfaceCheckConfig = "eth2".into();
+        assert_eq!(from_str.name, "eth2");
+        assert_eq!(from_str.poll_mode, "userspace_ring_spin");
+    }
+
+    #[test]
+    fn test_check_interface_irq_affinity_logic() {
+        let worker_cores = vec![2, 3];
+
+        // NAPI busy poll: irq_core matching serving worker core 3
+        let napi_match = InterfaceCheckConfig::with_mode("enp2s0f1np1", "napi_busy_poll", Some(3), vec![3]);
+        check_interface_irq_affinity(&napi_match, &worker_cores);
+
+        // NAPI busy poll: irq_core mismatch (e.g. 8 instead of 3)
+        let napi_mismatch = InterfaceCheckConfig::with_mode("enp2s0f1np1", "napi_busy_poll", Some(8), vec![3]);
+        check_interface_irq_affinity(&napi_mismatch, &worker_cores);
+
+        // NAPI busy poll: irq_core unset
+        let napi_unset = InterfaceCheckConfig::with_mode("enp2s0f1np1", "napi_busy_poll", None, vec![3]);
+        check_interface_irq_affinity(&napi_unset, &worker_cores);
+
+        // Userspace ring spin: irq_core on separate core 8
+        let spin_ok = InterfaceCheckConfig::with_mode("enp2s0f0np0", "userspace_ring_spin", Some(8), vec![2]);
+        check_interface_irq_affinity(&spin_ok, &worker_cores);
+
+        // Userspace ring spin: irq_core on worker core 2 (conflict)
+        let spin_conflict = InterfaceCheckConfig::with_mode("enp2s0f0np0", "userspace_ring_spin", Some(2), vec![2]);
+        check_interface_irq_affinity(&spin_conflict, &worker_cores);
+    }
 }

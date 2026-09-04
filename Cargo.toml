@@ -48,6 +48,6 @@ libbpf-cargo = "0.27.0"
 
 
 [patch.crates-io]
-#xsk-rs = { git = "https://github.com/ninegamma/xsk-rs.git", branch = "master" }
+xsk-rs = { git = "https://github.com/ninegamma/xsk-rs.git", branch = "master" }
 libxdp-sys = { git = "https://github.com/ninegamma/libxdp-sys.git", branch = "ninegamma" }
-xsk-rs = { path= "../xsk-rs" }
+#xsk-rs = { path= "../xsk-rs" }

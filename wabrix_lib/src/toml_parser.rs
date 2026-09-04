@@ -1474,6 +1474,72 @@ impl WabricksConfig {
         Ok(())
     }
 
+    /// Builds interface check configurations describing poll modes, configured IRQ cores,
+    /// and serving worker cores for pre-flight system checks.
+    pub fn interface_check_configs(&self) -> Vec<wabrix_base::system::InterfaceCheckConfig> {
+        let mut iface_poll_modes: HashMap<String, String> = HashMap::new();
+        for xsk in &self.wabrix.xsk {
+            iface_poll_modes.insert(xsk.iface.clone(), xsk.poll_mode.clone());
+        }
+
+        let mut iface_serving_cores: HashMap<String, Vec<usize>> = HashMap::new();
+        for pipeline in &self.pipelines {
+            for node in &pipeline.nodes {
+                if let Some(iface) = node.args.get("interface") {
+                    if let Some(queues) = &node.queues {
+                        for (idx, _) in queues.iter().enumerate() {
+                            if idx < pipeline.workers.len() {
+                                let worker_id = pipeline.workers[idx];
+                                if let Some(worker) =
+                                    self.wabrix.workers.iter().find(|w| w.id == worker_id)
+                                {
+                                    let entry =
+                                        iface_serving_cores.entry(iface.clone()).or_default();
+                                    if !entry.contains(&worker.core) {
+                                        entry.push(worker.core);
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        for &worker_id in &pipeline.workers {
+                            if let Some(worker) =
+                                self.wabrix.workers.iter().find(|w| w.id == worker_id)
+                            {
+                                let entry =
+                                    iface_serving_cores.entry(iface.clone()).or_default();
+                                if !entry.contains(&worker.core) {
+                                    entry.push(worker.core);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        self.wabrix
+            .ifaces
+            .iter()
+            .map(|iface| {
+                let poll_mode = iface_poll_modes
+                    .get(&iface.name)
+                    .cloned()
+                    .unwrap_or_else(|| "userspace_ring_spin".to_string());
+                let serving_worker_cores = iface_serving_cores
+                    .get(&iface.name)
+                    .cloned()
+                    .unwrap_or_default();
+                wabrix_base::system::InterfaceCheckConfig {
+                    name: iface.name.clone(),
+                    poll_mode,
+                    irq_core: iface.irq_core,
+                    serving_worker_cores,
+                }
+            })
+            .collect()
+    }
+
     pub fn to_system_builder(&self) -> anyhow::Result<SystemBuilder> {
         // --- STEP 1: Build Lookups (Who owns which queue?) ---
 
@@ -2759,5 +2825,60 @@ mod tests {
             "Error message did not match expected output. Got: {}",
             err_msg
         );
+    }
+
+    #[test]
+    fn test_interface_check_configs_resolution() {
+        let toml_str = r#"
+            [wabrix]
+            ifaces = [
+                { name = "enp2s0f0np0", rxd = 8096, txd = 8096, irq_core = 8 },
+                { name = "enp2s0f1np1", rxd = 8096, txd = 8096, irq_core = 3, napi = { flush_timeout_ns = 60000, defer_irqs = 1024 } }
+            ]
+            umem = [
+                { id = 0, frame_size = 2048, frame_count = 4096, fq_size = 1024, cq_size = 1024, head_room = 128 },
+                { id = 1, frame_size = 2048, frame_count = 4096, fq_size = 1024, cq_size = 1024, head_room = 128 }
+            ]
+            xsk = [
+                { iface = "enp2s0f0np0", queues = [0], umem = 0, rxq_size = 1024, txq_size = 1024, zerocopy = true },
+                { iface = "enp2s0f1np1", queues = [0], umem = 1, rxq_size = 1024, txq_size = 1024, zerocopy = true, poll_mode = "napi_busy_poll", busy_poll_ns = 2050, busy_poll_budget = 1024 }
+            ]
+            workers = [
+                { id = 0, core = 2, partitions = [{ umem = 0, count = 1 }] },
+                { id = 1, core = 3, partitions = [{ umem = 1, count = 1 }] }
+            ]
+
+            [[pipelines]]
+            name = "gen_pipe"
+            workers = [0]
+                [[pipelines.nodes]]
+                id = "tx_sink"
+                type = "BatchTxNode"
+                queues = [0]
+                args = { interface = "enp2s0f0np0", sink_type = "xsk" }
+
+            [[pipelines]]
+            name = "inspect_pipe"
+            workers = [1]
+                [[pipelines.nodes]]
+                id = "rx_source"
+                type = "BatchRxNode"
+                queues = [0]
+                args = { interface = "enp2s0f1np1" }
+        "#;
+
+        let config: WabricksConfig = toml::from_str(toml_str).unwrap();
+        let checks = config.interface_check_configs();
+        assert_eq!(checks.len(), 2);
+
+        let iface0 = checks.iter().find(|c| c.name == "enp2s0f0np0").unwrap();
+        assert_eq!(iface0.poll_mode, "userspace_ring_spin");
+        assert_eq!(iface0.irq_core, Some(8));
+        assert_eq!(iface0.serving_worker_cores, vec![2]);
+
+        let iface1 = checks.iter().find(|c| c.name == "enp2s0f1np1").unwrap();
+        assert_eq!(iface1.poll_mode, "napi_busy_poll");
+        assert_eq!(iface1.irq_core, Some(3));
+        assert_eq!(iface1.serving_worker_cores, vec![3]);
     }
 }

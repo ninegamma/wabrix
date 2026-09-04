@@ -259,7 +259,8 @@ async fn main() -> anyhow::Result<()> {
                             .map(|irq_core| (iface.name.clone(), irq_core))
                     })
                     .collect();
-                wabrix_base::system::check_system(&worker_cores, &interfaces, &irq_assignments);
+                let interface_checks = current_config.interface_check_configs();
+                wabrix_base::system::check_system(&worker_cores, &interface_checks, &irq_assignments);
 
                 // Configure Network Interfaces
                 info!("Configuring network interfaces...");
@@ -491,12 +492,6 @@ async fn main() -> anyhow::Result<()> {
                     .iter()
                     .map(|w| w.core)
                     .collect();
-                let interfaces: Vec<String> = current_config
-                    .wabrix
-                    .ifaces
-                    .iter()
-                    .map(|i| i.name.clone())
-                    .collect();
                 let irq_assignments: Vec<(String, usize)> = current_config
                     .wabrix
                     .ifaces
@@ -507,7 +502,8 @@ async fn main() -> anyhow::Result<()> {
                             .map(|irq_core| (iface.name.clone(), irq_core))
                     })
                     .collect();
-                wabrix_base::system::check_system(&worker_cores, &interfaces, &irq_assignments);
+                let interface_checks = current_config.interface_check_configs();
+                wabrix_base::system::check_system(&worker_cores, &interface_checks, &irq_assignments);
 
                 info!("Validating pipeline topology...");
                 match current_config.to_system_builder() {

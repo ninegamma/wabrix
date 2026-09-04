@@ -53,7 +53,7 @@ dst_mac = "44:49:88:06:63:39"
 src_ip = "10.10.10.222"
 
 [pipelines.nodes.hot_wasm_data]
-syn_limit = "200M"
+syn_limit = "1000M"
 syn_rate = "12000K"
 
 [[pipelines.nodes]]
