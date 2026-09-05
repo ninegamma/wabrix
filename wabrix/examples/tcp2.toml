@@ -30,14 +30,14 @@ workers = [0]
 poll_frequency = 10000
 # Target lifecycle state for this pipeline
 # Valid values: "Running", "Paused",
-desired_state = "Running"
+desired_state = "Running delay=1000"
 
 [[pipelines.nodes]]
 id = "rx_source"
 type = "BatchRxNode"
 routes = ["nd_parser"]
 queues = [0]
-args= { interface = "enp2s0f0np0", batch_size = "256" }
+args= { interface = "enp2s0f0np0", batch_size = "512" }
 hot_args= {}
 
 [[pipelines.nodes]]
@@ -62,7 +62,7 @@ routes = ["shared_tx_sink", "veth_sink", "drop"]
 labels = ["SentSyn", "SentSynAck", "SentSynAck2", "SentFin", "SentFinPssv", "SentAck4Fin", "SentAck", "SentRst", "RecvSyn", "RecvSynAck", "RecvSynAck2", "RecvFin", "RecvFinPssv", "RecvAck4Fin", "RecvAck", "RecvRst", "Unexpected", "RecvPayload", "SentPayload", "TickDrop", "ToLinux", "Drop", "Watermark"]
 # Node-level state override
 desired_state = "Running"
-args= { umem = "0" }
+args= { umem = "0", batch_size="512"}
 hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/tcp_engine.wasm" }
 
 [pipelines.nodes.wasm_data]
@@ -73,8 +73,8 @@ src_ip = "10.10.10.222"
 
 [pipelines.nodes.hot_wasm_data]
 syn_limit = "60M"
-close_timeout = "100"
-syn_rate = "600k"
+close_timeout = "80"
+syn_rate = "1000k"
 
 [[pipelines.nodes]]
 id = "nd_parser_veth"
@@ -121,7 +121,7 @@ id = "rx_source"
 type = "BatchRxNode"
 routes = ["nd_parser"]
 queues = [0]
-args= { interface = "enp2s0f1np1", batch_size = "256" }
+args= { interface = "enp2s0f1np1", batch_size = "512" }
 hot_args= {}
 
 [[pipelines.nodes]]
@@ -135,12 +135,12 @@ hot_args= {}
 [[pipelines.nodes]]
 id = "nd_parser"
 type = "FastParserNode"
-routes = ["tcp_engine"]
+routes = ["tcp_server"]
 args= {}
 hot_args= {}
 
 [[pipelines.nodes]]
-id = "tcp_engine"
+id = "tcp_server"
 type = "WasmEngine"
 routes = ["shared_tx_sink", "veth_sink", "drop"]
 labels = ["SentSyn", "SentSynAck", "SentSynAck2", "SentFin", "SentFinPssv", "SentAck4Fin", "SentAck", "SentRst", "RecvSyn", "RecvSynAck", "RecvSynAck2", "RecvFin", "RecvFinPssv", "RecvAck4Fin", "RecvAck", "RecvRst", "Unexpected", "RecvPayload", "SentPayload", "TickDrop", "ToLinux", "Drop", "Watermerk"]
@@ -155,7 +155,7 @@ src_mac = "44:49:88:06:63:39"
 dst_mac = "44:49:88:06:63:38"
 
 [pipelines.nodes.hot_wasm_data]
-close_timeout = "200"
+#close_timeout = "200"
 
 [[pipelines.nodes]]
 id = "nd_parser_veth"

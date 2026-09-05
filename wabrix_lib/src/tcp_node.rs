@@ -105,6 +105,8 @@ impl TcpNode {
             .or(raw_src_ip)
             .unwrap_or_else(|| alloc::string::String::from("unknown"));
 
+        config.refresh_timeout_cycles();
+
         log::debug!("TcpNode '{}': config — syn_rate={:?}, syn_limit={:?}, src_ip={:?}, dst_ip={:?}, close_timeout_ms={:?}, tsc_freq={}",
             id.id, config.syn_rate, config.syn_limit, config.src_ip, config.dst_ip,
             config.close_timeout_millis, tsc_frequency);
@@ -354,8 +356,7 @@ impl Node for TcpNode {
         batch.clear();
 
         // === 1. TIMEOUT SCAVENGER (runs every 10 ms) ===
-        if let Some(timeout_millis) = self.config.close_timeout_millis {
-            let timeout_cycles = ((timeout_millis as u128 * tsc_freq as u128) / 1000) as u64;
+        if let Some(timeout_cycles) = self.config.timeout_cycles {
             if current_tsc.saturating_sub(self.last_timeout_scan) > (tsc_freq / 100) {
                 self.last_timeout_scan = current_tsc;
 
@@ -400,15 +401,18 @@ impl Node for TcpNode {
                     }
                     let delta = current_tsc.saturating_sub(self.syn_gen.last_tsc);
                     self.syn_gen.last_tsc = current_tsc;
-                    self.syn_gen.cycle_accumulator += (delta as u128) * (syn_rate as u128);
-                    let mut n = (self.syn_gen.cycle_accumulator / (tsc_freq as u128)) as u32;
+                    self.syn_gen.cycle_accumulator = self
+                        .syn_gen
+                        .cycle_accumulator
+                        .saturating_add(delta.saturating_mul(syn_rate));
+                    let mut n = (self.syn_gen.cycle_accumulator / tsc_freq) as u32;
                     if let Some(max) = self.config.syn_limit {
                         let remaining = max.saturating_sub(self.syn_gen.packets_sent);
                         if (n as u64) > remaining {
                             n = remaining as u32;
                         }
                     }
-                    self.syn_gen.cycle_accumulator %= tsc_freq as u128;
+                    self.syn_gen.cycle_accumulator %= tsc_freq;
                     log::trace!("TcpNode poll_timers: {} SYNs scheduled", n);
                     (n as usize).min(MAX_BATCH_SIZE.saturating_sub(timeout_count))
                 } else {
