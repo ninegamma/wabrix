@@ -28,6 +28,31 @@ struct Opt {
     config: String,
 }
 
+fn print_wabrix_section(path: &str) {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return;
+    };
+
+    let mut section = Vec::new();
+    let mut in_wabrix_section = false;
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            if in_wabrix_section {
+                break;
+            }
+            in_wabrix_section = trimmed == "[wabrix]";
+        }
+        if in_wabrix_section {
+            section.push(line);
+        }
+    }
+
+    if !section.is_empty() {
+        println!("{}\n", section.join("\n"));
+    }
+}
+
 /// Commands sent from the CLI terminal to the main lifecycle loop
 #[derive(Debug, Clone, PartialEq)]
 pub enum SystemCommand {
@@ -109,6 +134,7 @@ async fn main() -> anyhow::Result<()> {
     let (initial_config, mut dataplane_active) =
         match wabrix_lib::toml_parser::WabricksConfig::from_file(&opt.config) {
             Ok(config) => {
+                print_wabrix_section(&opt.config);
                 info!(
                     "Configuration loaded and validated successfully. Initiating START sequence."
                 );
@@ -363,6 +389,7 @@ async fn main() -> anyhow::Result<()> {
 
                                     match target_config_result {
                                         Ok(target_config) => {
+                                            print_wabrix_section(&new_path);
                                             match reconcile_config(system_state.clone(), &current_config, &target_config) {
                                                 ReconciliationResult::FullRestart => {
                                                     info!("Structural changes detected. Initiating full data plane restart.");

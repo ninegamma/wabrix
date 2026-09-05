@@ -1,12 +1,12 @@
 [wabrix]
 ifaces= [
-    { name = "enp2s0f0np0", rxd = 8096, txd = 8096, irq_core = 8 },
-    { name = "enp2s0f1np1", rxd = 8096, txd = 8096, irq_core = 3, napi = { flush_timeout_ns = 60000, defer_irqs = 1024 } },
+    { name = "enp2s0f0np0", rxd = 8096, txd = 8096, irq_core = 2, napi = { flush_timeout_ns = 60000, defer_irqs = 256 } },
+    { name = "enp2s0f1np1", rxd = 8096, txd = 8096, irq_core = 3, napi = { flush_timeout_ns = 60000, defer_irqs = 256 } },
     #{ name = "enp2s0f1np1", rxd = 8096, txd = 8096, irq_core = 3 } ,
 ]
 umem= [
     { id = 0, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 1, reserved = 131072 },
-    { id = 1, frame_size = 2048, frame_count = 1048576, fq_size = 262144, cq_size = 32768, head_room = 128, partitions = 1, reserved = 131072 },
+    { id = 1, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 1, reserved = 131072 },
 ]
 
 # Optional XSK fields:
@@ -14,7 +14,7 @@ umem= [
 # busy_poll_ns = 20_000 sets its per-socket timeout. Missing poll_mode defaults to
 # "userspace_ring_spin".
 xsk= [
-    { iface = "enp2s0f0np0", queues = [0], umem = 0, rxq_size = 32768, txq_size = 32768, zerocopy = true, xdp_mode = "auto" },
+    { iface = "enp2s0f0np0", queues = [0], umem = 0, rxq_size = 32768, txq_size = 32768, zerocopy = true, xdp_mode = "auto",  poll_mode = "napi_busy_poll", busy_poll_ns = 2_050, busy_poll_budget= 1024 },
     { iface = "enp2s0f1np1", queues = [0], umem = 1, rxq_size = 32768, txq_size = 32768, zerocopy = true, xdp_mode = "auto",  poll_mode = "napi_busy_poll", busy_poll_ns = 2_050, busy_poll_budget= 1024 },
 #    { iface = "enp2s0f1np1", queues = [0], umem = 1, rxq_size = 16384, txq_size = 16384, zerocopy = true, xdp_mode = "auto",  poll_mode = "userspace_ring_spin"},
 ]
@@ -24,10 +24,11 @@ workers= [
     { id = 1, core = 3, partitions = [{ umem = 1, count = 1 }] },
 ]
 
+
+[[pipelines]]
 # ===================================================================
 # PIPELINE: generator
 # ===================================================================
-[[pipelines]]
 name = "generator_pipe"
 workers = [0]
 poll_frequency = 40000
@@ -53,7 +54,7 @@ dst_mac = "44:49:88:06:63:39"
 src_ip = "10.10.10.222"
 
 [pipelines.nodes.hot_wasm_data]
-syn_limit = "1000M"
+syn_limit = "500M"
 syn_rate = "12000K"
 
 [[pipelines.nodes]]
@@ -73,6 +74,9 @@ hot_args= {}
 
 
 [[pipelines]]
+# ===================================================================
+# PIPELINE: inspector
+# ===================================================================
 name = "inspector_pipe"
 workers = [1]
 poll_frequency = 1000

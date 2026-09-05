@@ -77,7 +77,7 @@ pub struct WasmEngine {
     timer_batch_mismatches: u64,
     mailbox_conservation_failures: u64,
     timer_route_counts: Vec<u64>,
-    /// Route carrying timer-generated TCP transmissions (shared_tx_sink in tcp2.toml).
+    /// Route carrying timer-generated TCP transmissions
     timer_syn_route_index: usize,
     tsc_frequency: u64,
     last_timer_diagnostics_tsc: Option<u64>,

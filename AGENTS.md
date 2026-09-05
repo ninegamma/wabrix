@@ -84,7 +84,7 @@ There is **no `ipblower` crate in this workspace.** In-tree traffic generation i
 * **Linting:** Code must pass `cargo clippy --all-targets --all-features -- -D warnings`. Fix every warning; do not `#[allow(...)]` without a comment explaining why it is unavoidable.
 
 ### Networking & Kernel Bypass (AF_XDP)
-* **MANDATORY LIBRARY:** Use the `xsk-rs` crate (workspace path `../xsk-rs`) for all AF_XDP socket manipulations, UMEM setup, and ring-buffer handling.
+* **MANDATORY LIBRARY:** Use the fork of the `xsk-rs` crate (either workspace path `../xsk-rs` or { git = "https://github.com/ninegamma/xsk-rs.git", branch = "master" } ) for all AF_XDP socket manipulations, UMEM setup, and ring-buffer handling.
 * **FORBIDDEN:** Do NOT use `aya`, `std::net` sockets, or `libpcap` for data-plane packet I/O.
 * BPF programs are loaded via `libbpf-rs`/`libbpf-sys`. Skeleton code is generated at build time by `libbpf-cargo` in `wabrix_lib/build.rs`. The eBPF source lives in `wabrix_lib/src/bpf/` (`xscrubber.bpf.c`).
 

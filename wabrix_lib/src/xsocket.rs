@@ -1359,25 +1359,43 @@ impl BatchTx for XSocketTx {
         }
         let mut tx_guard = self.tx_queue.lock();
         //let free_slots = tx_guard.nb_free(original_batch_len as u32) as usize;
-        let free_slots = tx_guard.nb_free_exact() as usize;
+        let mut free_slots = tx_guard.nb_free_exact() as usize;
 
         if free_slots == 0 {
-            // The ring is completely jammed. Force a kernel wakeup to try and clear it.
-            unsafe {
-                libc::sendto(
-                    self.fd,
-                    core::ptr::null(),
-                    0,
-                    libc::MSG_DONTWAIT,
-                    core::ptr::null_mut(),
-                    0,
-                );
+            if self.config.poll_mode == "napi_busy_poll" {
+                // Do not hold the TX ring lock while the kernel may busy-poll.
+                // NAPI can complete TX work during this call; userspace still
+                // has to consume those completions below.
+                drop(tx_guard);
+                self.poll_for_napi_tx()?;
+                self.drain_completion_queue()?;
+                tx_guard = self.tx_queue.lock();
+                free_slots = tx_guard.nb_free_exact() as usize;
+            } else {
+                // The ring is completely jammed. Force a kernel wakeup to try
+                // and clear it when NAPI busy polling is not enabled.
+                unsafe {
+                    libc::sendto(
+                        self.fd,
+                        core::ptr::null(),
+                        0,
+                        libc::MSG_DONTWAIT,
+                        core::ptr::null_mut(),
+                        0,
+                    );
+                }
             }
-            log::warn!(
-                "🔥 [TX SATURATED] Worker {} Queue {}: TX Ring is 100% full! (Batch size: {}). Wasm engine is outrunning the hardware.",
-                self.config.worker_id, self.config.queue_id, original_batch_len
-            );
-            return Ok(0);
+
+            if free_slots == 0 {
+                // The ring is still full after the wakeup/poll attempt. Leave
+                // the batch intact so the caller can retry it later.
+                drop(tx_guard);
+                log::warn!(
+                    "🔥 [TX SATURATED] Worker {} Queue {}: TX Ring is 100% full! (Batch size: {}). Wasm engine is outrunning the hardware.",
+                    self.config.worker_id, self.config.queue_id, original_batch_len
+                );
+                return Ok(0);
+            }
         } else if free_slots < original_batch_len {
             log::info!(
                 "⚠️ [TX BACKPRESSURE] Worker {} Queue {}: Batch of {} packets, but only {} TX slots free.",
@@ -1515,6 +1533,24 @@ impl BatchTx for XSocketTx {
 
 // Add helper methods for XSocketTx
 impl XSocketTx {
+    /// Give the kernel an opportunity to run NAPI and complete TX descriptors.
+    ///
+    /// The completion queue is consumed by userspace, so `POLLOUT` readiness
+    /// alone does not reclaim descriptors. Callers must drain the completion
+    /// queue and recheck the TX ring after this returns.
+    fn poll_for_napi_tx(&self) -> Result<(), Errno> {
+        // SAFETY: self.fd is a valid file descriptor for the lifetime of this call.
+        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(self.fd) };
+        let mut poll_fds = [PollFd::new(&borrowed_fd, PollFlags::OUT)];
+        let timeout = rustix::time::Timespec {
+            tv_sec: (self.config.busy_poll_ns / 1_000_000_000) as _,
+            tv_nsec: (self.config.busy_poll_ns % 1_000_000_000) as _,
+        };
+
+        poll(&mut poll_fds, Some(&timeout))?;
+        Ok(())
+    }
+
     /*
         /// Explicitly wakes up the kernel TX driver if it went to sleep
         #[inline]

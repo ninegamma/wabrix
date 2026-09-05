@@ -1,8 +1,8 @@
 [wabrix]
 ifaces= [
-    { name = "enp2s0f0np0", rxd = 8160, txd = 8160, irq_core = 2 },
+    { name = "enp2s0f0np0", rxd = 8096, txd = 8096, irq_core = 2 },
     { name = "veth_wabrix", rxd = 1024, txd = 1024, type = "veth", namespace = "ns-wabrix", peer = "tap-veth-0", mac_if = "enp2s0f0np0", ipnet = "10.10.10.222/24", checksum_offload = false },
-    { name = "enp2s0f1np1", rxd = 8160, txd = 8160, irq_core = 4 },
+    { name = "enp2s0f1np1", rxd = 8096, txd = 8096, irq_core = 4 },
     { name = "veth_wabrix_1", rxd = 1024, txd = 1024, type = "veth", namespace = "ns-wabrix-1", peer = "tap-veth-1", mac_if = "enp2s0f1np1", ipnet = "10.10.10.31/24", checksum_offload = false },
 ]
 umem= [
@@ -11,9 +11,9 @@ umem= [
     { id = 2, frame_size = 2048, frame_count = 131072, fq_size = 16384, cq_size = 16384, head_room = 128, partitions = 2, reserved = 10240 },
 ]
 xsk= [
-    { iface = "enp2s0f0np0", queues = [0], umem = 0, rxq_size = 16384, txq_size = 16384, zerocopy = true, xdp_mode = "auto" },
+    { iface = "enp2s0f0np0", queues = [0], umem = 0, rxq_size = 32768, txq_size = 32768, zerocopy = true, xdp_mode = "auto", },
     { iface = "veth_wabrix", queues = [0], umem = 2, rxq_size = 4096, txq_size = 4096, zerocopy = false, xdp_mode = "auto" },
-    { iface = "enp2s0f1np1", queues = [0], umem = 1, rxq_size = 16384, txq_size = 16384, zerocopy = true, xdp_mode = "auto" },
+    { iface = "enp2s0f1np1", queues = [0], umem = 1, rxq_size = 32768, txq_size = 32768, zerocopy = true, xdp_mode = "auto",  },
     { iface = "veth_wabrix_1", queues = [0], umem = 2, rxq_size = 4096, txq_size = 4096, zerocopy = false, xdp_mode = "auto" },
 ]
 workers= [
@@ -72,9 +72,9 @@ dst_mac = "44:49:88:06:63:39"
 src_ip = "10.10.10.222"
 
 [pipelines.nodes.hot_wasm_data]
-syn_limit = "100M"
+syn_limit = "60M"
 close_timeout = "100"
-syn_rate = "1150k"
+syn_rate = "600k"
 
 [[pipelines.nodes]]
 id = "nd_parser_veth"

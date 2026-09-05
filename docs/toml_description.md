@@ -44,8 +44,8 @@ Fields within `napi`:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `flush_timeout` | integer | `0` | Interface GRO flush timeout in microseconds. |
-| `defer_irqs` | integer | `0` | Number of deferred hard IRQs while NAPI busy polling is active. |
+| `flush_timeout_ns` | integer | `0` | Interface GRO flush timeout in nanoseconds. |
+| `defer_irqs` | integer | `0` | Number of consecutive empty NAPI polls allowed before NIC hard IRQs are re-enabled. `0` re-enables interrupts immediately. |
 
 **Validation:** Non-veth interfaces are checked via `ip link show`. Veth interfaces require `peer` and either `namespace` or `master`.
 
@@ -53,6 +53,8 @@ Fields within `napi`:
 ```toml
 ifaces = [
     { name = "enp2s0f0np0", rxd = 8160, txd = 4096, irq_core = 8 },
+    { name = "enp2s0f1np1", irq_core = 9,
+      napi = { flush_timeout_ns = 60000, defer_irqs = 1024 } },
     { name = "veth_wabrix", type = "veth", namespace = "ns-wabrix",
       peer = "tap-veth", mac_if = "enp2s0f0np0", ipnet = "192.168.177.222/24" },
 ]
@@ -113,8 +115,9 @@ Default: `[{ iface = "lo", queues = [0], umem = 0, rxq_size = 8192, txq_size = 8
 xsk = [
     { iface = "enp2s0f0np0", queues = [0, 1], umem = 0, rxq_size = 4096, txq_size = 4096,
       zerocopy = true, xdp_mode = "auto" },
-    { iface = "veth_wabrix", queues = [0], umem = 1, rxq_size = 2048, txq_size = 2048,
-      zerocopy = false },
+    { iface = "enp2s0f1np1", queues = [0], umem = 1, rxq_size = 2048, txq_size = 2048,
+      zerocopy = true, xdp_mode = "auto", poll_mode = "napi_busy_poll",
+      busy_poll_ns = 2050, busy_poll_budget = 1024 },
 ]
 ```
 

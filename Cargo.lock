@@ -3128,7 +3128,7 @@ dependencies = [
 
 [[package]]
 name = "wabrix"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3147,7 +3147,7 @@ dependencies = [
 
 [[package]]
 name = "wabrix_api"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -3162,7 +3162,7 @@ dependencies = [
 
 [[package]]
 name = "wabrix_base"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "crossbeam-queue",
@@ -3180,7 +3180,7 @@ dependencies = [
 
 [[package]]
 name = "wabrix_lib"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3217,7 +3217,7 @@ dependencies = [
 
 [[package]]
 name = "wabrix_wasm"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -4014,8 +4014,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "xsk-rs"
-version = "0.10.0"
-source = "git+https://github.com/ninegamma/xsk-rs.git?branch=master#76da16feaea1a29bb21f968792b241e89076b968"
+version = "0.11.0"
 dependencies = [
  "bitflags 2.13.1",
  "cfg-if",
