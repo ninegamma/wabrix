@@ -984,7 +984,7 @@ impl BatchRx for XSocketRx {
         // We slice into the buffer we already own. Zero memory allocation, zero memset overhead!
         // Lock the queue. It is uncontended, so it takes ~15 cycles.
         let mut rx_guard = self.rx_queue.lock();
-        let mut rcvd=
+        let mut rcvd =
             unsafe { rx_guard.consume(&mut self.scratch_descriptors_recv_batch[..max_to_pull]) };
 
         #[cfg(feature = "profiling")]
@@ -1016,27 +1016,23 @@ impl BatchRx for XSocketRx {
             }
 
             // Fallback to NAPI poll syscall ONLY if local spinning exhausts
-            if rcvd==0 && self.napi_busy_poll {
+            if rcvd == 0 && self.napi_busy_poll {
                 self.napi_poll_attempts += 1;
 
                 // Hand control to the kernel to spin safely on the hardware ring.
                 self.poll_for_napi_packets(Some(&self.napi_poll_timeout))?;
 
                 let newly_received = unsafe {
-                    rx_guard.consume(
-                        &mut self.scratch_descriptors_recv_batch[rcvd..max_to_pull],
-                    )
+                    rx_guard.consume(&mut self.scratch_descriptors_recv_batch[rcvd..max_to_pull])
                 };
 
                 if newly_received == 0 {
                     self.napi_poll_empty += 1;
                 }
 
-                self.max_napi_poll_consume =
-                    self.max_napi_poll_consume.max(newly_received);
+                self.max_napi_poll_consume = self.max_napi_poll_consume.max(newly_received);
                 rcvd += newly_received;
                 self.napi_poll_packets += newly_received as u64;
-
             }
 
             // Legacy driver wakeup fallback if empty spins persist
@@ -1048,7 +1044,8 @@ impl BatchRx for XSocketRx {
                         "**** Traffic burst ended after ~ {} cycles ({} us)",
                         (now - self.prof_burst_start).separated_string(),
                         (((now - self.prof_burst_start) as f64
-                            * (1_000_000.0 / get_tsc_frequency() as f64)) as u64)
+                            * (1_000_000.0 / get_tsc_frequency() as f64))
+                            as u64)
                             .separated_string()
                     );
                 }
@@ -1064,7 +1061,8 @@ impl BatchRx for XSocketRx {
                     if fq_needs_wakeup {
                         self.wakeup_rx_queue()?;
                         rcvd = unsafe {
-                            rx_guard.consume(&mut self.scratch_descriptors_recv_batch[..max_to_pull])
+                            rx_guard
+                                .consume(&mut self.scratch_descriptors_recv_batch[..max_to_pull])
                         };
                     }
                 }
@@ -1079,7 +1077,12 @@ impl BatchRx for XSocketRx {
                     self.prof_wakeup_cycles += t3 - t2;
                 }
 
-                if log::log_enabled!(log::Level::Debug) && self.prof_started && rcvd > 0 && self.napi_poll_attempts.is_multiple_of(NAPI_DIAGNOSTIC_LOG_INTERVAL)
+                if log::log_enabled!(log::Level::Debug)
+                    && self.prof_started
+                    && rcvd > 0
+                    && self
+                        .napi_poll_attempts
+                        .is_multiple_of(NAPI_DIAGNOSTIC_LOG_INTERVAL)
                 {
                     debug!(
                         "{}: [{} us] After Wakeup: Received {} packets. Empty spins= {}. Total rx: {}, Free frames: {}",
@@ -1150,8 +1153,8 @@ impl BatchRx for XSocketRx {
             && self.prof_started
             && self.napi_poll_attempts > 0
             && self
-            .napi_poll_attempts
-            .is_multiple_of(NAPI_DIAGNOSTIC_LOG_INTERVAL)
+                .napi_poll_attempts
+                .is_multiple_of(NAPI_DIAGNOSTIC_LOG_INTERVAL)
         {
             let average_napi_poll_consume =
                 self.napi_poll_packets as f64 / self.napi_poll_attempts as f64;
@@ -1168,7 +1171,6 @@ impl BatchRx for XSocketRx {
                             rcvd
                         );
         }
-
 
         /*
         // Emit a periodic summary rather than logging every normal refill.
@@ -1209,7 +1211,6 @@ impl BatchRx for XSocketRx {
             }
         }
         */
-
 
         // If the RX ring is STILL empty after the kick (or if no kick was needed),
         // return Ok(0) instantly and spin in zero-overhead user-space.
@@ -1269,7 +1270,10 @@ impl BatchRx for XSocketRx {
 
             const PRINT_INTERVAL_PACKETS: u64 = 100_000_000;
             // Print summary every PRINT_INTERVAL_PACKETS and reset counters
-            if log::log_enabled!(log::Level::Debug) && self.prof_started && self.prof_total_packets >= PRINT_INTERVAL_PACKETS {
+            if log::log_enabled!(log::Level::Debug)
+                && self.prof_started
+                && self.prof_total_packets >= PRINT_INTERVAL_PACKETS
+            {
                 let total = self.prof_total_packets;
 
                 // Calculate cycles per packet for each stage
@@ -1316,7 +1320,6 @@ impl BatchRx for XSocketRx {
                 self.prof_max_replenish_cycles = 0;
                 self.prof_monster_spikes = 0;
             }
-
         }
 
         Ok(rcvd)

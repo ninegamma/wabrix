@@ -14,7 +14,7 @@ The WABRIX control plane manages the lifecycle, configuration, and observability
 * **Hot-Reloading:** The control plane utilizes `arc-swap` to perform atomic pointer swaps for configuration updates. This allows the system to transition to new states with zero downtime.
 * **Structural vs. Dynamic Updates:**
 * Changes to physical constraints (e.g., UMEM sizing, worker core affinity, interface bindings) trigger a graceful teardown and full system restart.
-* Changes to dynamic plugin arguments (`hot_args`, `hot_wasm_data`) or operational states (Online, Offline, Bypass) trigger live updates dispatched directly to the running nodes.
+* Changes to dynamic plugin arguments (`hot_args`, `hot_node_data`) or operational states (Online, Offline, Bypass) trigger live updates dispatched directly to the running nodes.
 
 
 
@@ -32,7 +32,7 @@ The control plane interacts with the Wasm-based processing nodes via specific fu
 * Opcodes from `0x1000` upwards are reserved for plugin-specific custom commands.
 
 
-* **Initialization:** The `init-data(data)` function is called exactly once when the plugin is instantiated, passing key-value configuration data originating from the TOML file's `wasm_data` section.
+* **Initialization:** The `init-data(data)` function is called exactly once when the plugin is instantiated, passing key-value configuration data originating from the TOML file's `node_data` section.
 
 ## Telemetry and Observability
 

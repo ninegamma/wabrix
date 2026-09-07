@@ -6,7 +6,6 @@ use crossbeam_queue::ArrayQueue;
 use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::thread;
 use wabrix_base::frame_registry::RETURN_QUEUE_CAPACITY;
 use xsk_rs::config::{FrameSize, QueueSize};
 use xsk_rs::Umem;
@@ -59,6 +58,8 @@ impl SystemBuilder {
             platform_data,
             shared_state: SharedSystemState::new(HashMap::new()),
             umems: vec![None; MAX_UMEM],
+            control_rx: None,
+            control_senders: Vec::new(),
         });
         // 1. Initialize return queues for the System Bus.
         // One ArrayQueue<u32> per worker; senders push packed u32 commands, the owning worker pops them.
@@ -530,15 +531,8 @@ impl SystemBuilder {
             wabrix_system.worker_runners[worker_id] = Some((core_id, runners));
         }
 
-        if let Some(control_rx) = ctrl_rx {
-            thread::spawn(move || {
-                while let Ok(event) = control_rx.recv() {
-                    for control_tx in &control_senders {
-                        let _ = control_tx.try_send(event.clone());
-                    }
-                }
-            });
-        }
+        wabrix_system.control_rx = ctrl_rx;
+        wabrix_system.control_senders = control_senders;
 
         wabrix_system.telemetry_registry = Arc::new(telemetry_registry);
 

@@ -1,5 +1,6 @@
 use crate::{PipelineStats, XSocketRegistry};
 use core_affinity::CoreId;
+use crossbeam_channel::{Receiver, Sender};
 use log::info;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::Arc;
@@ -7,6 +8,7 @@ use tokio::task::JoinHandle;
 use wabrix_base::frame_registry::FrameRegistry;
 use wabrix_base::system::PlatformData;
 use wabrix_base::telemetry::TelemetryRegistry;
+use wabrix_base::ControlEvent;
 use xsk_rs::Umem;
 
 pub struct WabrixSystem {
@@ -20,6 +22,8 @@ pub struct WabrixSystem {
     pub shared_state: Arc<crate::config::hot_config::SharedSystemState>,
     /// All live UMEM handles indexed by umem_id (0..MAX_UMEM). None = not used.
     pub umems: Vec<Option<Arc<Umem>>>,
+    pub(crate) control_rx: Option<Receiver<Arc<ControlEvent>>>,
+    pub(crate) control_senders: Vec<Sender<Arc<ControlEvent>>>,
 }
 
 impl WabrixSystem {
@@ -36,6 +40,9 @@ impl WabrixSystem {
 
         info!("Spawning pipeline worker threads...");
         let mut handles = vec![];
+        let mut control_rx = self.control_rx.take();
+        let mut control_senders = std::mem::take(&mut self.control_senders);
+
         for (worker_id, entry) in self.worker_runners.into_iter().enumerate() {
             let (core_id, runners) = match entry {
                 Some(v) => v,
@@ -45,6 +52,12 @@ impl WabrixSystem {
             let num_pipelines = runners.len();
             let shutdown_clone = Arc::clone(&shutdown);
             let workers_completed_clone = Arc::clone(&workers_completed);
+            let worker_control_rx = control_rx.take();
+            let worker_control_senders = if worker_control_rx.is_some() {
+                std::mem::take(&mut control_senders)
+            } else {
+                Vec::new()
+            };
 
             // Get the frame registry for this worker
             let frame_registry = self.frame_registries[worker_id]
@@ -60,6 +73,8 @@ impl WabrixSystem {
                 workers_completed_clone,
                 &self.platform_data,
                 is_one_shot,
+                worker_control_rx,
+                worker_control_senders,
             );
 
             handles.push(handle);

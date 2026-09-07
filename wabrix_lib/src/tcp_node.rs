@@ -7,35 +7,36 @@ use std::vec::Vec;
 use wabrix_base::frame_registry::get_worker_frame_registry;
 use wabrix_base::interface::batch::Batch;
 use wabrix_base::interface::Pdu;
-use wabrix_base::{ControlEvent, Directive, Node, NodeId};
+use wabrix_base::{ControlEvent, ControlEventResult, Directive, Node, NodeId};
 
 use wabrix_api::connections::{ConnectionPool, FlowKey, TcpState};
+use wabrix_api::engine_common::{apply_tcp_configuration_update, parse_tcp_engine_config};
 use wabrix_api::exports::Pdu0;
 use wabrix_api::headers::{IpHeader, MacHeader, TcpHeader};
-use wabrix_api::helpers::{parse_ip, parse_mac, parse_suffixed_number};
 use wabrix_api::packet::Packet;
 use wabrix_api::MAX_BATCH_SIZE;
-use wabrix_api::{PluginOpcode, StandardOpcode};
+use wabrix_api::{OperationalState, PluginOpcode, StandardOpcode};
 
 use wabrix_api::tcp_common::{
-    run_tcp_state_machine, write_tcp_packet, PacketGenerator, TcpEngineConfig, TimeoutStack,
-    FLAG_ACK, FLAG_FIN, FLAG_RST, FLAG_SYN, PORT_END_RANGE, PORT_START_RANGE, STAT_COUNT,
-    STAT_DROP, STAT_RECV_RST, STAT_RECV_SYN, STAT_SENT_FIN, STAT_SENT_RST, STAT_SENT_SYN,
-    STAT_SENT_SYNACK, STAT_TO_LINUX, STAT_UNEXPECTED,
+    run_tcp_state_machine, tcp_telemetry, write_tcp_packet, EngineTimerPlan, PacketGenerator,
+    TcpEngineConfig, TimeoutStack, FLAG_ACK, FLAG_FIN, FLAG_RST, FLAG_SYN, PORT_END_RANGE,
+    PORT_START_RANGE, STAT_COUNT, STAT_DROP, STAT_RECV_RST, STAT_RECV_SYN, STAT_SENT_FIN,
+    STAT_SENT_RST, STAT_SENT_SYN, STAT_SENT_SYNACK, STAT_TO_LINUX, STAT_UNEXPECTED,
+    TCP_ROUTE_DROP as ROUTE_DROP, TCP_ROUTE_LINUX as ROUTE_LINUX, TCP_ROUTE_TX as ROUTE_TX,
 };
 
 const MAX_CONNECTIONS: usize = 524_288;
-const ROUTE_TX: u32 = 0;
-const ROUTE_LINUX: u32 = 1;
-const ROUTE_DROP: u32 = 2;
-
 /// Creates a stack-only high-level packet view over a native PDU.
 ///
-/// `Pdu` and `Pdu0` intentionally have the same `repr(C)` layout. Native
-/// UMEM addresses are already absolute, so the packet view uses a zero base.
+/// `Pdu` and `Pdu0` intentionally have the same `repr(C)` layout. Native frame
+/// descriptors use offsets relative to their UMEM mapping, so the packet view
+/// receives the mapping base from the PDU.
 #[inline(always)]
 unsafe fn packet_view(pdu: &mut Pdu) -> Packet<'_> {
-    Packet::new(&mut *(pdu as *mut Pdu as *mut Pdu0), 0)
+    // Native frame descriptors store offsets relative to their UMEM mapping.
+    // The packet API adds `umem_base` before dereferencing the descriptor.
+    let umem_base = pdu.umem_addr();
+    Packet::new(&mut *(pdu as *mut Pdu as *mut Pdu0), umem_base)
 }
 
 pub struct TcpNode {
@@ -44,11 +45,16 @@ pub struct TcpNode {
     umem_group_id: usize,
     config: TcpEngineConfig,
     connections: ConnectionPool,
-    timeout_queue: TimeoutStack,
+    timeout_queue: Box<TimeoutStack>,
     syn_gen: PacketGenerator,
     current_tsc: u64,
     last_timeout_scan: u64,
     stats: [u64; STAT_COUNT],
+    timer_requested_frames: u64,
+    timer_allocated_frames: u64,
+    timer_routed_frames: u64,
+    timer_retained_frames: u64,
+    timer_allocation_shortfalls: u64,
     scratch_pdus: [MaybeUninit<Pdu>; MAX_BATCH_SIZE],
     /// Persistent per-route output batches, reused across every `process()` call
     /// to keep the fast path allocation-free. Non-empty batches are swapped out
@@ -70,54 +76,20 @@ impl TcpNode {
         tsc_frequency: u64,
         counters_pkts: Vec<Arc<CachePadded<AtomicU64>>>,
         tm_force_sync: Arc<AtomicBool>,
-    ) -> Self {
-        let mut config = TcpEngineConfig {
-            common: wabrix_api::tcp_common::CommonEngineConfig {
-                tsc_frequency,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let mut raw_src_ip: Option<alloc::string::String> = None;
-
-        for (key, value) in config_data {
-            match key.as_str() {
-                "name" => config.name = Some(value),
-                "src_mac" => config.src_mac = parse_mac(&value),
-                "dst_mac" => config.dst_mac = parse_mac(&value),
-                "src_ip" => {
-                    raw_src_ip = Some(value.clone());
-                    config.src_ip = parse_ip(&value);
-                }
-                "dst_ip" => config.dst_ip = parse_ip(&value),
-                "rng_seed" => config.rng_seed = value.parse::<u32>().ok(),
-                "syn_rate" => config.syn_rate = parse_suffixed_number(&value).ok(),
-                "syn_limit" => config.syn_limit = parse_suffixed_number(&value).ok(),
-                "close_timeout" => config.close_timeout_millis = value.parse::<u64>().ok(),
-                _ => {}
-            }
-        }
-
-        // Resolve node name using fallback chain
-        let node_name = config
-            .name
-            .clone()
-            .or(raw_src_ip)
-            .unwrap_or_else(|| alloc::string::String::from("unknown"));
-
-        config.refresh_timeout_cycles();
+    ) -> Result<Self, String> {
+        let (config, node_name) = parse_tcp_engine_config(config_data, tsc_frequency)?;
 
         log::debug!("TcpNode '{}': config — syn_rate={:?}, syn_limit={:?}, src_ip={:?}, dst_ip={:?}, close_timeout_ms={:?}, tsc_freq={}",
             id.id, config.syn_rate, config.syn_limit, config.src_ip, config.dst_ip,
             config.close_timeout_millis, tsc_frequency);
         let num_routes = routing_table.len();
-        Self {
+        Ok(Self {
             id,
             routing_table,
             umem_group_id,
             config,
             connections: ConnectionPool::new(MAX_CONNECTIONS, node_name.clone()),
-            timeout_queue: TimeoutStack::new(),
+            timeout_queue: TimeoutStack::new_boxed(),
             syn_gen: PacketGenerator {
                 last_tsc: 0,
                 cycle_accumulator: 0,
@@ -130,6 +102,11 @@ impl TcpNode {
             current_tsc: 0,
             last_timeout_scan: 0,
             stats: [0; STAT_COUNT],
+            timer_requested_frames: 0,
+            timer_allocated_frames: 0,
+            timer_routed_frames: 0,
+            timer_retained_frames: 0,
+            timer_allocation_shortfalls: 0,
             scratch_pdus: unsafe { MaybeUninit::uninit().assume_init() },
             output_batches: (0..num_routes).map(|_| Batch::new()).collect(),
             processed: 0,
@@ -137,24 +114,24 @@ impl TcpNode {
             tm_force_sync,
             #[cfg(feature = "profiling")]
             total_cycles: 0,
-        }
+        })
     }
 
     pub fn set_state(&mut self, state: u8) {
-        match state {
-            0 => {
+        match OperationalState::from_payload(state) {
+            Some(OperationalState::Offline) => {
                 self.syn_gen.activated = false;
                 self.config.bypass = false;
             }
-            1 => {
+            Some(OperationalState::Online) => {
                 self.syn_gen.activated = true;
                 self.config.bypass = false;
             }
-            2 => {
+            Some(OperationalState::Bypass) => {
                 self.syn_gen.activated = false;
                 self.config.bypass = true;
             }
-            _ => {}
+            None => {}
         }
     }
 
@@ -162,6 +139,7 @@ impl TcpNode {
         self.set_state(0);
         self.connections.clear();
         self.timeout_queue.clear();
+        self.last_timeout_scan = 0;
         self.syn_gen.packets_sent = 0;
         self.syn_gen.cycle_accumulator = 0;
         self.syn_gen.last_tsc = 0;
@@ -173,31 +151,44 @@ impl TcpNode {
         log::trace!("TcpNode state flushed (mode: {})", mode);
     }
 
+    /// Returns packet counters followed by the connection arena high-water
+    /// mark. The final value is not the current number of active connections.
     pub fn get_telemetry(&self) -> Vec<u64> {
-        let mut stats = self.stats.to_vec();
-        stats.push(self.connections.watermark as u64);
-        stats
+        tcp_telemetry(&self.stats, self.connections.watermark as u64)
+    }
+
+    /// Returns timer accounting in the same order as the Wasm diagnostics:
+    /// requested, allocated, routed, retained, and allocation shortfalls.
+    pub fn timer_counters(&self) -> (u64, u64, u64, u64, u64) {
+        (
+            self.timer_requested_frames,
+            self.timer_allocated_frames,
+            self.timer_routed_frames,
+            self.timer_retained_frames,
+            self.timer_allocation_shortfalls,
+        )
     }
 
     fn sync_telemetry(&self) {
         for (i, counter) in self.counters_pkts.iter().enumerate() {
-            let val = if i < STAT_COUNT {
-                self.stats[i]
-            } else if i == STAT_COUNT {
-                self.connections.watermark as u64
-            } else {
-                break;
+            let val = match i {
+                i if i < STAT_COUNT => self.stats[i],
+                wabrix_api::tcp_common::TCP_WATERMARK_INDEX => self.connections.watermark as u64,
+                _ => break,
             };
             counter.store(val, Ordering::Relaxed);
         }
     }
 
-    pub fn on_control_event(&mut self, raw_opcode: u32, payload: Vec<u8>) -> bool {
+    pub fn on_control_event(&mut self, raw_opcode: u32, payload: Vec<u8>) -> ControlEventResult {
         let opcode = PluginOpcode::from(raw_opcode);
         match opcode {
             PluginOpcode::Standard(StandardOpcode::SetOperationalState) => {
                 if payload.len() == 1 {
                     let new_state = payload[0];
+                    if OperationalState::from_payload(new_state).is_none() {
+                        return ControlEventResult::InvalidPayload;
+                    }
                     self.set_state(new_state);
                     log::info!(
                         "TcpNode '{}': state → {} (activated={}, bypass={})",
@@ -206,24 +197,42 @@ impl TcpNode {
                         self.syn_gen.activated,
                         self.config.bypass
                     );
-                    true
+                    ControlEventResult::Handled
                 } else {
-                    false
+                    ControlEventResult::InvalidPayload
                 }
             }
             PluginOpcode::Standard(StandardOpcode::FlushState) => {
-                if !payload.is_empty() {
-                    self.flush_state(payload[0]);
+                if payload.len() <= 1 {
+                    self.flush_state(payload.first().copied().unwrap_or(0));
+                    ControlEventResult::Handled
+                } else {
+                    ControlEventResult::InvalidPayload
                 }
-                true
             }
             PluginOpcode::Standard(StandardOpcode::Ping) => {
                 log::info!("TcpNode: PING received");
-                true
+                ControlEventResult::Handled
+            }
+            PluginOpcode::Standard(StandardOpcode::UpdateConfiguration) => {
+                match apply_tcp_configuration_update(&payload, &mut self.config) {
+                    Ok(()) => {
+                        log::info!("TcpNode '{}': hot configuration updated", self.id.id);
+                        ControlEventResult::Handled
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "TcpNode '{}': rejected hot configuration: {}",
+                            self.id.id,
+                            error
+                        );
+                        ControlEventResult::InvalidPayload
+                    }
+                }
             }
             _ => {
                 log::warn!("TcpNode: ignored opcode: {:?}", opcode);
-                false
+                ControlEventResult::Unsupported
             }
         }
     }
@@ -423,10 +432,13 @@ impl Node for TcpNode {
             }
         };
 
-        let frames_needed = timeout_count + syn_count;
+        let requested_plan = EngineTimerPlan::new(timeout_count as u32, syn_count as u32, ROUTE_TX);
+        let frames_needed = requested_plan.requested_frames() as usize;
         if frames_needed == 0 {
             return Directive::Stop;
         }
+
+        self.timer_requested_frames += requested_plan.requested_frames() as u64;
 
         // === 3. Allocate frames ===
         let registry_ptr = get_worker_frame_registry();
@@ -436,9 +448,15 @@ impl Node for TcpNode {
         let frame_registry = unsafe { &mut *registry_ptr };
         let allocated = frame_registry
             .allocate_pdus_into(self.umem_group_id, &mut self.scratch_pdus[..frames_needed]);
+        self.timer_allocated_frames += allocated as u64;
+        if allocated < frames_needed {
+            self.timer_allocation_shortfalls += 1;
+        }
         if allocated == 0 {
             return Directive::Stop;
         }
+
+        let allocated_plan = requested_plan.with_allocated(allocated as u32);
 
         let reply_src_mac = self.config.src_mac.unwrap_or([0; 6]);
         let reply_dst_mac = self.config.dst_mac.unwrap_or([0xff; 6]);
@@ -583,9 +601,14 @@ impl Node for TcpNode {
             frame_idx += 1;
         }
 
-        if generated > 0 && (ROUTE_TX as usize) < self.routing_table.len() {
-            Directive::Next(self.routing_table[ROUTE_TX as usize].clone())
+        if generated > 0 && (allocated_plan.route as usize) < self.routing_table.len() {
+            self.timer_routed_frames += generated as u64;
+            self.timer_retained_frames += allocated_plan
+                .allocated_frames
+                .saturating_sub(generated as u32) as u64;
+            Directive::Next(self.routing_table[allocated_plan.route as usize].clone())
         } else {
+            self.timer_retained_frames += allocated as u64;
             Directive::Stop
         }
     }
@@ -599,8 +622,8 @@ impl Node for TcpNode {
         true
     }
 
-    fn handle_control_event(&mut self, event: &ControlEvent) {
-        self.on_control_event(event.opcode, event.payload.clone());
+    fn handle_control_event(&mut self, event: &ControlEvent) -> ControlEventResult {
+        self.on_control_event(event.opcode, event.payload.clone())
     }
 
     #[cfg(feature = "profiling")]

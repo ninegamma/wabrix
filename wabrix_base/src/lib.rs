@@ -100,6 +100,17 @@ pub enum Directive {
     Stop,
 }
 
+/// Result of handling a control-plane event on a node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlEventResult {
+    /// The node accepted and applied the event.
+    Handled,
+    /// The opcode is supported, but the payload failed validation.
+    InvalidPayload,
+    /// The node does not implement the opcode.
+    Unsupported,
+}
+
 pub trait Node: Send + std::any::Any {
     fn id(&self) -> &NodeId;
 
@@ -121,7 +132,9 @@ pub trait Node: Send + std::any::Any {
     }
 
     /// called by the scheduler when a control event is received for this node (defaults to doing nothing)
-    fn handle_control_event(&mut self, _event: &ControlEvent) {}
+    fn handle_control_event(&mut self, _event: &ControlEvent) -> ControlEventResult {
+        ControlEventResult::Unsupported
+    }
 
     /// called before startup, e.g., rx nodes can replenish the fill queue
     fn prepare(&mut self) -> anyhow::Result<()> {

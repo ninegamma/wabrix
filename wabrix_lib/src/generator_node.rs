@@ -126,7 +126,7 @@ impl GeneratorNode {
         #[cfg(feature = "wasm")] wasm_manager: Option<&WasmManager>,
         #[cfg(feature = "wasm")] wasm_file_path: Option<&str>,
         #[cfg(feature = "wasm")] partition_start_bytes: u32,
-        #[cfg(feature = "wasm")] wasm_data: std::collections::HashMap<String, String>,
+        #[cfg(feature = "wasm")] node_data: std::collections::HashMap<String, String>,
         platform_data: PlatformData,
     ) -> Self {
         #[cfg(feature = "wasm")]
@@ -154,7 +154,7 @@ impl GeneratorNode {
             let bindings = GeneratorPlugin::instantiate(&mut store, &component, manager.linker())
                 .expect("Failed to instantiate Generator Wasm");
 
-            let data: Vec<(String, String)> = wasm_data.into_iter().collect();
+            let data: Vec<(String, String)> = node_data.into_iter().collect();
             bindings
                 .wabrix_plugins_generator()
                 .call_init_data(&mut store, &data, worker_id as u32)

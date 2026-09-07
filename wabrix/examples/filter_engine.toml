@@ -53,11 +53,11 @@ desired_state = "Running"
 args= { umem = "0" }
 hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/filter_engine.wasm" }
 
-[pipelines.nodes.wasm_data]
+[pipelines.nodes.node_data]
 # Initial cold configuration fallback
 signature = "MALICIOUS_PAYLOAD_V1"
 
-[pipelines.nodes.hot_wasm_data]
+[pipelines.nodes.hot_node_data]
 # This value overrides the cold data at startup and can be updated at runtime via the CLI apply command
 signature = "MALICIOUS_PAYLOAD_V2"
 

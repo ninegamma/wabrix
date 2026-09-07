@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::mem::MaybeUninit;
 use std::sync::atomic::Ordering;
 use wabrix_api::helpers::parse_suffixed_number;
+use wabrix_api::tcp_common::EngineTimerPlan;
 use wabrix_api::{
     BatchMetadata, MAX_BATCH_SIZE, TIMER_KIND_NONE, TIMER_KIND_SYN, TIMER_KIND_TIMEOUT,
 };
@@ -25,7 +26,7 @@ use wabrix_base::interface::batch::Batch;
 use wabrix_base::interface::Pdu;
 use wabrix_base::system::PlatformData;
 use wabrix_base::telemetry::TelemetryMetrics;
-use wabrix_base::{ControlEvent, Directive, Node, NodeId};
+use wabrix_base::{ControlEvent, ControlEventResult, Directive, Node, NodeId};
 
 // 1. Generate bindings.
 // Note: `async: true` is required to use `instantiate_async` and `call_async`
@@ -34,56 +35,6 @@ bindgen!({
     world: "engine-plugin",
     // async: true,
 });
-
-#[cfg(feature = "profiling")]
-const PROFILE_LOG_BATCH_INTERVAL: u64 = 65536;
-
-#[cfg(feature = "profiling")]
-#[derive(Default)]
-struct WasmCycleProfile {
-    process_batches: u64,
-    process_packets: u64,
-    process_cycles: u64,
-    process_max_cycles: u64,
-    mailbox_copy_cycles: u64,
-    mailbox_copy_max_cycles: u64,
-    plugin_cycles: u64,
-    plugin_max_cycles: u64,
-    telemetry_cycles: u64,
-    telemetry_max_cycles: u64,
-    mutation_cycles: u64,
-    mutation_max_cycles: u64,
-    routing_cycles: u64,
-    routing_max_cycles: u64,
-    dispatch_cycles: u64,
-    dispatch_max_cycles: u64,
-    timer_calls: u64,
-    timer_cycles: u64,
-    timer_max_cycles: u64,
-    timer_plugin_cycles: u64,
-    timer_plugin_max_cycles: u64,
-}
-
-#[cfg(feature = "profiling")]
-impl WasmCycleProfile {
-    #[inline(always)]
-    fn record(total: &mut u64, maximum: &mut u64, elapsed: u64) {
-        *total = total.saturating_add(elapsed);
-        *maximum = (*maximum).max(elapsed);
-    }
-
-    fn reset(&mut self) {
-        *self = Self::default();
-    }
-}
-
-#[cfg(feature = "profiling")]
-#[inline(always)]
-fn read_tsc() -> u64 {
-    // SAFETY: `_rdtsc` is available on the x86_64 target used by the dataplane
-    // worker, and reading it has no memory safety or observable side effects.
-    unsafe { std::arch::x86_64::_rdtsc() }
-}
 
 pub struct WasmEngine {
     id: NodeId,
@@ -103,10 +54,9 @@ pub struct WasmEngine {
     processed_packets: u64,
     /// helper for reducing telemetry fetching frequency
     batch_count: u32,
+    /// Aggregate execution cycles retained for the shutdown summary.
     #[cfg(feature = "profiling")]
     total_cycles: u64,
-    #[cfg(feature = "profiling")]
-    cycle_profile: WasmCycleProfile,
     telemetry_metrics: TelemetryMetrics,
     /// Byte offset from Umem base where WASM address 0 begins for this instance.
     partition_start_bytes: u32,
@@ -151,14 +101,14 @@ impl WasmEngine {
         telemetry_metrics: TelemetryMetrics,
         partition_start_bytes: u32,
         umem_id: u8,
-        wasm_data: HashMap<String, String>,
+        node_data: HashMap<String, String>,
         platform_data: &PlatformData,
         mailbox_offset: u32,
     ) -> Result<Self, String> {
         #[cfg(not(feature = "runtime-diagnostics"))]
         let _ = (&pipeline_name, worker_id, worker_index);
 
-        let timer_diagnostics_enabled = wasm_data
+        let timer_diagnostics_enabled = node_data
             .get("syn_rate")
             .and_then(|rate| parse_suffixed_number(rate).ok())
             .is_some_and(|rate| rate > 0);
@@ -208,8 +158,8 @@ impl WasmEngine {
         let bindings = EnginePlugin::instantiate(&mut store, &component, manager.linker())
             .expect("Failed to instantiate Wasm component");
 
-        if !wasm_data.is_empty() {
-            let data: Vec<(String, String)> = wasm_data.into_iter().collect();
+        if !node_data.is_empty() {
+            let data: Vec<(String, String)> = node_data.into_iter().collect();
             let init_result = bindings.wabrix_plugins_packet_engine().call_init_data(
                 &mut store,
                 &data,
@@ -258,8 +208,6 @@ impl WasmEngine {
             batch_count: 0,
             #[cfg(feature = "profiling")]
             total_cycles: 0,
-            #[cfg(feature = "profiling")]
-            cycle_profile: WasmCycleProfile::default(),
             telemetry_metrics,
             partition_start_bytes,
             mailbox_offset,
@@ -315,8 +263,6 @@ impl WasmEngine {
         // Casting to `*const Pdu` is sound because `MaybeUninit<Pdu>` and `Pdu` share layout.
         // `(*mailbox_ptr).pdus` is inside the Control Block, exclusively owned by this thread
         // for the entire call window (write → WASM call → read).
-        #[cfg(feature = "profiling")]
-        let mailbox_copy_start = read_tsc();
         unsafe {
             let m = &mut *mailbox_ptr;
             let src = batch.as_ptr() as *const Pdu;
@@ -324,15 +270,6 @@ impl WasmEngine {
                 m.pdus[i].w = (*src.add(i)).w.clone();
             }
         }
-        #[cfg(feature = "profiling")]
-        WasmCycleProfile::record(
-            &mut self.cycle_profile.mailbox_copy_cycles,
-            &mut self.cycle_profile.mailbox_copy_max_cycles,
-            read_tsc() - mailbox_copy_start,
-        );
-
-        #[cfg(feature = "profiling")]
-        let plugin_start = read_tsc();
         let status = self
             .bindings
             .wabrix_plugins_packet_engine()
@@ -346,13 +283,6 @@ impl WasmEngine {
                 log::error!("NODE {}: Wasm execution failed: {}", self.id, e);
                 u32::MAX
             });
-        #[cfg(feature = "profiling")]
-        WasmCycleProfile::record(
-            &mut self.cycle_profile.plugin_cycles,
-            &mut self.cycle_profile.plugin_max_cycles,
-            read_tsc() - plugin_start,
-        );
-
         if status == u32::MAX {
             batch.clear();
             self.poisoned = true;
@@ -389,8 +319,6 @@ impl WasmEngine {
             if let Some(flag) = &self.telemetry_metrics.force_sync_flag {
                 flag.store(false, Ordering::Relaxed);
             }
-            #[cfg(feature = "profiling")]
-            let telemetry_start = read_tsc();
             let out_of_band_stats = self
                 .bindings
                 .wabrix_plugins_packet_engine()
@@ -399,13 +327,6 @@ impl WasmEngine {
                     log::error!("Failed to call get-telemetry on packet-engine: {}", e);
                     vec![]
                 });
-            #[cfg(feature = "profiling")]
-            WasmCycleProfile::record(
-                &mut self.cycle_profile.telemetry_cycles,
-                &mut self.cycle_profile.telemetry_max_cycles,
-                read_tsc() - telemetry_start,
-            );
-
             if !out_of_band_stats.is_empty() {
                 self.supports_oob_telemetry = true;
                 log::trace!(
@@ -429,8 +350,6 @@ impl WasmEngine {
         // full slot would overwrite it with whatever the plugin left in _do_not_touch_padding.
         //
         // SAFETY: WASM call returned; we have exclusive access to the mailbox again.
-        #[cfg(feature = "profiling")]
-        let mutation_start = read_tsc();
         unsafe {
             let m = &*mailbox_ptr;
             let dst = batch.as_mut_ptr() as *mut Pdu;
@@ -438,13 +357,6 @@ impl WasmEngine {
                 (*dst.add(i)).w = m.pdus[i].w.clone();
             }
         }
-        #[cfg(feature = "profiling")]
-        WasmCycleProfile::record(
-            &mut self.cycle_profile.mutation_cycles,
-            &mut self.cycle_profile.mutation_max_cycles,
-            read_tsc() - mutation_start,
-        );
-
         // ==========================================
         // 4. ROUTING PHASE — read actions from mailbox
         // ==========================================
@@ -454,8 +366,6 @@ impl WasmEngine {
             .collect();
         let mut pdu_index = 0;
 
-        #[cfg(feature = "profiling")]
-        let routing_start = read_tsc();
         batch.distribute(&mut outputs, |pdu| {
             // SAFETY: exclusive access restored after WASM returned.
             let action = unsafe { (*mailbox_ptr).actions[pdu_index] };
@@ -479,13 +389,6 @@ impl WasmEngine {
                 route_id
             }
         });
-        #[cfg(feature = "profiling")]
-        WasmCycleProfile::record(
-            &mut self.cycle_profile.routing_cycles,
-            &mut self.cycle_profile.routing_max_cycles,
-            read_tsc() - routing_start,
-        );
-
         // A mailbox entry must have exactly one owner after routing: either it
         // was moved to one output batch, or it remains in `batch` because the
         // route was invalid / the destination batch was full.  This is the
@@ -519,21 +422,12 @@ impl WasmEngine {
         // ==========================================
         // 5. DISPATCH DIRECTIVES
         // ==========================================
-        #[cfg(feature = "profiling")]
-        let dispatch_start = read_tsc();
         let mut split_branches = Vec::with_capacity(num_routes);
         for (i, output_batch) in outputs.into_iter().enumerate() {
             if !output_batch.is_empty() {
                 split_branches.push((self.routing_table[i].clone(), output_batch));
             }
         }
-
-        #[cfg(feature = "profiling")]
-        WasmCycleProfile::record(
-            &mut self.cycle_profile.dispatch_cycles,
-            &mut self.cycle_profile.dispatch_max_cycles,
-            read_tsc() - dispatch_start,
-        );
 
         if split_branches.is_empty() {
             Directive::Stop
@@ -558,9 +452,7 @@ impl Node for WasmEngine {
         }
 
         #[cfg(feature = "profiling")]
-        let start_cycles = read_tsc();
-        #[cfg(feature = "profiling")]
-        let process_packet_count = batch.len() as u64;
+        let start_cycles = unsafe { std::arch::x86_64::_rdtsc() };
 
         debug_assert!(
             batch.iter().all(|pdu| pdu.w.umem_id() == self.umem_id),
@@ -582,59 +474,9 @@ impl Node for WasmEngine {
 
         #[cfg(feature = "profiling")]
         {
-            let elapsed = read_tsc() - start_cycles;
-            self.total_cycles = self.total_cycles.saturating_add(elapsed);
-            self.cycle_profile.process_batches += 1;
-            self.cycle_profile.process_packets = self
-                .cycle_profile
-                .process_packets
-                .saturating_add(process_packet_count);
-            WasmCycleProfile::record(
-                &mut self.cycle_profile.process_cycles,
-                &mut self.cycle_profile.process_max_cycles,
-                elapsed,
-            );
-
-            if self
-                .cycle_profile
-                .process_batches
-                .is_multiple_of(PROFILE_LOG_BATCH_INTERVAL)
-            {
-                let p = &self.cycle_profile;
-                let batches = p.process_batches;
-                let packets = p.process_packets;
-                let average = |cycles: u64| cycles / batches.max(1);
-                let packet_average = |cycles: u64| cycles / packets.max(1);
-                log::debug!(
-                    "NODE {}: WASM cycle profile: batches={}, packets={}, process_avg={}, process_max={}, mailbox_avg={}, mailbox_max={}, plugin_avg={}, plugin_max={}, telemetry_avg={}, telemetry_max={}, mutation_avg={}, mutation_max={}, routing_avg={}, routing_max={}, dispatch_avg={}, dispatch_max={}, timer_calls={}, timer_avg={}, timer_max={}, timer_plugin_avg={}, timer_plugin_max={} (batch cycles; packet averages: mailbox={}, plugin={}, routing={})",
-                    self.id,
-                    batches,
-                    packets,
-                    average(p.process_cycles),
-                    p.process_max_cycles,
-                    average(p.mailbox_copy_cycles),
-                    p.mailbox_copy_max_cycles,
-                    average(p.plugin_cycles),
-                    p.plugin_max_cycles,
-                    average(p.telemetry_cycles),
-                    p.telemetry_max_cycles,
-                    average(p.mutation_cycles),
-                    p.mutation_max_cycles,
-                    average(p.routing_cycles),
-                    p.routing_max_cycles,
-                    average(p.dispatch_cycles),
-                    p.dispatch_max_cycles,
-                    p.timer_calls,
-                    average(p.timer_cycles),
-                    p.timer_max_cycles,
-                    average(p.timer_plugin_cycles),
-                    p.timer_plugin_max_cycles,
-                    packet_average(p.mailbox_copy_cycles),
-                    packet_average(p.plugin_cycles),
-                    packet_average(p.routing_cycles),
-                );
-                self.cycle_profile.reset();
-            }
+            self.total_cycles = self
+                .total_cycles
+                .saturating_add(unsafe { std::arch::x86_64::_rdtsc() } - start_cycles);
         }
 
         directive
@@ -653,12 +495,10 @@ impl Node for WasmEngine {
         }
 
         #[cfg(feature = "profiling")]
-        let start_cycles = read_tsc();
+        let start_cycles = unsafe { std::arch::x86_64::_rdtsc() };
 
         // Evaluate the core logic into a single variable using a block expression
         let directive = {
-            #[cfg(feature = "profiling")]
-            let timer_plugin_start = read_tsc();
             let timer_plan = match self
                 .bindings
                 .wabrix_plugins_packet_engine()
@@ -666,27 +506,15 @@ impl Node for WasmEngine {
             {
                 Ok(plan) => plan,
                 Err(err) => {
-                    #[cfg(feature = "profiling")]
-                    WasmCycleProfile::record(
-                        &mut self.cycle_profile.timer_plugin_cycles,
-                        &mut self.cycle_profile.timer_plugin_max_cycles,
-                        read_tsc() - timer_plugin_start,
-                    );
                     log::error!("NODE {}: Error processing poll_timers: {}", self.id, err);
                     return Directive::Stop;
                 }
             };
-            #[cfg(feature = "profiling")]
-            WasmCycleProfile::record(
-                &mut self.cycle_profile.timer_plugin_cycles,
-                &mut self.cycle_profile.timer_plugin_max_cycles,
-                read_tsc() - timer_plugin_start,
-            );
-
-            let timeout_frames_requested = timer_plan.timeout_frames;
-            let packet_frames_requested = timer_plan.packet_frames;
-            let n_requested_frames =
-                timeout_frames_requested.saturating_add(packet_frames_requested);
+            let requested_plan =
+                EngineTimerPlan::new(timer_plan.timeout_frames, timer_plan.packet_frames, 0);
+            let timeout_frames_requested = requested_plan.timeout_frames;
+            let packet_frames_requested = requested_plan.packet_frames;
+            let n_requested_frames = requested_plan.requested_frames();
 
             if n_requested_frames == 0 {
                 // Service force_sync_flag even when idle so final WASM state is
@@ -702,19 +530,11 @@ impl Node for WasmEngine {
                     if let Some(flag) = &self.telemetry_metrics.force_sync_flag {
                         flag.store(false, Ordering::Relaxed);
                     }
-                    #[cfg(feature = "profiling")]
-                    let telemetry_start = read_tsc();
                     let oob = self
                         .bindings
                         .wabrix_plugins_packet_engine()
                         .call_get_telemetry(&mut self.store)
                         .unwrap_or_default();
-                    #[cfg(feature = "profiling")]
-                    WasmCycleProfile::record(
-                        &mut self.cycle_profile.telemetry_cycles,
-                        &mut self.cycle_profile.telemetry_max_cycles,
-                        read_tsc() - telemetry_start,
-                    );
                     if !oob.is_empty() {
                         self.supports_oob_telemetry = true;
                         for (idx, &count) in oob.iter().enumerate() {
@@ -742,10 +562,11 @@ impl Node for WasmEngine {
                     return Directive::Stop;
                 }
                 let frames_to_allocate = n_requested_frames as usize;
-                self.timer_requested_frames += n_requested_frames as u64;
+                self.timer_requested_frames += requested_plan.requested_frames() as u64;
 
                 let allocated = registry
                     .allocate_pdus_into(self.umem_id as usize, &mut scratch[..frames_to_allocate]);
+                let allocated_plan = requested_plan.with_allocated(allocated as u32);
                 self.timer_allocated_frames += allocated as u64;
                 if allocated < frames_to_allocate {
                     self.timer_allocation_shortfalls += 1;
@@ -759,8 +580,9 @@ impl Node for WasmEngine {
                     batch.clear();
                     // SYN frames are placed first so an UMEM shortfall cannot
                     // consume the SYN reservation with timeout work.
-                    let allocated_syn_frames = allocated.min(packet_frames_requested as usize);
-                    let allocated_timeout_frames = allocated
+                    let allocated_syn_frames = (allocated_plan.allocated_frames as usize)
+                        .min(packet_frames_requested as usize);
+                    let allocated_timeout_frames = (allocated_plan.allocated_frames as usize)
                         .saturating_sub(allocated_syn_frames)
                         .min(timeout_frames_requested as usize);
 
@@ -881,17 +703,11 @@ impl Node for WasmEngine {
             );
         }
 
-        // Exactly one exit point for profiling
         #[cfg(feature = "profiling")]
         {
-            let elapsed = read_tsc() - start_cycles;
-            self.total_cycles = self.total_cycles.saturating_add(elapsed);
-            self.cycle_profile.timer_calls += 1;
-            WasmCycleProfile::record(
-                &mut self.cycle_profile.timer_cycles,
-                &mut self.cycle_profile.timer_max_cycles,
-                elapsed,
-            );
+            self.total_cycles = self
+                .total_cycles
+                .saturating_add(unsafe { std::arch::x86_64::_rdtsc() } - start_cycles);
         }
 
         directive
@@ -901,17 +717,23 @@ impl Node for WasmEngine {
         true
     }
 
-    fn handle_control_event(&mut self, event: &ControlEvent) {
+    fn handle_control_event(&mut self, event: &ControlEvent) -> ControlEventResult {
         if self.poisoned {
-            return;
+            return ControlEventResult::Unsupported;
         }
         // We only get here if the PipelineRunner already verified the wildcard matched us!
-        tokio::task::block_in_place(|| {
-            let _ = self
-                .bindings
+        let handled = tokio::task::block_in_place(|| {
+            self.bindings
                 .wabrix_plugins_packet_engine()
-                .call_on_control_event(&mut self.store, event.opcode, &event.payload);
+                .call_on_control_event(&mut self.store, event.opcode, &event.payload)
         });
+        match handled {
+            Ok(true) => ControlEventResult::Handled,
+            Ok(false) | Err(_) if matches!(event.opcode, 1 | 2 | 3 | 255) => {
+                ControlEventResult::InvalidPayload
+            }
+            Ok(false) | Err(_) => ControlEventResult::Unsupported,
+        }
     }
 
     fn processed_packets(&self) -> u64 {

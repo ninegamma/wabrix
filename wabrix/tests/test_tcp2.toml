@@ -65,13 +65,13 @@ desired_state = "Running"
 args= { umem = "0" }
 hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/tcp_engine.wasm" }
 
-[pipelines.nodes.wasm_data]
+[pipelines.nodes.node_data]
 dst_ip = "10.10.10.31"
 src_mac = "44:49:88:06:63:38"
 dst_mac = "44:49:88:06:63:39"
 src_ip = "10.10.10.222"
 
-[pipelines.nodes.hot_wasm_data]
+[pipelines.nodes.hot_node_data]
 syn_limit = "10M"
 close_timeout = "100"
 syn_rate = "1200k"
@@ -149,7 +149,7 @@ desired_state = "Running"
 args= { umem = "1", wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/tcp_engine.wasm" }
 hot_args= {}
 
-[pipelines.nodes.wasm_data]
+[pipelines.nodes.node_data]
 src_ip = "10.10.10.31"
 src_mac = "44:49:88:06:63:39"
 dst_mac = "44:49:88:06:63:38"

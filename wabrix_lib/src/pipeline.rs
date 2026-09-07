@@ -16,13 +16,13 @@ pub(crate) use crate::{BatchRx, BatchTx};
 use crossbeam_channel::Receiver;
 use separator::Separatable;
 use wabrix_api::helpers::parse_suffixed_number;
-use wabrix_api::MAX_BATCH_SIZE;
+use wabrix_api::{StandardOpcode, MAX_BATCH_SIZE};
 use wabrix_base::common::formatting::PreciseSeparator;
 use wabrix_base::frame_registry::{set_tsc_frequency, set_worker_frame_registry};
 use wabrix_base::node_instance_id::NodeInstanceId;
 use wabrix_base::system::PlatformData;
 use wabrix_base::telemetry::TelemetryRegistry;
-use wabrix_base::{ControlEvent, Directive, Node, NodeId};
+use wabrix_base::{ControlEvent, ControlEventResult, Directive, Node, NodeId};
 #[cfg(feature = "wasm")]
 use wabrix_wasm::wasm_manager::WasmManager;
 
@@ -32,6 +32,13 @@ use wabrix_wasm::wasm_manager::WasmManager;
 /// kernel/IRQ real-time priorities so a worker cannot prevent those from
 /// running.
 const WORKER_FIFO_PRIORITY: i32 = 50;
+
+fn operational_state_payload(state: &PipelineLifecycle) -> u8 {
+    match state {
+        PipelineLifecycle::Running | PipelineLifecycle::RunningDelayed(_) => 1,
+        PipelineLifecycle::Paused | PipelineLifecycle::Stopping => 0,
+    }
+}
 
 fn set_worker_fifo_scheduling(worker_id: usize) {
     let param = libc::sched_param {
@@ -177,7 +184,7 @@ impl PipelineFactory {
         for node_instance in &pipeline_instance.node_instances {
             let my_id = id_map[&node_instance.node_config.id].clone();
 
-            let node_impl: Box<dyn Node> = match node_instance.node_config.node_type.as_str() {
+            let mut node_impl: Box<dyn Node> = match node_instance.node_config.node_type.as_str() {
                 // === 1. RX Node ===
                 "BatchRxNode" => {
                     let next_str = node_instance.node_config.routes.first().ok_or(format!(
@@ -568,7 +575,7 @@ impl PipelineFactory {
                         #[cfg(feature = "wasm")]
                         node_instance
                             .node_config
-                            .wasm_data
+                            .node_data
                             .clone()
                             .unwrap_or_default(),
                         platform_data.clone(),
@@ -678,9 +685,7 @@ impl PipelineFactory {
 
                     let config_data: Vec<(String, String)> = node_instance
                         .node_config
-                        .wasm_data
-                        .clone()
-                        .unwrap_or_default()
+                        .startup_node_data()
                         .into_iter()
                         .collect();
 
@@ -715,7 +720,7 @@ impl PipelineFactory {
                         platform_data.tsc_frequency,
                         counters_pkts,
                         tm_force_sync,
-                    ))
+                    )?)
                 }
 
                 // === 7. Wasm Engine ===
@@ -838,26 +843,9 @@ impl PipelineFactory {
                         instance_idx * frames_per_instance * umem_info.frame_size;
                     wasm_instance_counters[umem_id] += 1;
 
-                    // Create a unified configuration map combining cold and hot data for initialization
-                    let mut combined_wasm_data = std::collections::HashMap::new();
-
-                    if let Some(cold_data) = &node_instance.node_config.wasm_data {
-                        for (k, v) in cold_data {
-                            combined_wasm_data.insert(k.clone(), v.clone());
-                        }
-                    }
-
-                    if let Some(hot_data) = &node_instance.node_config.hot_wasm_data {
-                        for (k, v) in hot_data {
-                            combined_wasm_data.insert(k.clone(), v.clone());
-                        }
-                    }
-
-                    // Engine plugins need the node batch size while planning timers,
+                    // Engine plugins need the merged startup data while planning timers,
                     // before the first process-batch callback is made.
-                    if let Some(batch_size) = node_instance.node_config.args.get("batch_size") {
-                        combined_wasm_data.insert("batch_size".to_string(), batch_size.clone());
-                    }
+                    let combined_node_data = node_instance.node_config.startup_node_data();
 
                     use wabrix_wasm::WasmEngine;
                     Box::new(WasmEngine::new(
@@ -871,7 +859,7 @@ impl PipelineFactory {
                         telemetry_metrics,
                         partition_start_bytes,
                         umem_id as u8,
-                        combined_wasm_data,
+                        combined_node_data,
                         platform_data,
                         mailbox_offset,
                     )?)
@@ -883,6 +871,21 @@ impl PipelineFactory {
                     ))
                 }
             };
+
+            if let Some(desired_state) = node_instance.node_config.desired_state.as_ref() {
+                let event = ControlEvent {
+                    address_pattern: "*".to_string(),
+                    opcode: StandardOpcode::SetOperationalState as u32,
+                    payload: vec![operational_state_payload(desired_state)],
+                };
+                match node_impl.handle_control_event(&event) {
+                    ControlEventResult::Handled => {}
+                    result => warn!(
+                        "Node '{}' rejected startup operational state {:?}: {:?}",
+                        node_instance.node_config.id, desired_state, result
+                    ),
+                }
+            }
 
             // Place the built node into the vector at the index corresponding to its NodeId
             built_nodes[usize::from(&my_id)] = Some(node_impl);
@@ -1236,7 +1239,27 @@ impl PipelineRunner {
                                 event.opcode,
                                 identity.node_name
                             );
-                            self.nodes[idx].handle_control_event(&event);
+                            let result = self.nodes[idx].handle_control_event(&event);
+                            match result {
+                                ControlEventResult::Handled => {
+                                    log::debug!(
+                                        "Control event opcode {} handled by node {}",
+                                        event.opcode, identity.node_name
+                                    );
+                                }
+                                ControlEventResult::InvalidPayload => {
+                                    log::warn!(
+                                        "Control event opcode {} rejected by node {}: invalid payload",
+                                        event.opcode, identity.node_name
+                                    );
+                                }
+                                ControlEventResult::Unsupported => {
+                                    log::debug!(
+                                        "Control event opcode {} unsupported by node {}",
+                                        event.opcode, identity.node_name
+                                    );
+                                }
+                            }
                         });
                 }
             }
@@ -1558,6 +1581,8 @@ pub fn spawn_worker_pipelines(
     workers_completed: Arc<AtomicUsize>,
     platform_data: &PlatformData,
     is_one_shot: bool,
+    mut control_rx: Option<Receiver<Arc<ControlEvent>>>,
+    control_senders: Vec<crossbeam_channel::Sender<Arc<ControlEvent>>>,
 ) -> tokio::task::JoinHandle<Result<Vec<PipelineStats>, String>> {
     let tsc_freq = platform_data.tsc_frequency;
 
@@ -1684,6 +1709,14 @@ pub fn spawn_worker_pipelines(
             frame_registry.process_returns();
 
             // 3. Adaptive Execution of pipelines
+            if let Some(rx) = &mut control_rx {
+                while let Ok(event) = rx.try_recv() {
+                    for control_tx in &control_senders {
+                        let _ = control_tx.try_send(event.clone());
+                    }
+                }
+            }
+
             let mut _work_done_this_tick = false;
 
             for i in 0..num_pipelines {

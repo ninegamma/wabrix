@@ -360,7 +360,7 @@ where
     deserializer.deserialize_map(ArgsVisitor)
 }
 
-fn deserialize_wasm_data<'de, D>(
+fn deserialize_node_data<'de, D>(
     deserializer: D,
 ) -> Result<Option<HashMap<String, String>>, D::Error>
 where
@@ -398,7 +398,7 @@ where
                     toml::Value::Boolean(b) => b.to_string(),
                     other => {
                         return Err(serde::de::Error::custom(format!(
-                            "unsupported value type in wasm_data: {:?}",
+                            "unsupported value type in node_data: {:?}",
                             other
                         )))
                     }
@@ -429,9 +429,11 @@ pub struct NodeConfig {
     /// NodeDynamicState for the fast path. Values here take precedence over `args`.
     #[serde(default, deserialize_with = "deserialize_args")]
     pub hot_args: HashMap<String, String>,
-    #[serde(default, deserialize_with = "deserialize_wasm_data")]
-    pub wasm_data: Option<HashMap<String, String>>,
-    pub hot_wasm_data: Option<HashMap<String, String>>,
+    /// Startup configuration shared by native and Wasm nodes.
+    #[serde(default, deserialize_with = "deserialize_node_data")]
+    pub node_data: Option<HashMap<String, String>>,
+    /// Runtime configuration delivered through opcode 3 when supported by the node.
+    pub hot_node_data: Option<HashMap<String, String>>,
     // * Target operational state of the individual node
     // * Allows overriding the pipeline-level state
     pub desired_state: Option<PipelineLifecycle>,
@@ -447,6 +449,24 @@ impl NodeConfig {
     /// Returns the value for `key` from `hot_args` if present, otherwise from `args`.
     pub fn effective_arg(&self, key: &str) -> Option<&String> {
         self.hot_args.get(key).or_else(|| self.args.get(key))
+    }
+
+    /// Builds the configuration map passed to an engine during startup.
+    ///
+    /// Values in `hot_node_data` override `node_data`, while derived startup
+    /// values such as `batch_size` take final precedence.
+    pub fn startup_node_data(&self) -> HashMap<String, String> {
+        let mut data = self.node_data.clone().unwrap_or_default();
+
+        if let Some(hot_data) = &self.hot_node_data {
+            data.extend(hot_data.clone());
+        }
+
+        if let Some(batch_size) = self.args.get("batch_size") {
+            data.insert("batch_size".to_string(), batch_size.clone());
+        }
+
+        data
     }
 
     /// Resolve an argument which may be specified once per pipeline worker.
@@ -631,8 +651,8 @@ impl WabricksConfig {
                             args
                         },
                         hot_args: HashMap::new(),
-                        wasm_data: None,
-                        hot_wasm_data: None,
+                        node_data: None,
+                        hot_node_data: None,
                         desired_state: None,
                     },
                     // Node 2: BatchTxNode sink
@@ -652,8 +672,8 @@ impl WabricksConfig {
                             args
                         },
                         hot_args: HashMap::new(),
-                        wasm_data: None,
-                        hot_wasm_data: None,
+                        node_data: None,
+                        hot_node_data: None,
                         desired_state: None,
                     },
                 ],
@@ -1506,8 +1526,7 @@ impl WabricksConfig {
                             if let Some(worker) =
                                 self.wabrix.workers.iter().find(|w| w.id == worker_id)
                             {
-                                let entry =
-                                    iface_serving_cores.entry(iface.clone()).or_default();
+                                let entry = iface_serving_cores.entry(iface.clone()).or_default();
                                 if !entry.contains(&worker.core) {
                                     entry.push(worker.core);
                                 }
@@ -1789,8 +1808,8 @@ impl WabricksConfig {
                             labels: node_conf.labels.clone(),
                             args,
                             hot_args: node_conf.hot_args.clone(),
-                            wasm_data: node_conf.wasm_data.clone(),
-                            hot_wasm_data: node_conf.hot_wasm_data.clone(),
+                            node_data: node_conf.node_data.clone(),
+                            hot_node_data: node_conf.hot_node_data.clone(),
                             desired_state: node_conf.desired_state.clone(),
                         },
                         state: NodeDynamicState::default(),
@@ -1823,7 +1842,7 @@ impl WabricksConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{PipelineLifecycle, WabricksConfig};
+    use super::{NodeConfig, PipelineLifecycle, WabricksConfig};
     use std::path::PathBuf;
     use ts_rs::{Config, TS};
 
@@ -1904,6 +1923,67 @@ mod tests {
             config.pipelines[0].nodes[0].desired_state,
             Some(PipelineLifecycle::Running)
         );
+    }
+
+    #[test]
+    fn node_data_and_hot_node_data_are_parsed_as_engine_contract_fields() {
+        let node: NodeConfig = toml::from_str(
+            r#"
+                id = "tcp_engine"
+                type = "TcpNode"
+
+                [node_data]
+                src_ip = "10.0.0.1"
+                syn_rate = "1000k"
+
+                [hot_node_data]
+                syn_rate = "2000k"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            node.node_data.as_ref().and_then(|data| data.get("src_ip")),
+            Some(&"10.0.0.1".to_string())
+        );
+        assert_eq!(
+            node.node_data
+                .as_ref()
+                .and_then(|data| data.get("syn_rate")),
+            Some(&"1000k".to_string())
+        );
+        assert_eq!(
+            node.hot_node_data
+                .as_ref()
+                .and_then(|data| data.get("syn_rate")),
+            Some(&"2000k".to_string())
+        );
+    }
+
+    #[test]
+    fn startup_node_data_applies_shared_precedence() {
+        let node: NodeConfig = toml::from_str(
+            r#"
+                id = "tcp_engine"
+                type = "TcpNode"
+                args = { batch_size = "256" }
+
+                [node_data]
+                syn_rate = "1000k"
+                syn_limit = "10M"
+                batch_size = "64"
+
+                [hot_node_data]
+                syn_rate = "2000k"
+                batch_size = "128"
+            "#,
+        )
+        .unwrap();
+
+        let startup = node.startup_node_data();
+        assert_eq!(startup.get("syn_rate"), Some(&"2000k".to_string()));
+        assert_eq!(startup.get("syn_limit"), Some(&"10M".to_string()));
+        assert_eq!(startup.get("batch_size"), Some(&"256".to_string()));
     }
 
     #[test]

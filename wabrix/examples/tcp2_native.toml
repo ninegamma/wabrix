@@ -1,8 +1,8 @@
 [wabrix]
 ifaces= [
-    { name = "enp2s0f0np0", rxd = 8160, txd = 8160, irq_core = 6 },
+    { name = "enp2s0f0np0", rxd = 8096, txd = 8096, irq_core = 6 },
     { name = "veth_xbricks", rxd = 1024, txd = 1024, type = "veth", namespace = "ns-xbricks", peer = "tap-veth-0", mac_if = "enp2s0f0np0", ipnet = "10.10.10.222/24", checksum_offload = false },
-    { name = "enp2s0f1np1", rxd = 8160, txd = 8160, irq_core = 8 },
+    { name = "enp2s0f1np1", rxd = 8096, txd = 8096, irq_core = 8 },
     { name = "veth_xbricks_1", rxd = 1024, txd = 1024, type = "veth", namespace = "ns-xbricks_1", peer = "tap-veth-1", mac_if = "enp2s0f1np1", ipnet = "10.10.10.31/24", checksum_offload = false },
 ]
 umem= [
@@ -22,12 +22,13 @@ workers= [
 ]
 
 # ===================================================================
-# PIPELINE: UNIFIED_NIC0
+# PIPELINE: tcp_client
 # ===================================================================
 [[pipelines]]
-name = "unified_nic0"
+name = "tcp_client"
 workers = [0]
 poll_frequency = 10000
+desired_state = "Running delay=1000"
 
 [[pipelines.nodes]]
 id = "rx_source"
@@ -56,19 +57,23 @@ hot_args= {}
 id = "tcp_engine"
 type = "TcpNode"
 routes = ["shared_tx_sink", "veth_sink", "drop"]
+desired_state = "Running"
 labels = ["SentSyn", "SentSynAck", "SentSynAck2", "SentFin", "SentFinPssv", "SentAck4Fin", "SentAck", "SentRst", "RecvSyn", "RecvSynAck", "RecvSynAck2", "RecvFin", "RecvFinPssv", "RecvAck4Fin", "RecvAck", "RecvRst", "Unexpected", "RecvPayload", "SentPayload", "TickDrop", "ToLinux", "Drop", "Watermark"]
 args= { umem = "0" }
-hot_args= {}
+hot_args= { }
 
-[pipelines.nodes.wasm_data]
+[pipelines.nodes.node_data]
 close_timeout = "80"
 name = "tcp_client"
-syn_limit = "100M"
-syn_rate = "1600k"
 dst_ip = "10.10.10.31"
 dst_mac = "44:49:88:06:63:39"
 src_mac = "44:49:88:06:63:38"
 src_ip = "10.10.10.222"
+syn_limit = "60M"
+syn_rate = "500k"
+
+[pipelines.nodes.hot_node_data]
+syn_rate = "1100k"
 
 [[pipelines.nodes]]
 id = "shared_tx_sink"
@@ -94,10 +99,10 @@ args= {}
 hot_args= {}
 
 # ===================================================================
-# PIPELINE: UNIFIED_NIC1
+# PIPELINE: tcp_server
 # ===================================================================
 [[pipelines]]
-name = "unified_nic1"
+name = "tcp_server"
 workers = [1]
 poll_frequency = 10000
 
@@ -128,11 +133,12 @@ hot_args= {}
 id = "tcp_engine"
 type = "TcpNode"
 routes = ["shared_tx_sink", "veth_sink", "drop"]
+desired_state = "Running"
 labels = ["SentSyn", "SentSynAck", "SentSynAck2", "SentFin", "SentFinPssv", "SentAck4Fin", "SentAck", "SentRst", "RecvSyn", "RecvSynAck", "RecvSynAck2", "RecvFin", "RecvFinPssv", "RecvAck4Fin", "RecvAck", "RecvRst", "Unexpected", "RecvPayload", "SentPayload", "TickDrop", "ToLinux", "Drop", "Watermerk"]
 args= { umem = "1" }
 hot_args= {}
 
-[pipelines.nodes.wasm_data]
+[pipelines.nodes.node_data]
 dst_mac = "44:49:88:06:63:38"
 src_mac = "44:49:88:06:63:39"
 src_ip = "10.10.10.31"

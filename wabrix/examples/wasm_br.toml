@@ -121,7 +121,7 @@ dst_ip = "192.168.177.222"
 dst_mac = "44:49:88:06:63:38"
 batch_size = "256"
 
-[pipelines.nodes.wasm_data]
+[pipelines.nodes.node_data]
 dst_ip = "192.168.177.222"
 rng_seed = "235467"
 src_mac = "44:49:88:06:63:39"

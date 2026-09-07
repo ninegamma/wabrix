@@ -1,8 +1,8 @@
 [wabrix]
 ifaces= [
-    { name = "enp2s0f0np0", rxd = 8096, txd = 8096, irq_core = 2, napi = { flush_timeout_ns = 60000, defer_irqs = 256 } },
+    { name = "enp2s0f0np0", rxd = 8096, txd = 8096, irq_core = 7, napi = { flush_timeout_ns = 60000, defer_irqs = 256 } },
     { name = "veth_wabrix", rxd = 1024, txd = 1024, type = "veth", namespace = "ns-wabrix", peer = "tap-veth-0", mac_if = "enp2s0f0np0", ipnet = "10.10.10.222/24", checksum_offload = false },
-    { name = "enp2s0f1np1", rxd = 8096, txd = 8096, irq_core = 4, napi = { flush_timeout_ns = 60000, defer_irqs = 256 } },
+    { name = "enp2s0f1np1", rxd = 8096, txd = 8096, irq_core = 9, napi = { flush_timeout_ns = 60000, defer_irqs = 256 } },
     { name = "veth_wabrix_1", rxd = 1024, txd = 1024, type = "veth", namespace = "ns-wabrix-1", peer = "tap-veth-1", mac_if = "enp2s0f1np1", ipnet = "10.10.10.31/24", checksum_offload = false },
 ]
 umem= [
@@ -30,14 +30,14 @@ workers = [0]
 poll_frequency = 10000
 # Target lifecycle state for this pipeline
 # Valid values: "Running", "Paused",
-desired_state = "Running"
+desired_state = "Running delay=100"
 
 [[pipelines.nodes]]
 id = "rx_source"
 type = "BatchRxNode"
 routes = ["nd_parser"]
 queues = [0]
-args= { interface = "enp2s0f0np0", batch_size = "256" }
+args= { interface = "enp2s0f0np0", batch_size = "512" }
 hot_args= {}
 
 [[pipelines.nodes]]
@@ -51,30 +51,30 @@ hot_args= {}
 [[pipelines.nodes]]
 id = "nd_parser"
 type = "FastParserNode"
-routes = ["tcp_engine"]
+routes = ["client"]
 args= {}
 hot_args= {}
 
 [[pipelines.nodes]]
-id = "tcp_engine"
+id = "client"
 type = "WasmEngine"
 routes = ["shared_tx_sink", "veth_sink", "drop"]
 labels = ["SentSyn", "SentSynAck", "SentSynAck2", "SentFin", "SentFinPssv", "SentAck4Fin", "SentAck", "SentRst", "RecvSyn", "RecvSynAck", "RecvSynAck2", "RecvFin", "RecvFinPssv", "RecvAck4Fin", "RecvAck", "RecvRst", "Unexpected", "RecvPayload", "SentPayload", "TickDrop", "ToLinux", "Drop", "Watermark"]
 # Node-level state override
 desired_state = "Running"
-args= { umem = "0" }
+args= { umem = "0", batch_size = "512" }
 hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/tcp_engine.wasm" }
 
-[pipelines.nodes.wasm_data]
+[pipelines.nodes.node_data]
 dst_ip = "10.10.10.31"
 src_mac = "44:49:88:06:63:38"
 dst_mac = "44:49:88:06:63:39"
 src_ip = "10.10.10.222"
 
-[pipelines.nodes.hot_wasm_data]
-syn_limit = "60M"
+[pipelines.nodes.hot_node_data]
+syn_limit = "30M"
 close_timeout = "100"
-syn_rate = "600k"
+syn_rate = "700k"
 
 [[pipelines.nodes]]
 id = "nd_parser_veth"
@@ -121,7 +121,7 @@ id = "rx_source"
 type = "BatchRxNode"
 routes = ["nd_parser"]
 queues = [0]
-args= { interface = "enp2s0f1np1", batch_size = "256" }
+args= { interface = "enp2s0f1np1", batch_size = "512" }
 hot_args= {}
 
 [[pipelines.nodes]]
@@ -135,27 +135,27 @@ hot_args= {}
 [[pipelines.nodes]]
 id = "nd_parser"
 type = "FastParserNode"
-routes = ["tcp_engine"]
+routes = ["server"]
 args= {}
 hot_args= {}
 
 [[pipelines.nodes]]
-id = "tcp_engine"
+id = "server"
 type = "WasmEngine"
 routes = ["shared_tx_sink", "veth_sink", "drop"]
 labels = ["SentSyn", "SentSynAck", "SentSynAck2", "SentFin", "SentFinPssv", "SentAck4Fin", "SentAck", "SentRst", "RecvSyn", "RecvSynAck", "RecvSynAck2", "RecvFin", "RecvFinPssv", "RecvAck4Fin", "RecvAck", "RecvRst", "Unexpected", "RecvPayload", "SentPayload", "TickDrop", "ToLinux", "Drop", "Watermerk"]
 # Node-level state override
 desired_state = "Running"
-args= { umem = "1", wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/tcp_engine.wasm" }
+args= { umem = "1", wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/tcp_engine.wasm",  batch_size = "512" }
 hot_args= {}
 
-[pipelines.nodes.wasm_data]
+[pipelines.nodes.node_data]
 src_ip = "10.10.10.31"
 src_mac = "44:49:88:06:63:39"
 dst_mac = "44:49:88:06:63:38"
 
-[pipelines.nodes.hot_wasm_data]
-close_timeout = "200"
+[pipelines.nodes.hot_node_data]
+#close_timeout = "200"
 
 [[pipelines.nodes]]
 id = "nd_parser_veth"

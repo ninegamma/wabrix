@@ -177,7 +177,7 @@ Each pipeline contains an array of node tables declared with `[[pipelines.nodes]
 | `labels` | array of strings | no | Metric label names for WASM output routes. |
 | `args` | inline table | no | Node-specific key/value arguments. Values may be strings, integers, floats, or booleans (non-string values are coerced to strings). Default `{}`. |
 | `hot_args` | inline table or table section | no | Live-updatable key/value arguments. Same value types as `args`. Take precedence over `args` for the same key. Always serialized as an inline table on save. See [Hot Args](#hot-args) below. |
-| `wasm_data` | inline table | no | Initial state/configuration passed into WASM modules. Same value types as `args`. |
+| `node_data` | inline table | no | Initial state/configuration passed into WASM modules. Same value types as `args`. |
 
 ---
 
@@ -287,7 +287,7 @@ Runs a WASM module that processes each incoming packet and routes output.
 | `wasm_file_path` | **yes** | Absolute path to the `.wasm` module. |
 | `umem` | **yes** | UMEM `id` frames belong to. For multi-worker pipelines, this may be an array with one value per worker. |
 
-`wasm_data` key/value pairs are passed as initial state to the WASM module.
+`node_data` key/value pairs are passed as initial state to the WASM module.
 
 ---
 

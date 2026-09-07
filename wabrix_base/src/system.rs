@@ -430,17 +430,12 @@ pub fn check_irq_affinity(worker_core: usize, interface: &str) {
     check_interface_irq_affinity(&iface, &[worker_core]);
 }
 
-pub fn check_interface_irq_affinity(
-    iface: &InterfaceCheckConfig,
-    all_worker_cores: &[usize],
-) {
+pub fn check_interface_irq_affinity(iface: &InterfaceCheckConfig, all_worker_cores: &[usize]) {
     let configured_irq_core_mismatch = iface.poll_mode == "napi_busy_poll"
-        && iface
-            .irq_core
-            .is_some_and(|irq_core| {
-                !iface.serving_worker_cores.is_empty()
-                    && !iface.serving_worker_cores.contains(&irq_core)
-            });
+        && iface.irq_core.is_some_and(|irq_core| {
+            !iface.serving_worker_cores.is_empty()
+                && !iface.serving_worker_cores.contains(&irq_core)
+        });
 
     // 1. Configured irq_core check
     match iface.poll_mode.as_str() {
@@ -1009,23 +1004,28 @@ mod tests {
         let worker_cores = vec![2, 3];
 
         // NAPI busy poll: irq_core matching serving worker core 3
-        let napi_match = InterfaceCheckConfig::with_mode("enp2s0f1np1", "napi_busy_poll", Some(3), vec![3]);
+        let napi_match =
+            InterfaceCheckConfig::with_mode("enp2s0f1np1", "napi_busy_poll", Some(3), vec![3]);
         check_interface_irq_affinity(&napi_match, &worker_cores);
 
         // NAPI busy poll: irq_core mismatch (e.g. 8 instead of 3)
-        let napi_mismatch = InterfaceCheckConfig::with_mode("enp2s0f1np1", "napi_busy_poll", Some(8), vec![3]);
+        let napi_mismatch =
+            InterfaceCheckConfig::with_mode("enp2s0f1np1", "napi_busy_poll", Some(8), vec![3]);
         check_interface_irq_affinity(&napi_mismatch, &worker_cores);
 
         // NAPI busy poll: irq_core unset
-        let napi_unset = InterfaceCheckConfig::with_mode("enp2s0f1np1", "napi_busy_poll", None, vec![3]);
+        let napi_unset =
+            InterfaceCheckConfig::with_mode("enp2s0f1np1", "napi_busy_poll", None, vec![3]);
         check_interface_irq_affinity(&napi_unset, &worker_cores);
 
         // Userspace ring spin: irq_core on separate core 8
-        let spin_ok = InterfaceCheckConfig::with_mode("enp2s0f0np0", "userspace_ring_spin", Some(8), vec![2]);
+        let spin_ok =
+            InterfaceCheckConfig::with_mode("enp2s0f0np0", "userspace_ring_spin", Some(8), vec![2]);
         check_interface_irq_affinity(&spin_ok, &worker_cores);
 
         // Userspace ring spin: irq_core on worker core 2 (conflict)
-        let spin_conflict = InterfaceCheckConfig::with_mode("enp2s0f0np0", "userspace_ring_spin", Some(2), vec![2]);
+        let spin_conflict =
+            InterfaceCheckConfig::with_mode("enp2s0f0np0", "userspace_ring_spin", Some(2), vec![2]);
         check_interface_irq_affinity(&spin_conflict, &worker_cores);
     }
 }

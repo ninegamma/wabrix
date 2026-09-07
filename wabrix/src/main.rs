@@ -286,7 +286,11 @@ async fn main() -> anyhow::Result<()> {
                     })
                     .collect();
                 let interface_checks = current_config.interface_check_configs();
-                wabrix_base::system::check_system(&worker_cores, &interface_checks, &irq_assignments);
+                wabrix_base::system::check_system(
+                    &worker_cores,
+                    &interface_checks,
+                    &irq_assignments,
+                );
 
                 // Configure Network Interfaces
                 info!("Configuring network interfaces...");
@@ -530,7 +534,11 @@ async fn main() -> anyhow::Result<()> {
                     })
                     .collect();
                 let interface_checks = current_config.interface_check_configs();
-                wabrix_base::system::check_system(&worker_cores, &interface_checks, &irq_assignments);
+                wabrix_base::system::check_system(
+                    &worker_cores,
+                    &interface_checks,
+                    &irq_assignments,
+                );
 
                 info!("Validating pipeline topology...");
                 match current_config.to_system_builder() {
