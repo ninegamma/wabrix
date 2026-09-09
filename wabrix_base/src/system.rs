@@ -2,7 +2,7 @@ use crate::frame_registry::get_tsc_start;
 use macaddr::{MacAddr6 as MacAddress, ParseError};
 use std::arch::x86_64::__cpuid;
 use std::fs::File;
-use std::io::Read;
+use std::io::{self, Read};
 use std::path::Path;
 
 const CPU_CLOCK_PATH: &str = "/sys/devices/system/cpu/cpu0/cpufreq/base_frequency";
@@ -765,6 +765,166 @@ pub struct XdpIfaceCapabilities {
     pub rx_ring_max: Option<u32>,
     /// Maximum TX ring size from ethtool -g Pre-set maximums
     pub tx_ring_max: Option<u32>,
+    /// NETDEV_A_DEV_XSK_FEATURES bitmask.
+    pub xsk_features: Option<u64>,
+}
+
+const NETLINK_HEADER_LEN: usize = 16;
+const GENL_HEADER_LEN: usize = 4;
+const NLA_HEADER_LEN: usize = 4;
+const NLMSG_ERROR: u16 = 2;
+const NLMSG_DONE: u16 = 3;
+const NLM_F_REQUEST: u16 = 1;
+const CTRL_CMD_GETFAMILY: u8 = 3;
+const CTRL_ATTR_FAMILY_ID: u16 = 1;
+const CTRL_ATTR_FAMILY_NAME: u16 = 2;
+const NETDEV_CMD_DEV_GET: u8 = 1;
+const NETDEV_A_DEV_IFINDEX: u16 = 1;
+const NETDEV_A_DEV_XSK_FEATURES: u16 = 6;
+const NETDEV_XSK_FLAGS_TX_TIMESTAMP: u64 = 1 << 0;
+const NETDEV_XSK_FLAGS_TX_CHECKSUM: u64 = 1 << 1;
+const NETDEV_XSK_FLAGS_TX_LAUNCH_TIME_FIFO: u64 = 1 << 2;
+
+fn align_netlink(value: usize) -> usize {
+    (value + 3) & !3
+}
+
+fn append_netlink_attr(attrs: &mut Vec<u8>, kind: u16, value: &[u8]) {
+    let length = NLA_HEADER_LEN + value.len();
+    attrs.extend_from_slice(&(length as u16).to_ne_bytes());
+    attrs.extend_from_slice(&kind.to_ne_bytes());
+    attrs.extend_from_slice(value);
+    attrs.resize(align_netlink(attrs.len()), 0);
+}
+
+fn build_generic_netlink_request(
+    family: u16,
+    command: u8,
+    version: u8,
+    sequence: u32,
+    attrs: &[u8],
+) -> Vec<u8> {
+    let length = NETLINK_HEADER_LEN + GENL_HEADER_LEN + attrs.len();
+    let mut message = Vec::with_capacity(align_netlink(length));
+    message.extend_from_slice(&(length as u32).to_ne_bytes());
+    message.extend_from_slice(&family.to_ne_bytes());
+    message.extend_from_slice(&NLM_F_REQUEST.to_ne_bytes());
+    message.extend_from_slice(&sequence.to_ne_bytes());
+    message.extend_from_slice(&0_u32.to_ne_bytes());
+    message.push(command);
+    message.push(version);
+    message.extend_from_slice(&0_u16.to_ne_bytes());
+    message.extend_from_slice(attrs);
+    message
+}
+
+fn netlink_attrs(payload: &[u8]) -> impl Iterator<Item = (u16, &[u8])> {
+    let mut offset = 0;
+    std::iter::from_fn(move || {
+        while offset + NLA_HEADER_LEN <= payload.len() {
+            let length = u16::from_ne_bytes([payload[offset], payload[offset + 1]]) as usize;
+            let kind = u16::from_ne_bytes([payload[offset + 2], payload[offset + 3]]) & 0x3fff;
+            if length < NLA_HEADER_LEN || offset + length > payload.len() {
+                offset = payload.len();
+                return None;
+            }
+            let value = &payload[offset + NLA_HEADER_LEN..offset + length];
+            offset += align_netlink(length);
+            return Some((kind, value));
+        }
+        None
+    })
+}
+
+fn receive_netlink<T>(
+    socket: &netlink_sys::Socket,
+    mut parse: impl FnMut(&[u8]) -> Option<T>,
+) -> io::Result<Option<T>> {
+    let mut buffer = vec![0_u8; 8192];
+    loop {
+        let (length, _) = socket.recv_from(&mut &mut buffer[..], 0)?;
+        let mut offset = 0;
+        while offset + NETLINK_HEADER_LEN <= length {
+            let message_length = u32::from_ne_bytes([
+                buffer[offset],
+                buffer[offset + 1],
+                buffer[offset + 2],
+                buffer[offset + 3],
+            ]) as usize;
+            if message_length < NETLINK_HEADER_LEN || offset + message_length > length {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid netlink message length",
+                ));
+            }
+
+            let message_type = u16::from_ne_bytes([buffer[offset + 4], buffer[offset + 5]]);
+            let payload = &buffer[offset + NETLINK_HEADER_LEN..offset + message_length];
+            if message_type == NLMSG_ERROR {
+                let error = payload
+                    .get(..4)
+                    .map(|bytes| i32::from_ne_bytes(bytes.try_into().unwrap()))
+                    .unwrap_or(-libc::EINVAL);
+                if error != 0 {
+                    return Err(io::Error::from_raw_os_error(-error));
+                }
+            } else if message_type == NLMSG_DONE {
+                return Ok(None);
+            } else if let Some(value) = parse(payload) {
+                return Ok(Some(value));
+            }
+
+            offset += align_netlink(message_length);
+        }
+    }
+}
+
+fn resolve_netdev_family(socket: &netlink_sys::Socket, sequence: u32) -> io::Result<Option<u16>> {
+    let mut attrs = Vec::new();
+    append_netlink_attr(&mut attrs, CTRL_ATTR_FAMILY_NAME, b"netdev\0");
+    let request = build_generic_netlink_request(16, CTRL_CMD_GETFAMILY, 1, sequence, &attrs);
+    socket.send_to(&request, &netlink_sys::SocketAddr::new(0, 0), 0)?;
+    receive_netlink(socket, |payload| {
+        if payload.len() < GENL_HEADER_LEN {
+            return None;
+        }
+        netlink_attrs(&payload[GENL_HEADER_LEN..]).find_map(|(kind, value)| {
+            (kind == CTRL_ATTR_FAMILY_ID && value.len() >= 2)
+                .then(|| u16::from_ne_bytes([value[0], value[1]]))
+        })
+    })
+}
+
+fn query_xsk_features(ifindex: u32) -> Option<u64> {
+    let mut socket = netlink_sys::Socket::new(netlink_sys::protocols::NETLINK_GENERIC).ok()?;
+    socket.bind_auto().ok()?;
+    let family = resolve_netdev_family(&socket, ifindex).ok()??;
+
+    let mut attrs = Vec::new();
+    append_netlink_attr(&mut attrs, NETDEV_A_DEV_IFINDEX, &ifindex.to_ne_bytes());
+    let request = build_generic_netlink_request(family, NETDEV_CMD_DEV_GET, 2, ifindex, &attrs);
+    socket
+        .send_to(&request, &netlink_sys::SocketAddr::new(0, 0), 0)
+        .ok()?;
+
+    receive_netlink(&socket, |payload| {
+        if payload.len() < GENL_HEADER_LEN {
+            return None;
+        }
+        let attrs = netlink_attrs(&payload[GENL_HEADER_LEN..]).collect::<Vec<_>>();
+        let response_ifindex = attrs.iter().find_map(|(kind, value)| {
+            (*kind == NETDEV_A_DEV_IFINDEX && value.len() >= 4)
+                .then(|| u32::from_ne_bytes(value[..4].try_into().unwrap()))
+        })?;
+        if response_ifindex != ifindex {
+            return None;
+        }
+        attrs.iter().find_map(|(kind, value)| {
+            (*kind == NETDEV_A_DEV_XSK_FEATURES && value.len() >= 8)
+                .then(|| u64::from_ne_bytes(value[..8].try_into().unwrap()))
+        })
+    })
+    .ok()?
 }
 
 /// Query all physical network interfaces and return their XDP capabilities.
@@ -799,6 +959,11 @@ pub fn query_xdp_ifaces() -> Vec<XdpIfaceCapabilities> {
         let mut xdp_zerocopy = false;
         let mut rx_ring_max: Option<u32> = None;
         let mut tx_ring_max: Option<u32> = None;
+        let xsk_features = std::ffi::CString::new(iface.as_str())
+            .ok()
+            .map(|name| unsafe { libc::if_nametoindex(name.as_ptr()) })
+            .filter(|&ifindex| ifindex != 0)
+            .and_then(query_xsk_features);
 
         // --- ethtool -i <iface> ---
         if let Ok(out) = Command::new("ethtool").args(["-i", iface]).output() {
@@ -867,6 +1032,7 @@ pub fn query_xdp_ifaces() -> Vec<XdpIfaceCapabilities> {
             xdp_zerocopy,
             rx_ring_max,
             tx_ring_max,
+            xsk_features,
         });
     }
 
@@ -885,9 +1051,9 @@ pub fn probe_xdp_interfaces() {
     }
 
     // Column widths
-    let w = [20usize, 12, 24, 12, 12, 10, 10];
+    let w = [20usize, 12, 24, 12, 12, 12, 12, 18, 14, 14, 12];
     let header = format!(
-        "{:<w0$} {:<w1$} {:<w2$} {:<w3$} {:<w4$} {:>w5$} {:>w6$}",
+        "{:<w0$} {:<w1$} {:<w2$} {:<w3$} {:<w4$} {:>w5$} {:>w6$} {:>w7$} {:>w8$} {:>w9$} {:>w10$}",
         "Interface",
         "Driver",
         "Version",
@@ -895,6 +1061,10 @@ pub fn probe_xdp_interfaces() {
         "ZeroCopy",
         "Ring Max RX",
         "Ring Max TX",
+        "XSK.Features",
+        "XSK Timestamp",
+        "XSK Checksum",
+        "XSK Launch",
         w0 = w[0],
         w1 = w[1],
         w2 = w[2],
@@ -902,6 +1072,10 @@ pub fn probe_xdp_interfaces() {
         w4 = w[4],
         w5 = w[5],
         w6 = w[6],
+        w7 = w[7],
+        w8 = w[8],
+        w9 = w[9],
+        w10 = w[10],
     );
     let sep = "─".repeat(header.len());
 
@@ -910,7 +1084,7 @@ pub fn probe_xdp_interfaces() {
     info!("{}", sep);
     for r in &rows {
         info!(
-            "{:<w0$} {:<w1$} {:<w2$} {:<w3$} {:<w4$} {:>w5$} {:>w6$}",
+            "{:<w0$} {:<w1$} {:<w2$} {:<w3$} {:<w4$} {:>w5$} {:>w6$} {:>w7$} {:>w8$} {:>w9$} {:>w10$}",
             r.name,
             r.driver,
             r.version,
@@ -922,6 +1096,18 @@ pub fn probe_xdp_interfaces() {
             r.tx_ring_max
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "?".to_string()),
+            r.xsk_features
+                .map(|v| format!("0x{v:016x}"))
+                .unwrap_or_else(|| "?".to_string()),
+            r.xsk_features
+                .map(|v| if v & NETDEV_XSK_FLAGS_TX_TIMESTAMP != 0 { "yes" } else { "no" })
+                .unwrap_or("?"),
+            r.xsk_features
+                .map(|v| if v & NETDEV_XSK_FLAGS_TX_CHECKSUM != 0 { "yes" } else { "no" })
+                .unwrap_or("?"),
+            r.xsk_features
+                .map(|v| if v & NETDEV_XSK_FLAGS_TX_LAUNCH_TIME_FIFO != 0 { "yes" } else { "no" })
+                .unwrap_or("?"),
             w0 = w[0],
             w1 = w[1],
             w2 = w[2],
@@ -929,6 +1115,10 @@ pub fn probe_xdp_interfaces() {
             w4 = w[4],
             w5 = w[5],
             w6 = w[6],
+            w7 = w[7],
+            w8 = w[8],
+            w9 = w[9],
+            w10 = w[10],
         );
     }
     info!("{}", sep);

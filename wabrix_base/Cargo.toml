@@ -15,6 +15,7 @@ separator = { workspace = true }
 serde = { workspace = true }
 ts-rs = { workspace = true }
 libc = "0.2.186"
+netlink-sys = { workspace = true }
 crossbeam-utils = "0.8.22"
 
 [features]
