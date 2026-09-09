@@ -9,7 +9,7 @@ use wabrix_base::frame_registry::FrameRegistry;
 use wabrix_base::system::PlatformData;
 use wabrix_base::telemetry::TelemetryRegistry;
 use wabrix_base::ControlEvent;
-use xsk_rs::Umem;
+use xsk_core::Umem;
 
 pub struct WabrixSystem {
     pub(crate) xsocket_registry: XSocketRegistry,

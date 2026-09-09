@@ -3,7 +3,7 @@ pub mod pciaddress;
 pub mod pdu;
 
 pub use self::pdu::*;
-use xsk_rs::FrameDesc;
+use xsk_core::FrameDesc;
 
 /// Generic trait for objects that can receive packets.
 pub trait PacketRx {

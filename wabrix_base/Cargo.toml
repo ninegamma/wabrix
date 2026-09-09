@@ -4,7 +4,7 @@ edition.workspace = true
 version.workspace = true
 
 [dependencies]
-xsk-rs = { workspace = true }
+xsk-core = { workspace = true }
 macaddr = { workspace = true }
 wabrix_api = { workspace = true }
 crossbeam-queue = { workspace = true }

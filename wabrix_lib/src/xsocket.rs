@@ -9,11 +9,10 @@ use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::sync::Arc;
 use wabrix_base::common::formatting::PreciseSeparator;
 use wabrix_base::interface::Pdu;
-use xsk_rs::config::SocketConfig;
-use xsk_rs::config::{BindFlags, Interface, LibxdpFlags, QueueSize, XdpFlags};
-use xsk_rs::socket::XdpStatistics;
-use xsk_rs::umem::frame::Data;
-use xsk_rs::{CompQueue, FillQueue, FrameDesc, RxQueue, Socket, TxQueue, Umem};
+use xsk_core::config::SocketConfig;
+use xsk_core::config::{BindFlags, Interface, LibxdpFlags, QueueSize, XdpFlags};
+use xsk_core::socket::XdpStatistics;
+use xsk_core::{CompQueue, FillQueue, FrameDesc, RxQueue, Socket, TxQueue, Umem};
 
 const LOG_INTERVAL_C_F_QUEUE_PACKETS: usize = 100;
 
@@ -65,7 +64,7 @@ pub struct XSocketRx {
     _comp_queue_keepalive: Arc<Mutex<CompQueue>>,
     bus: Arc<SystemBus>,
     config: Arc<XdpSocketConfig>,
-    scratch_descriptors: Vec<FrameDesc>,
+    scratch_addrs: Vec<u64>,
     scratch_descriptors_recv_batch: Vec<FrameDesc>,
     scratch_frames: Vec<u32>,
     total_produced: usize,
@@ -110,7 +109,7 @@ pub struct XSocketRx {
 
 pub struct XSocketTx {
     umem: Arc<Umem>,
-    comp_descs_helper: Vec<FrameDesc>,
+    comp_descs_helper: Vec<u64>,
     comp_queue: Arc<Mutex<CompQueue>>,
     tx_queue: Arc<Mutex<TxQueue>>,
     // THE ANCHOR: Keeps the RX side alive even if the RX node is never built
@@ -134,7 +133,7 @@ impl XSocket {
         // Shared rings are optional; if None, we expect Socket::new to return them
         // these are only needed for sockets bound to the same interface and queue
         shared_rings: Option<(Arc<Mutex<FillQueue>>, Arc<Mutex<CompQueue>>)>,
-        initial_descs: Vec<FrameDesc>,
+        initial_addrs: Vec<u64>,
     ) -> Result<(Self, Arc<Mutex<FillQueue>>, Arc<Mutex<CompQueue>>), Box<dyn std::error::Error>>
     {
         let mut bind_flags = BindFlags::XDP_USE_NEED_WAKEUP;
@@ -217,10 +216,10 @@ impl XSocket {
         // ==========================================
         // We must push the allocated descriptors into the ring right now so the
         // Intel driver can grab them the first time we call poll() in the RX loop!
-        if !initial_descs.is_empty() {
+        if !initial_addrs.is_empty() {
             let mut fq_guard = fq.lock();
             unsafe {
-                let produced = fq_guard.produce(&initial_descs);
+                let produced = fq_guard.produce(&initial_addrs);
                 log::info!(
                     "Worker {}: Pre-filled FQ ring with {} empty frames.",
                     config.worker_id,
@@ -279,11 +278,6 @@ impl XSocket {
         self.umem.as_ptr() as *mut u8
     }
 
-    // Standard data access: desc.addr() is relative to UMEM start
-    #[inline(always)]
-    pub fn data(&self, desc: &FrameDesc) -> Data<'_> {
-        unsafe { self.umem.data(desc) }
-    }
 
     /// Returns the raw file descriptor of the AF_XDP socket.
     /// This is required to register the socket in the BPF XSKS-MAP.
@@ -474,7 +468,7 @@ impl XSocket {
             _comp_queue_keepalive: self.comp_queue.clone(),
             bus: self.bus.clone(),
             config: self.config.clone(),
-            scratch_descriptors: vec![FrameDesc::default(); MAX_FILL],
+            scratch_addrs: vec![0; MAX_FILL],
             scratch_descriptors_recv_batch: vec![FrameDesc::default(); MAX_FILL],
             scratch_frames: vec![0u32; MAX_FILL],
             total_produced: 0,
@@ -513,7 +507,7 @@ impl XSocket {
 
         let tx = XSocketTx {
             umem: self.umem,
-            comp_descs_helper: vec![FrameDesc::default(); 4 * MAX_BATCH_SIZE],
+            comp_descs_helper: vec![0; 4 * MAX_BATCH_SIZE],
             comp_queue: self.comp_queue,
             tx_queue: self.tx_queue,
             _rx_queue_keepalive: self.rx_queue,
@@ -765,14 +759,14 @@ impl XSocketRx {
             // Use a 1-cycle bitwise shift instead of multiplication
             let addr = ((local_idx as u64) << frame_size_log2) + headroom;
             // Write directly to our persistent struct buffer
-            self.scratch_descriptors[i] = xsk_rs::FrameDesc::new(addr as usize);
+            self.scratch_addrs[i] = addr;
         }
 
         #[cfg(feature = "profiling")]
         let t3 = unsafe { std::arch::x86_64::_rdtsc() };
 
         // Produce unconditionally first
-        let produced = unsafe { fq.produce(&self.scratch_descriptors[..actual_batch]) };
+        let produced = unsafe { fq.produce(&self.scratch_addrs[..actual_batch]) };
 
         // Check if kernel went to sleep and needs a nudge
         let needs_wakeup = produced > 0 && fq.needs_wakeup();
@@ -1559,7 +1553,7 @@ impl XSocketTx {
         #[inline]
         pub fn wakeup_tx_queue(&self) -> anyhow::Result<()> {
             // Note: This requires access to the TX queue status
-            // In libxdp/xsk-rs, checking needs_wakeup usually happens on the ring struct.
+            // In libxdp/xsk-core, checking needs_wakeup usually happens on the ring struct.
             // If the flag is set:
             unsafe {
                 if self.tx_queue.needs_wakeup() {
@@ -1604,7 +1598,7 @@ impl XSocketTx {
 
             // FIX: Iterate by index instead of .iter()
             for i in 0..consumed {
-                let addr = self.comp_descs_helper[i].addr() as u32;
+                let addr = self.comp_descs_helper[i] as u32;
 
                 // 1. Calculate the local index relative to this specific UMEM
                 let local_idx = addr >> frame_size_log2;

@@ -55,7 +55,7 @@ src_ip = "10.10.10.222"
 
 [pipelines.nodes.hot_node_data]
 syn_limit = "500M"
-syn_rate = "12000K"
+syn_rate = "13000K"
 
 [[pipelines.nodes]]
 id = "tx_sink_0"

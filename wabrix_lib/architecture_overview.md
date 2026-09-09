@@ -18,7 +18,7 @@ The configuration layer acts as the static definition of the system state, bridg
 
 ## 2. Initialization Phase (`SystemBuilder`)
 
-The `SystemBuilder` interacts with the Linux kernel and `xsk-rs` to allocate physical memory and bind hardware queues.
+The `SystemBuilder` interacts with the Linux kernel and `xsk-core` to allocate physical memory and bind hardware queues.
 
 * **UMEM Management:** Allocates memory regions and logically slices them into `UmemPartition`s. If Wasm plugins are used, it reserves a chunk of frames at the start of the UMEM specifically for Wasm memory sharing.
 * **`XSocketRegistry`:** Creates and registers AF_XDP sockets. It immediately splits them into independent `XSocketRx` and `XSocketTx` halves so they can be securely transferred to different nodes in a pipeline.

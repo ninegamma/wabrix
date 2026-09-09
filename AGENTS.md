@@ -7,7 +7,7 @@ The system is split across two repositories:
 * **wabrix:** This repository. The dataplane engine — the AF_XDP socket layer, pipeline engine, config parser, WASM host, and management binary.
 * **wabrix_api:** The public SDK for building WASM plugins for the Wabrix platform. Contains the `wabrix_api` crate, the `wit/wabrix.wit` interface definition, and example `plugins/`.
 
-Sibling checkouts live next to this repo and are referenced by relative Cargo paths: `../xsk-rs` (AF_XDP bindings), `../wabrix_api/wabrix_api` (host-side SDK). The prebuilt `ipblower` load generator and example endpoints live in the separate `wabrix_ep` repo.
+Sibling checkouts live next to this repo and are referenced by relative Cargo paths: `../xsk-core` (AF_XDP bindings), `../wabrix_api/wabrix_api` (host-side SDK). The prebuilt `ipblower` load generator and example endpoints live in the separate `wabrix_ep` repo.
 
 Wabrix is a high-performance, software-based networking engine/router. The system processes packets at high throughput (target: 25 Gbps – 100 Gbps) using Linux kernel-bypass via AF_XDP, and features a sandboxed WebAssembly plugin architecture for data-plane programmability.
 
@@ -36,12 +36,12 @@ There is **no `ipblower` crate in this workspace.** In-tree traffic generation i
 
 ### Crate responsibilities & allowed dependencies
 
-| Crate | Role | May depend on |
-|---|---|---|
-| `wabrix_base` | Core types: `RuntimeUmemConfig`, `UmemPartition`, `SystemBus`, `Directive`, `Node` trait, `NodeId`, `FrameRegistry`, `Pdu`, `Batch`, telemetry counters | `xsk-rs`, `crossbeam-queue`, `log`, `serde`, `macaddr`, `network-types` |
-| `wabrix_lib` | AF_XDP sockets (`XSocket`/`XSocketRx`/`XSocketTx`), pipeline DAG, TOML config, BPF program loading, system builder/runner | `wabrix_base`, `xsk-rs`, `libbpf-rs`, `wabrix_wasm` (behind `wasm` feature), `tokio` |
-| `wabrix_wasm` | WASM runtime host: loads `.wasm` components, exposes host functions via WIT bindings, manages plugin lifecycle | `wabrix_base`, `wabrix_api`, `wasmtime`, `wasmtime-wasi` |
-| `wabrix` | Binary: CLI (`clap`), Prometheus metrics exporter (`axum` + `prometheus`), stdin command loop, config hot-reload orchestration, logging sink | `wabrix_lib`, `wabrix_base` |
+| Crate | Role | May depend on                                                                        |
+|---|---|--------------------------------------------------------------------------------------|
+| `wabrix_base` | Core types: `RuntimeUmemConfig`, `UmemPartition`, `SystemBus`, `Directive`, `Node` trait, `NodeId`, `FrameRegistry`, `Pdu`, `Batch`, telemetry counters | `xsk-core`, `crossbeam-queue`, `log`, `serde`, `macaddr`, `network-types`            |
+| `wabrix_lib` | AF_XDP sockets (`XSocket`/`XSocketRx`/`XSocketTx`), pipeline DAG, TOML config, BPF program loading, system builder/runner | `wabrix_base`, `xsk-core`, `libbpf-rs`, `wabrix_wasm` (behind `wasm` feature), `tokio` |
+| `wabrix_wasm` | WASM runtime host: loads `.wasm` components, exposes host functions via WIT bindings, manages plugin lifecycle | `wabrix_base`, `wabrix_api`, `wasmtime`, `wasmtime-wasi`                             |
+| `wabrix` | Binary: CLI (`clap`), Prometheus metrics exporter (`axum` + `prometheus`), stdin command loop, config hot-reload orchestration, logging sink | `wabrix_lib`, `wabrix_base`                                                          |
 
 **Dependency direction is strictly one-way:** `wabrix` → `wabrix_lib` → `wabrix_base`. `wabrix_lib` pulls in `wabrix_wasm` only through the optional `wasm` feature (`dep:wabrix_wasm`). Never introduce reverse or circular dependencies.
 
@@ -84,7 +84,7 @@ There is **no `ipblower` crate in this workspace.** In-tree traffic generation i
 * **Linting:** Code must pass `cargo clippy --all-targets --all-features -- -D warnings`. Fix every warning; do not `#[allow(...)]` without a comment explaining why it is unavoidable.
 
 ### Networking & Kernel Bypass (AF_XDP)
-* **MANDATORY LIBRARY:** Use the fork of the `xsk-rs` crate (either workspace path `../xsk-rs` or { git = "https://github.com/ninegamma/xsk-rs.git", branch = "master" } ) for all AF_XDP socket manipulations, UMEM setup, and ring-buffer handling.
+* **MANDATORY LIBRARY:** Use the fork of the `xsk-core` crate (either workspace path `../xsk-core` or { git = "https://github.com/ninegamma/xsk-core.git", branch = "master" } ) for all AF_XDP socket manipulations, UMEM setup, and ring-buffer handling.
 * **FORBIDDEN:** Do NOT use `aya`, `std::net` sockets, or `libpcap` for data-plane packet I/O.
 * BPF programs are loaded via `libbpf-rs`/`libbpf-sys`. Skeleton code is generated at build time by `libbpf-cargo` in `wabrix_lib/build.rs`. The eBPF source lives in `wabrix_lib/src/bpf/` (`xscrubber.bpf.c`).
 

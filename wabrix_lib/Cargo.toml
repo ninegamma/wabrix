@@ -15,7 +15,7 @@ rustix = { version = "1.1", features = ["event", "time"] } # Added features for 
 spin = { workspace = true }
 
 # Networking & BPF
-xsk-rs = { workspace = true }
+xsk-core = { workspace = true }
 libbpf-rs = { workspace = true }
 libbpf-sys = { workspace = true }
 network-types = { workspace = true }

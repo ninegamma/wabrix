@@ -3175,7 +3175,7 @@ dependencies = [
  "tokio",
  "ts-rs",
  "wabrix_api",
- "xsk-rs",
+ "xsk-core",
 ]
 
 [[package]]
@@ -3212,7 +3212,7 @@ dependencies = [
  "wabrix_wasm",
  "wasmtime",
  "wasmtime-wasi",
- "xsk-rs",
+ "xsk-core",
 ]
 
 [[package]]
@@ -3228,7 +3228,7 @@ dependencies = [
  "wabrix_base",
  "wasmtime",
  "wasmtime-wasi",
- "xsk-rs",
+ "xsk-core",
 ]
 
 [[package]]
@@ -4013,8 +4013,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
-name = "xsk-rs"
-version = "0.11.0"
+name = "xsk-core"
+version = "0.1.0"
 dependencies = [
  "bitflags 2.13.1",
  "cfg-if",

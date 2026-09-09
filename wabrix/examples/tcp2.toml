@@ -51,12 +51,12 @@ hot_args= {}
 [[pipelines.nodes]]
 id = "nd_parser"
 type = "FastParserNode"
-routes = ["tcp_engine"]
+routes = ["tcp_client"]
 args= {}
 hot_args= {}
 
 [[pipelines.nodes]]
-id = "tcp_engine"
+id = "tcp_client"
 type = "WasmEngine"
 routes = ["shared_tx_sink", "veth_sink", "drop"]
 labels = ["SentSyn", "SentSynAck", "SentSynAck2", "SentFin", "SentFinPssv", "SentAck4Fin", "SentAck", "SentRst", "RecvSyn", "RecvSynAck", "RecvSynAck2", "RecvFin", "RecvFinPssv", "RecvAck4Fin", "RecvAck", "RecvRst", "Unexpected", "RecvPayload", "SentPayload", "TickDrop", "ToLinux", "Drop", "Watermark"]

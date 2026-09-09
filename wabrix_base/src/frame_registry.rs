@@ -6,7 +6,7 @@ use crossbeam_queue::ArrayQueue;
 use log::debug;
 use std::sync::Arc;
 use wabrix_api::MAX_BATCH_SIZE;
-use xsk_rs::Umem;
+use xsk_core::Umem;
 
 // Thread-local storage for the worker's frame registry pointer
 // This allows XSocketRx/Tx to access the worker's registry without storing it in each socket
@@ -412,7 +412,7 @@ impl FrameRegistry {
     /// A vector of PDUs ready to be filled with packet data
     pub fn allocate_pdus(&mut self, umem_id: usize, count: usize) -> Vec<crate::interface::Pdu> {
         use crate::interface::Pdu;
-        use xsk_rs::FrameDesc;
+        use xsk_core::FrameDesc;
 
         let umem_config = if let Some(config) = self.umem_configs[umem_id].as_ref() {
             config.clone()
@@ -445,14 +445,14 @@ impl FrameRegistry {
         let _umem_base_ptr = active_umem.as_ptr();
         let system_bus = &*self.bus as *const SystemBus;
         let frame_size_log2 = umem_config.frame_size_log2;
-        let headroom = umem_config.head_room as usize;
+        let headroom = umem_config.head_room as u64;
 
         let mut pdus = Vec::with_capacity(frame_indices.len());
 
         for &frame_idx in &frame_indices {
             // local_idx is UMEM-relative: frame_addr = local_idx << frame_size_log2
             let (_umem_id, local_idx) = decode_global_frame(frame_idx);
-            let frame_addr = (local_idx as usize) << frame_size_log2;
+            let frame_addr = (local_idx as u64) << frame_size_log2;
             let desc = FrameDesc::new(frame_addr + headroom);
 
             let pdu = Pdu::new(
@@ -474,7 +474,7 @@ impl FrameRegistry {
     /// Returns the number of PDUs successfully allocated.
     pub fn allocate_pdus_into(&mut self, umem_id: usize, dst: &mut [MaybeUninit<Pdu>]) -> usize {
         use crate::interface::Pdu;
-        use xsk_rs::FrameDesc;
+        use xsk_core::FrameDesc;
 
         // Extract values before the mutable borrow in allocate_batch_into
         let (_umem_base_ptr, frame_size_log2, headroom) = {
@@ -504,7 +504,7 @@ impl FrameRegistry {
             (
                 active_umem.as_ptr(),
                 umem_config.frame_size_log2,
-                umem_config.head_room as usize,
+                umem_config.head_room as u64,
             )
         };
 
@@ -530,7 +530,7 @@ impl FrameRegistry {
             // local_idx is UMEM-relative: frame_addr = local_idx << frame_size_log2
             // No group_start subtraction needed — the encoding carries that information.
             let (_umem_id, local_idx) = decode_global_frame(global_frame_idx);
-            let frame_addr = (local_idx as usize) << frame_size_log2;
+            let frame_addr = (local_idx as u64) << frame_size_log2;
             let desc = FrameDesc::new(frame_addr + headroom);
 
             dst_slot.write(Pdu::new(

@@ -7,8 +7,8 @@ use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
 use wabrix_base::frame_registry::RETURN_QUEUE_CAPACITY;
-use xsk_rs::config::{FrameSize, QueueSize};
-use xsk_rs::Umem;
+use xsk_core::config::{FrameSize, QueueSize};
+use xsk_core::Umem;
 //use wabrix_wasm::wasm_manager::WasmManager;
 use crate::system_runner::WabrixSystem;
 use crate::toml_parser::{PartitionRequest, WorkerBuilderConfig};
@@ -226,7 +226,7 @@ impl SystemBuilder {
 
         // Initialize UMEMs and Fill/Comp Queues
         // Indexed by group_id (0..MAX_UMEM). None = this group_id not configured.
-        let mut initialized_umems: Vec<Option<(Arc<Umem>, Vec<xsk_rs::FrameDesc>)>> =
+        let mut initialized_umems: Vec<Option<(Arc<Umem>, Vec<xsk_core::FrameDesc>)>> =
             vec![None; MAX_UMEM];
 
         for (group_id, umem_conf_opt) in self.runtime_umems.iter().enumerate() {
@@ -235,7 +235,7 @@ impl SystemBuilder {
                 None => continue,
             };
 
-            let xsk_umem_config = xsk_rs::config::UmemConfig::builder()
+            let xsk_umem_config = xsk_core::config::UmemConfig::builder()
                 .frame_size(FrameSize::new(umem_conf.frame_size)?)
                 .frame_count(std::num::NonZeroU32::new(umem_conf.frame_count).unwrap())
                 .fill_queue_size(QueueSize::try_from(umem_conf.fq_size)?)
@@ -244,7 +244,7 @@ impl SystemBuilder {
                 .build_opts()
                 .map_err(|e| format!("Failed to create UMEM for group {}: {}", group_id, e))?;
 
-            // xsk-rs returns the umem and the pre-calculated descriptors
+            // xsk-core returns the umem and the pre-calculated descriptors
             let (umem, umem_descs) = Umem::new_with_opts(xsk_umem_config, true)?;
 
             let shared_umem = Arc::from(umem);
@@ -310,7 +310,7 @@ impl SystemBuilder {
                 let ring_key = (config.interface.clone(), config.queue_id);
                 let shared_rings = queue_ring_map.get(&ring_key).cloned();
 
-                let mut initial_descs = Vec::new();
+                let mut initial_addrs = Vec::new();
                 if shared_rings.is_none() {
                     if let Some(registry) =
                         wabrix_system.frame_registries[config.worker_id].as_mut()
@@ -321,7 +321,7 @@ impl SystemBuilder {
                         for &frame in &global_frames[..allocated] {
                             let (_umem_id, local_idx) =
                                 wabrix_base::frame_registry::decode_global_frame(frame);
-                            initial_descs.push(umem_descs[local_idx as usize]);
+                            initial_addrs.push(umem_descs[local_idx as usize].addr());
                         }
                     }
                 }
@@ -331,7 +331,7 @@ impl SystemBuilder {
                     system_bus.clone(),
                     umem.clone(), // This is now a clean clone of the Arc
                     shared_rings,
-                    initial_descs,
+                    initial_addrs,
                 );
 
                 let (xs, fq, cq) = match socket_result {
@@ -360,7 +360,7 @@ impl SystemBuilder {
                             config.interface,
                             config.queue_id
                         );
-                        log::error!("xsk-rs error : {}", e);
+                        log::error!("xsk-core error : {}", e);
                         log::error!("OS Error     : {} (Errno: {})", os_err, raw_code);
 
                         // Cheat sheet for the most common AF_XDP failures:

@@ -9,7 +9,7 @@ version.workspace = true
 wasmtime = { workspace = true }
 wasmtime-wasi = { workspace = true }
 log = { workspace = true }
-xsk-rs = { workspace = true }
+xsk-core = { workspace = true }
 dashmap = "6.1" # Using stable 6.1 instead of 7.0-rc2 for reliability
 wabrix_base = { workspace = true }
 wabrix_api = { workspace = true }
