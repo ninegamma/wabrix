@@ -56,6 +56,7 @@ pub struct XSocket {
 
 const MAX_FILL: usize = 2048;
 const RX_DIAGNOSTIC_LOG_INTERVAL: u64 = 10_000;
+#[cfg(feature = "profiling")]
 const NAPI_DIAGNOSTIC_LOG_INTERVAL: u64 = 100_000;
 /// Split components for independent RX and TX access
 /// These DO NOT own the frame registry - it's accessed via thread-local storage
@@ -85,12 +86,20 @@ pub struct XSocketRx {
     fill_zero_produced: u64,
     fill_partial_submissions: u64,
     max_fill_deficit: usize,
-    // NAPI polling diagnostics. These are local to the RX worker and are only
-    // read on the cold diagnostic path, so no atomics are needed.
+    // NAPI polling diagnostics are compiled only for profiling builds. These
+    // are local to the RX worker, so no atomics are needed.
+    #[cfg(feature = "profiling")]
     napi_poll_attempts: u64,
+    #[cfg(feature = "profiling")]
     napi_poll_packets: u64,
+    #[cfg(feature = "profiling")]
+    napi_poll_available_descriptors: u64,
+    #[cfg(feature = "profiling")]
     napi_poll_empty: u64,
+    #[cfg(feature = "profiling")]
     max_napi_poll_consume: usize,
+    #[cfg(feature = "profiling")]
+    max_napi_poll_available: usize,
     napi_poll_timeout: rustix::time::Timespec,
     napi_busy_poll: bool,
     receive_calls: u64,
@@ -487,10 +496,18 @@ impl XSocket {
             fill_zero_produced: 0,
             fill_partial_submissions: 0,
             max_fill_deficit: 0,
+            #[cfg(feature = "profiling")]
             napi_poll_attempts: 0,
+            #[cfg(feature = "profiling")]
             napi_poll_packets: 0,
+            #[cfg(feature = "profiling")]
+            napi_poll_available_descriptors: 0,
+            #[cfg(feature = "profiling")]
             napi_poll_empty: 0,
+            #[cfg(feature = "profiling")]
             max_napi_poll_consume: 0,
+            #[cfg(feature = "profiling")]
+            max_napi_poll_available: 0,
             napi_poll_timeout,
             napi_busy_poll,
             receive_calls: 0,
@@ -1015,22 +1032,41 @@ impl BatchRx for XSocketRx {
 
             // Fallback to NAPI poll syscall ONLY if local spinning exhausts
             if rcvd == 0 && self.napi_busy_poll {
-                self.napi_poll_attempts += 1;
+                #[cfg(feature = "profiling")]
+                {
+                    self.napi_poll_attempts += 1;
+                }
 
                 // Hand control to the kernel to spin safely on the hardware ring.
                 self.poll_for_napi_packets(Some(&self.napi_poll_timeout))?;
+
+                // Read the producer index after poll() returns, before consuming
+                // descriptors, so this records the RX backlog delivered by NAPI.
+                #[cfg(feature = "profiling")]
+                {
+                    let available_after_poll = rx_guard.nb_avail_exact() as usize;
+                    self.napi_poll_available_descriptors += available_after_poll as u64;
+                    self.max_napi_poll_available =
+                        self.max_napi_poll_available.max(available_after_poll);
+                }
 
                 let newly_received = unsafe {
                     rx_guard.consume(&mut self.scratch_descriptors_recv_batch[rcvd..max_to_pull])
                 };
 
-                if newly_received == 0 {
-                    self.napi_poll_empty += 1;
-                }
+                #[cfg(feature = "profiling")]
+                {
+                    if newly_received == 0 {
+                        self.napi_poll_empty += 1;
+                    }
 
-                self.max_napi_poll_consume = self.max_napi_poll_consume.max(newly_received);
+                    self.max_napi_poll_consume = self.max_napi_poll_consume.max(newly_received);
+                }
                 rcvd += newly_received;
-                self.napi_poll_packets += newly_received as u64;
+                #[cfg(feature = "profiling")]
+                {
+                    self.napi_poll_packets += newly_received as u64;
+                }
             }
 
             // Legacy driver wakeup fallback if empty spins persist
@@ -1075,22 +1111,25 @@ impl BatchRx for XSocketRx {
                     self.prof_wakeup_cycles += t3 - t2;
                 }
 
-                if log::log_enabled!(log::Level::Debug)
-                    && self.prof_started
-                    && rcvd > 0
-                    && self
-                        .napi_poll_attempts
-                        .is_multiple_of(NAPI_DIAGNOSTIC_LOG_INTERVAL)
+                #[cfg(feature = "profiling")]
                 {
-                    debug!(
-                        "{}: [{} us] After Wakeup: Received {} packets. Empty spins= {}. Total rx: {}, Free frames: {}",
-                        self.source_id(),
-                        rdtsc_us().separate_with_precision(3),
-                        rcvd,
-                        self.empty_spins,
-                        self.total_received + rcvd,
-                        frame_registry.total_free_frames()
-                    );
+                    if log::log_enabled!(log::Level::Debug)
+                        && self.prof_started
+                        && rcvd > 0
+                        && self
+                            .napi_poll_attempts
+                            .is_multiple_of(NAPI_DIAGNOSTIC_LOG_INTERVAL)
+                    {
+                        debug!(
+                            "{}: [{} us] After Wakeup: Received {} packets. Empty spins= {}. Total rx: {}, Free frames: {}",
+                            self.source_id(),
+                            rdtsc_us().separate_with_precision(3),
+                            rcvd,
+                            self.empty_spins,
+                            self.total_received + rcvd,
+                            frame_registry.total_free_frames()
+                        );
+                    }
                 }
             }
         }
@@ -1106,8 +1145,10 @@ impl BatchRx for XSocketRx {
                 // included because it happened before the burst was detected.
                 self.napi_poll_attempts = 0;
                 self.napi_poll_packets = 0;
+                self.napi_poll_available_descriptors = 0;
                 self.napi_poll_empty = 0;
                 self.max_napi_poll_consume = 0;
+                self.max_napi_poll_available = 0;
                 self.empty_spins = 0;
             }
 
@@ -1147,27 +1188,35 @@ impl BatchRx for XSocketRx {
 
         self.total_received += rcvd;
 
-        if log::log_enabled!(log::Level::Debug)
-            && self.prof_started
-            && self.napi_poll_attempts > 0
-            && self
-                .napi_poll_attempts
-                .is_multiple_of(NAPI_DIAGNOSTIC_LOG_INTERVAL)
+        #[cfg(feature = "profiling")]
         {
-            let average_napi_poll_consume =
-                self.napi_poll_packets as f64 / self.napi_poll_attempts as f64;
-            debug!(
-                            "{}: NAPI poll diagnostics: attempts={}, packets={}, average_consume_after_poll={:.2}, empty={}, max_consume_after_poll={}, receive_calls={}, total_rx={}, rcvd= {}",
-                            self.source_id(),
-                            self.napi_poll_attempts.separated_string(),
-                            self.napi_poll_packets.separated_string(),
-                            average_napi_poll_consume,
-                            self.napi_poll_empty.separated_string(),
-                            self.max_napi_poll_consume,
-                            self.receive_calls.separated_string(),
-                            (self.total_received + rcvd).separated_string(),
-                            rcvd
-                        );
+            if log::log_enabled!(log::Level::Debug)
+                && self.prof_started
+                && self.napi_poll_attempts > 0
+                && self
+                    .napi_poll_attempts
+                    .is_multiple_of(NAPI_DIAGNOSTIC_LOG_INTERVAL)
+            {
+                let average_napi_poll_consume =
+                    self.napi_poll_packets as f64 / self.napi_poll_attempts as f64;
+                let average_napi_poll_available = self.napi_poll_available_descriptors as f64
+                    / self.napi_poll_attempts as f64;
+                debug!(
+                    "{}: NAPI poll diagnostics: attempts={}, available_descriptors={}, average_available_after_poll={:.2}, max_available_after_poll={}, packets={}, average_consume_after_poll={:.2}, empty={}, max_consume_after_poll={}, receive_calls={}, total_rx={}, rcvd= {}",
+                    self.source_id(),
+                    self.napi_poll_attempts.separated_string(),
+                    self.napi_poll_available_descriptors.separated_string(),
+                    average_napi_poll_available,
+                    self.max_napi_poll_available,
+                    self.napi_poll_packets.separated_string(),
+                    average_napi_poll_consume,
+                    self.napi_poll_empty.separated_string(),
+                    self.max_napi_poll_consume,
+                    self.receive_calls.separated_string(),
+                    (self.total_received + rcvd).separated_string(),
+                    rcvd
+                    );
+            }
         }
 
         /*
