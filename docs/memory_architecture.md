@@ -33,11 +33,11 @@ Host Physical UMEM (byte offsets from Umem base ptr)
 │  └──────────────────────────────────────┘                            │
 │                                                                      │
 ├──────────────────────────────────────────────────────────────────────┤
-│  Control Block  [reserved_bytes - control_block_bytes .. reserved_bytes) │
+│  Control Block [reserved_bytes - ctrl_block_bytes .. reserved_bytes) │
 │                                                                      │
-│  mailbox_offset_0 = reserved_bytes - 1 × sizeof(BatchMetadata)      │
-│  mailbox_offset_1 = reserved_bytes - 2 × sizeof(BatchMetadata)      │
-│  mailbox_offset_N = reserved_bytes - (N+1) × sizeof(BatchMetadata)  │
+│  mailbox_offset_0 = reserved_bytes - 1 × sizeof(BatchMetadata)       │
+│  mailbox_offset_1 = reserved_bytes - 2 × sizeof(BatchMetadata)       │
+│  mailbox_offset_N = reserved_bytes - (N+1) × sizeof(BatchMetadata)   │
 │                                                                      │
 ├──────────────────────────────────────────────────────────────────────┤  <-- reserved_bytes
 │  AF_XDP Payload Frames  [reserved_bytes .. total_size)               │
@@ -79,23 +79,47 @@ Because the Control Block sits at the **end** of the reserved region (above ever
 
 ### 3. Absolute Address Translation
 
-Because the UMEM partition containing the packets is mapped with a specific offset inside the Wasm memory, the Wasm plugin cannot assume a packet starts at address `0`. It must translate the relative packet offsets provided by AF_XDP into absolute Wasm memory pointers.
+Because the UMEM partition containing the packets is mapped with a specific offset inside the Wasm memory, the Wasm plugin cannot assume the Umem starts at address `0`. It must translate the relative packet offsets provided by AF_XDP into absolute Wasm memory pointers.
 
-This is exactly what the address calculation does:
+1. **`partition_offset`:** The host tells the Wasm plugin exactly where the UMEM block begins inside the linear memory.
+2. **`wrapping_sub`:** This is a clever two's-complement arithmetic trick. Subtracting the `partition_offset` from `0` creates a negative base address (in 32-bit unsigned math) that resolves to the exact absolute memory address inside the Wasm sandbox.
 
-```rust
-// The absolute base pointer to the start of the UMEM block
-let umem_addr = (0u32).wrapping_sub(partition_offset) as usize;
+The following diagram shows the relationship for one `Umem` frame. `desc.addr` is a UMEM-relative byte offset to the packet data (and may include headroom); the frame's aligned start is obtained by clearing the low `frame_size` bits. In the guest, adding `desc.addr` to `umem_addr` is equivalent to subtracting `partition_offset` from the UMEM offset:
 
-// The packet base address
-let base_addr = pdu.base_addr(umem_addr);
-
+```text
+          Host UMEM byte offsets (relative to the native UMEM base)
+    0 ────────────────────────────────────────────────────────────► total_umem_size
+    │                                                                    │
+    │   partition_start_bytes_<n> == partition_offset                    │
+    │   (WASM address 0 for instance <n>)                                │
+    │         │                                                          │
+    │         ▼                                                          │
+    │         │           frame-aligned start                            │
+    │         │           = desc.addr & ~(frame_size - 1)                │
+    │         │           │                                              │
+    │         │           ▼                                              │
+    │         │           ┌──────────────────────────────┐               │
+    │         │           │ Umem frame                   │               │
+    │         │           │   headroom │ packet data     │               │
+    │         │           │            ▲                 │               │
+    │         │           │            desc.addr         │               │
+    │         │           └──────────────────────────────┘               │
+    │                                                                    │
+    └────────────────────────────────────────────────────────────────────┘
+    
+    WASM linear memory for instance N (32-bit addresses)
+    0                                                                    │
+    │                                                                    │
+    ├── umem_addr = 0u32.wrapping_sub(partition_offset)                  │
+    │                                                                    │
+    ├── frame base = umem_addr + frame-aligned start                     │
+    │              = frame-aligned start - partition_offset              │
+    │                                                                    │
+    └── packet data = umem_addr + desc.addr                              │
+                     = desc.addr - partition_offset                      │
 ```
 
-**How the math works:**
-
-1. **`partition_offset`:** The host tells the Wasm plugin exactly where the 128 MB UMEM block begins inside the linear memory.
-2. **`wrapping_sub`:** This is a clever two's-complement arithmetic trick. Subtracting the `partition_offset` from `0` creates a negative base address (in 32-bit unsigned math) that resolves to the exact absolute memory address inside the Wasm sandbox.
+For example, with `partition_offset = partition_start_bytes_N = 0x2000` and `desc.addr = 0x5000`, `umem_addr = 0xffffe000` and the packet data is at WASM address `0x3000` (`0xffffe000 + 0x5000`, modulo 32 bits).
 
 ### 4. Zero-Copy Packet Payloads
 

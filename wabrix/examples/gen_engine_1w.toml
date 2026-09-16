@@ -11,7 +11,7 @@ umem= [
 
 # Optional XSK fields:
 # poll_mode = "napi_busy_poll" enables kernel/NAPI busy polling;
-# busy_poll_ns = 20_000 sets its per-socket timeout. Missing poll_mode defaults to
+# busy_poll_ns = 2_000 sets its per-socket timeout. Missing poll_mode defaults to
 # "userspace_ring_spin".
 xsk= [
     { iface = "enp2s0f0np0", queues = [0], umem = 0, rxq_size = 32768, txq_size = 32768, zerocopy = true, xdp_mode = "auto",  poll_mode = "napi_busy_poll", busy_poll_ns = 2_050, busy_poll_budget= 1024 },

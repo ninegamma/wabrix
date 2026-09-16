@@ -1,3 +1,5 @@
+# Lifecycle of Workers and Pipelines
+
 The lifecycle of a worker thread and the lifecycle of the pipelines it executes must be decoupled but highly cooperative. Workers are persistent execution engines pinned to physical cores, while pipelines are dynamic workloads that transition through states (Running, Paused, Stopping) via the lock-free control plane.
 
 Because the architecture leverages xsk for direct AF_XDP socket management, the worker must precisely orchestrate the hardware rings and the thread-local FrameRegistry during any pipeline state transition to prevent memory leaks or ring starvation.
