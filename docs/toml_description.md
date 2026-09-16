@@ -107,6 +107,7 @@ Default: `[{ iface = "lo", queues = [0], umem = 0, rxq_size = 8192, txq_size = 8
 | `zerocopy` | boolean | **yes** | Enable AF_XDP zero-copy mode. Requires driver support; use `false` for veth. |
 | `xdp_mode` | string | no | XDP attachment mode: `"native"`, `"skb"`, or `"auto"`. Default `"auto"`. |
 | `poll_mode` | string | no | RX polling mode: `"userspace_ring_spin"` or `"napi_busy_poll"`. Default `"userspace_ring_spin"`. |
+| `napi_poll_timeout_ns` | integer | no | Userspace `poll()` timeout for NAPI RX/TX polling, in nanoseconds. Default `20_000`. |
 | `busy_poll_ns` | integer | no | Per-socket NAPI busy-poll timeout in nanoseconds. Default `20_000`. |
 | `busy_poll_budget` | integer | no | Maximum packets processed per NAPI busy-poll cycle. Default `64`. |
 
@@ -117,7 +118,7 @@ xsk = [
       zerocopy = true, xdp_mode = "auto" },
     { iface = "enp2s0f1np1", queues = [0], umem = 1, rxq_size = 2048, txq_size = 2048,
       zerocopy = true, xdp_mode = "auto", poll_mode = "napi_busy_poll",
-      busy_poll_ns = 2050, busy_poll_budget = 1024 },
+      napi_poll_timeout_ns = 2050, busy_poll_ns = 3000, busy_poll_budget = 1024 },
 ]
 ```
 

@@ -30,6 +30,9 @@ pub struct XdpSocketConfig {
     pub umem_config: Arc<RuntimeUmemConfig>,
     pub xdp_mode: String,  // "native", "skb", or "auto"
     pub poll_mode: String, // "userspace_ring_spin" or "napi_busy_poll"
+    /// Per-socket timeout for the userspace poll syscall, in nanoseconds.
+    pub napi_poll_timeout_ns: u64,
+    /// Per-socket kernel/NAPI busy-poll duration, in nanoseconds.
     pub busy_poll_ns: u64,
     pub busy_poll_budget: i32,
     /// GRO flush timeout in nanoseconds, used to derive the RX poll interval.
@@ -337,27 +340,6 @@ impl XSocket {
             return Err(std::io::Error::last_os_error());
         }
 
-        // SAFETY: `self.fd` is the live AF_XDP socket descriptor owned by this
-        // XSocket, and `budget` remains valid for the duration of this call.
-        let result = unsafe {
-            libc::setsockopt(
-                self.fd,
-                libc::SOL_SOCKET,
-                libc::SO_BUSY_POLL_BUDGET,
-                &budget as *const libc::c_int as *const libc::c_void,
-                std::mem::size_of_val(&budget) as libc::socklen_t,
-            )
-        };
-
-        if result < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-
-        info!(
-            "Configured NAPI busy polling for {} queue {}: busy_poll_ns={}, socket_busy_poll_us={}, busy_poll_budget={}",
-            self.config.interface, self.config.queue_id, timeout_ns, timeout_us, budget,
-        );
-
         // Prefer busy polling over interrupt-driven wakeups where supported.
         // This is a preference rather than the mechanism that enables the
         // per-socket busy-poll timeout, so retain compatibility with kernels
@@ -384,6 +366,28 @@ impl XSocket {
                 error
             );
         }
+
+        // SAFETY: `self.fd` is the live AF_XDP socket descriptor owned by this
+        // XSocket, and `budget` remains valid for the duration of this call.
+        let result = unsafe {
+            libc::setsockopt(
+                self.fd,
+                libc::SOL_SOCKET,
+                libc::SO_BUSY_POLL_BUDGET,
+                &budget as *const libc::c_int as *const libc::c_void,
+                std::mem::size_of_val(&budget) as libc::socklen_t,
+            )
+        };
+
+        if result < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        info!(
+            "Configured NAPI busy polling for {} queue {}: busy_poll_ns={}, socket_busy_poll_us={}, busy_poll_budget={}",
+            self.config.interface, self.config.queue_id, timeout_ns, timeout_us, budget,
+        );
+
 
         Ok(())
     }
@@ -447,8 +451,8 @@ impl XSocket {
         let napi_poll_target_cycles =
             (((target_us as u128) * (tsc_frequency as u128)) / 1_000_000).max(1) as u64;
         let napi_poll_timeout = rustix::time::Timespec {
-            tv_sec: (self.config.busy_poll_ns / 1_000_000_000) as _,
-            tv_nsec: (self.config.busy_poll_ns % 1_000_000_000) as _,
+            tv_sec: (self.config.napi_poll_timeout_ns / 1_000_000_000) as _,
+            tv_nsec: (self.config.napi_poll_timeout_ns % 1_000_000_000) as _,
         };
         let napi_busy_poll = self.config.poll_mode == "napi_busy_poll";
         if self.config.poll_mode == "napi_busy_poll" {
@@ -594,7 +598,7 @@ impl XSocketRx {
 
         Ok(())
     }
-
+    #[inline]
     fn poll_for_napi_packets(&self, timeout: Option<&rustix::time::Timespec>) -> Result<(), Errno> {
         // SAFETY: self.fd is a valid file descriptor for the lifetime of this call.
         let borrowed_fd = unsafe { BorrowedFd::borrow_raw(self.fd) };
@@ -1540,8 +1544,8 @@ impl XSocketTx {
         let borrowed_fd = unsafe { BorrowedFd::borrow_raw(self.fd) };
         let mut poll_fds = [PollFd::new(&borrowed_fd, PollFlags::OUT)];
         let timeout = rustix::time::Timespec {
-            tv_sec: (self.config.busy_poll_ns / 1_000_000_000) as _,
-            tv_nsec: (self.config.busy_poll_ns % 1_000_000_000) as _,
+            tv_sec: (self.config.napi_poll_timeout_ns / 1_000_000_000) as _,
+            tv_nsec: (self.config.napi_poll_timeout_ns % 1_000_000_000) as _,
         };
 
         poll(&mut poll_fds, Some(&timeout))?;

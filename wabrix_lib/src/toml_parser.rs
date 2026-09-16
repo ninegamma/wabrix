@@ -109,6 +109,7 @@ fn default_xsk_mappings() -> Vec<XskMapping> {
         zerocopy: true,
         xdp_mode: default_xdp_mode(),
         poll_mode: default_poll_mode(),
+        napi_poll_timeout_ns: default_napi_poll_timeout_ns(),
         busy_poll_ns: default_busy_poll_ns(),
         busy_poll_budget: default_busy_poll_budget(),
     }]
@@ -190,6 +191,9 @@ pub struct XskMapping {
     /// RX polling mode: "userspace_ring_spin" (default) or "napi_busy_poll".
     #[serde(default = "default_poll_mode")]
     pub poll_mode: String,
+    /// Per-socket userspace poll timeout, in nanoseconds.
+    #[serde(default = "default_napi_poll_timeout_ns")]
+    pub napi_poll_timeout_ns: u64,
     /// Per-socket NAPI busy-poll timeout, in nanoseconds.
     #[serde(default = "default_busy_poll_ns")]
     pub busy_poll_ns: u64,
@@ -207,6 +211,10 @@ fn default_poll_mode() -> String {
 }
 
 fn default_busy_poll_ns() -> u64 {
+    20_000
+}
+
+fn default_napi_poll_timeout_ns() -> u64 {
     20_000
 }
 
@@ -612,6 +620,7 @@ impl WabricksConfig {
                 zerocopy: true,
                 xdp_mode: default_xdp_mode(),
                 poll_mode: default_poll_mode(),
+                napi_poll_timeout_ns: default_napi_poll_timeout_ns(),
                 busy_poll_ns: default_busy_poll_ns(),
                 busy_poll_budget: default_busy_poll_budget(),
             };
@@ -1678,6 +1687,7 @@ impl WabricksConfig {
                     umem_config: umem_config.clone(),
                     xdp_mode: xsk_map.xdp_mode.clone(),
                     poll_mode: xsk_map.poll_mode.clone(),
+                    napi_poll_timeout_ns: xsk_map.napi_poll_timeout_ns,
                     busy_poll_ns: xsk_map.busy_poll_ns,
                     busy_poll_budget: xsk_map.busy_poll_budget,
                     napi_flush_timeout_ns: self
@@ -2921,7 +2931,7 @@ mod tests {
             ]
             xsk = [
                 { iface = "enp2s0f0np0", queues = [0], umem = 0, rxq_size = 1024, txq_size = 1024, zerocopy = true },
-                { iface = "enp2s0f1np1", queues = [0], umem = 1, rxq_size = 1024, txq_size = 1024, zerocopy = true, poll_mode = "napi_busy_poll", busy_poll_ns = 2050, busy_poll_budget = 1024 }
+                { iface = "enp2s0f1np1", queues = [0], umem = 1, rxq_size = 1024, txq_size = 1024, zerocopy = true, poll_mode = "napi_busy_poll", napi_poll_timeout_ns = 2050, busy_poll_ns = 3000, busy_poll_budget = 1024 }
             ]
             workers = [
                 { id = 0, core = 2, partitions = [{ umem = 0, count = 1 }] },
@@ -2950,6 +2960,9 @@ mod tests {
         let config: WabricksConfig = toml::from_str(toml_str).unwrap();
         let checks = config.interface_check_configs();
         assert_eq!(checks.len(), 2);
+        assert_eq!(config.wabrix.xsk[0].napi_poll_timeout_ns, 20_000);
+        assert_eq!(config.wabrix.xsk[1].napi_poll_timeout_ns, 2050);
+        assert_eq!(config.wabrix.xsk[1].busy_poll_ns, 3000);
 
         let iface0 = checks.iter().find(|c| c.name == "enp2s0f0np0").unwrap();
         assert_eq!(iface0.poll_mode, "userspace_ring_spin");
