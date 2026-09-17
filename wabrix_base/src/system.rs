@@ -765,6 +765,12 @@ pub struct XdpIfaceCapabilities {
     pub rx_ring_max: Option<u32>,
     /// Maximum TX ring size from ethtool -g Pre-set maximums
     pub tx_ring_max: Option<u32>,
+    /// XDP RX metadata features reported by xdp-info.
+    pub xdp_rx_metadata_features: Option<Vec<String>>,
+    /// Maximum number of segments supported by XDP zero-copy RX.
+    pub xdp_zc_max_segs: Option<u32>,
+    /// Named XSK features decoded from NETDEV_A_DEV_XSK_FEATURES.
+    pub xsk_feature_names: Option<Vec<String>>,
     /// NETDEV_A_DEV_XSK_FEATURES bitmask.
     pub xsk_features: Option<u64>,
 }
@@ -780,7 +786,12 @@ const CTRL_ATTR_FAMILY_ID: u16 = 1;
 const CTRL_ATTR_FAMILY_NAME: u16 = 2;
 const NETDEV_CMD_DEV_GET: u8 = 1;
 const NETDEV_A_DEV_IFINDEX: u16 = 1;
+const NETDEV_A_DEV_XDP_ZC_MAX_SEGS: u16 = 4;
+const NETDEV_A_DEV_XDP_RX_METADATA_FEATURES: u16 = 5;
 const NETDEV_A_DEV_XSK_FEATURES: u16 = 6;
+const NETDEV_XDP_RX_METADATA_TIMESTAMP: u64 = 1 << 0;
+const NETDEV_XDP_RX_METADATA_HASH: u64 = 1 << 1;
+const NETDEV_XDP_RX_METADATA_VLAN_TAG: u64 = 1 << 2;
 const NETDEV_XSK_FLAGS_TX_TIMESTAMP: u64 = 1 << 0;
 const NETDEV_XSK_FLAGS_TX_CHECKSUM: u64 = 1 << 1;
 const NETDEV_XSK_FLAGS_TX_LAUNCH_TIME_FIFO: u64 = 1 << 2;
@@ -895,7 +906,7 @@ fn resolve_netdev_family(socket: &netlink_sys::Socket, sequence: u32) -> io::Res
     })
 }
 
-fn query_xsk_features(ifindex: u32) -> Option<u64> {
+fn query_netdev_capabilities(ifindex: u32) -> Option<(Option<u64>, Option<u32>, Option<u64>)> {
     let mut socket = netlink_sys::Socket::new(netlink_sys::protocols::NETLINK_GENERIC).ok()?;
     socket.bind_auto().ok()?;
     let family = resolve_netdev_family(&socket, ifindex).ok()??;
@@ -919,12 +930,51 @@ fn query_xsk_features(ifindex: u32) -> Option<u64> {
         if response_ifindex != ifindex {
             return None;
         }
-        attrs.iter().find_map(|(kind, value)| {
+        let xdp_rx_metadata_features = attrs.iter().find_map(|(kind, value)| {
+            (*kind == NETDEV_A_DEV_XDP_RX_METADATA_FEATURES && value.len() >= 8)
+                .then(|| u64::from_ne_bytes(value[..8].try_into().unwrap()))
+        });
+        let xdp_zc_max_segs = attrs.iter().find_map(|(kind, value)| {
+            (*kind == NETDEV_A_DEV_XDP_ZC_MAX_SEGS && value.len() >= 4)
+                .then(|| u32::from_ne_bytes(value[..4].try_into().unwrap()))
+        });
+        let xsk_features = attrs.iter().find_map(|(kind, value)| {
             (*kind == NETDEV_A_DEV_XSK_FEATURES && value.len() >= 8)
                 .then(|| u64::from_ne_bytes(value[..8].try_into().unwrap()))
-        })
+        });
+        Some((xdp_rx_metadata_features, xdp_zc_max_segs, xsk_features))
     })
     .ok()?
+}
+
+fn xdp_rx_metadata_feature_names(features: Option<u64>) -> Option<Vec<String>> {
+    let features = features?;
+    let mut names = Vec::new();
+    if features & NETDEV_XDP_RX_METADATA_TIMESTAMP != 0 {
+        names.push("timestamp".to_string());
+    }
+    if features & NETDEV_XDP_RX_METADATA_HASH != 0 {
+        names.push("hash".to_string());
+    }
+    if features & NETDEV_XDP_RX_METADATA_VLAN_TAG != 0 {
+        names.push("vlan-tag".to_string());
+    }
+    Some(names)
+}
+
+fn xsk_feature_names(features: Option<u64>) -> Option<Vec<String>> {
+    let features = features?;
+    let mut names = Vec::new();
+    if features & NETDEV_XSK_FLAGS_TX_TIMESTAMP != 0 {
+        names.push("tx-timestamp".to_string());
+    }
+    if features & NETDEV_XSK_FLAGS_TX_CHECKSUM != 0 {
+        names.push("tx-checksum".to_string());
+    }
+    if features & NETDEV_XSK_FLAGS_TX_LAUNCH_TIME_FIFO != 0 {
+        names.push("tx-launch-time-fifo".to_string());
+    }
+    Some(names)
 }
 
 /// Query all physical network interfaces and return their XDP capabilities.
@@ -959,11 +1009,13 @@ pub fn query_xdp_ifaces() -> Vec<XdpIfaceCapabilities> {
         let mut xdp_zerocopy = false;
         let mut rx_ring_max: Option<u32> = None;
         let mut tx_ring_max: Option<u32> = None;
-        let xsk_features = std::ffi::CString::new(iface.as_str())
+        let ifindex = std::ffi::CString::new(iface.as_str())
             .ok()
             .map(|name| unsafe { libc::if_nametoindex(name.as_ptr()) })
-            .filter(|&ifindex| ifindex != 0)
-            .and_then(query_xsk_features);
+            .filter(|&ifindex| ifindex != 0);
+        let (xdp_rx_metadata_mask, xdp_zc_max_segs, xsk_features) = ifindex
+            .and_then(query_netdev_capabilities)
+            .unwrap_or((None, None, None));
 
         // --- ethtool -i <iface> ---
         if let Ok(out) = Command::new("ethtool").args(["-i", iface]).output() {
@@ -1032,6 +1084,9 @@ pub fn query_xdp_ifaces() -> Vec<XdpIfaceCapabilities> {
             xdp_zerocopy,
             rx_ring_max,
             tx_ring_max,
+            xdp_rx_metadata_features: xdp_rx_metadata_feature_names(xdp_rx_metadata_mask),
+            xdp_zc_max_segs,
+            xsk_feature_names: xsk_feature_names(xsk_features),
             xsk_features,
         });
     }
@@ -1050,78 +1105,130 @@ pub fn probe_xdp_interfaces() {
         return;
     }
 
-    // Column widths
-    let w = [20usize, 12, 24, 12, 12, 12, 12, 18, 14, 14, 12];
-    let header = format!(
-        "{:<w0$} {:<w1$} {:<w2$} {:<w3$} {:<w4$} {:>w5$} {:>w6$} {:>w7$} {:>w8$} {:>w9$} {:>w10$}",
+    let physical_headers = [
         "Interface",
         "Driver",
         "Version",
         "XDP Native",
         "ZeroCopy",
-        "Ring Max RX",
-        "Ring Max TX",
-        "XSK.Features",
-        "XSK Timestamp",
-        "XSK Checksum",
-        "XSK Launch",
-        w0 = w[0],
-        w1 = w[1],
-        w2 = w[2],
-        w3 = w[3],
-        w4 = w[4],
-        w5 = w[5],
-        w6 = w[6],
-        w7 = w[7],
-        w8 = w[8],
-        w9 = w[9],
-        w10 = w[10],
-    );
-    let sep = "─".repeat(header.len());
+        "RX Metadata Features",
+        "ZC Max Segs",
+        "Ring RX",
+        "Ring TX",
+    ];
+    let physical_rows: Vec<[String; 9]> = rows
+        .iter()
+        .map(|r| {
+            [
+                r.name.clone(),
+                r.driver.clone(),
+                r.version.clone(),
+                if r.xdp_native { "yes" } else { "no" }.to_string(),
+                if r.xdp_zerocopy { "yes" } else { "no" }.to_string(),
+                r.xdp_rx_metadata_features
+                    .as_ref()
+                    .map(|features| features.join(","))
+                    .unwrap_or_else(|| "?".to_string()),
+                r.xdp_zc_max_segs
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
+                r.rx_ring_max
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
+                r.tx_ring_max
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
+            ]
+        })
+        .collect();
+    let physical_widths: Vec<usize> = (0..physical_headers.len())
+        .map(|column| {
+            std::iter::once(physical_headers[column].len())
+                .chain(physical_rows.iter().map(|row| row[column].len()))
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    let physical_header = physical_headers
+        .iter()
+        .enumerate()
+        .map(|(column, value)| format!("{value:<width$}", width = physical_widths[column]))
+        .collect::<Vec<_>>()
+        .join("  ");
+    let physical_separator = physical_widths
+        .iter()
+        .map(|width| "─".repeat(*width))
+        .collect::<Vec<_>>()
+        .join("  ");
 
     info!("=== Physical Interface XDP Capabilities ===");
-    info!("{}", header);
-    info!("{}", sep);
-    for r in &rows {
+    info!("{}", physical_header);
+    info!("{}", physical_separator);
+    for row in &physical_rows {
         info!(
-            "{:<w0$} {:<w1$} {:<w2$} {:<w3$} {:<w4$} {:>w5$} {:>w6$} {:>w7$} {:>w8$} {:>w9$} {:>w10$}",
-            r.name,
-            r.driver,
-            r.version,
-            if r.xdp_native { "yes" } else { "no" },
-            if r.xdp_zerocopy { "yes" } else { "no" },
-            r.rx_ring_max
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "?".to_string()),
-            r.tx_ring_max
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "?".to_string()),
-            r.xsk_features
-                .map(|v| format!("0x{v:016x}"))
-                .unwrap_or_else(|| "?".to_string()),
-            r.xsk_features
-                .map(|v| if v & NETDEV_XSK_FLAGS_TX_TIMESTAMP != 0 { "yes" } else { "no" })
-                .unwrap_or("?"),
-            r.xsk_features
-                .map(|v| if v & NETDEV_XSK_FLAGS_TX_CHECKSUM != 0 { "yes" } else { "no" })
-                .unwrap_or("?"),
-            r.xsk_features
-                .map(|v| if v & NETDEV_XSK_FLAGS_TX_LAUNCH_TIME_FIFO != 0 { "yes" } else { "no" })
-                .unwrap_or("?"),
-            w0 = w[0],
-            w1 = w[1],
-            w2 = w[2],
-            w3 = w[3],
-            w4 = w[4],
-            w5 = w[5],
-            w6 = w[6],
-            w7 = w[7],
-            w8 = w[8],
-            w9 = w[9],
-            w10 = w[10],
+            "{}",
+            row.iter()
+                .enumerate()
+                .map(|(column, value)| format!("{value:<width$}", width = physical_widths[column]))
+                .collect::<Vec<_>>()
+                .join("  "),
         );
     }
-    info!("{}", sep);
+    info!("");
+    info!("=== XSK Features ===");
+    let xsk_headers = ["Interface", "Features"];
+    let xsk_rows: Vec<[String; 2]> = rows
+        .iter()
+        .map(|r| {
+            let feature_names = r
+                .xsk_feature_names
+                .as_ref()
+                .map(|features| {
+                    if features.is_empty() {
+                        "{}".to_string()
+                    } else {
+                        format!("{{{}}}", features.join(","))
+                    }
+                })
+                .unwrap_or_else(|| "?".to_string());
+            [
+                r.name.clone(),
+                feature_names,
+            ]
+        })
+        .collect();
+    let xsk_widths: Vec<usize> = (0..xsk_headers.len())
+        .map(|column| {
+            std::iter::once(xsk_headers[column].len())
+                .chain(xsk_rows.iter().map(|row| row[column].len()))
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    let xsk_header = xsk_headers
+        .iter()
+        .enumerate()
+        .map(|(column, value)| format!("{value:<width$}", width = xsk_widths[column]))
+        .collect::<Vec<_>>()
+        .join("  ");
+    let xsk_separator = xsk_widths
+        .iter()
+        .map(|width| "─".repeat(*width))
+        .collect::<Vec<_>>()
+        .join("  ");
+    info!("{}", xsk_header);
+    info!("{}", xsk_separator);
+    for row in &xsk_rows {
+        info!(
+            "{}",
+            row.iter()
+                .enumerate()
+                .map(|(column, value)| format!("{value:<width$}", width = xsk_widths[column]))
+                .collect::<Vec<_>>()
+                .join("  "),
+        );
+    }
+    info!("{}", xsk_separator);
 }
 
 /// Perform system checks for irqbalance, CPU governor, and IRQ affinity

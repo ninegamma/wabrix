@@ -21,22 +21,57 @@ struct {
     __uint(max_entries, 64);
 } SOCKETS SEC(".maps");
 
+struct rx_metadata {
+	__u64 timestamp;
+};
+
+/* This kfunc is available when the attached driver advertises the
+ * NETDEV_XDP_RX_METADATA_TIMESTAMP capability. */
+extern int bpf_xdp_metadata_rx_timestamp(const struct xdp_md *ctx,
+						 __u64 *timestamp) __ksym;
+
 #define ETH_P_IP	0x0800		/* Internet Protocol packet	*/
+
+static __always_inline int redirect_packet(struct xdp_md *ctx) {
+    __u32 q_idx = ctx->rx_queue_index;
+
+    return bpf_redirect_map(&SOCKETS, q_idx, XDP_PASS);
+}
 
 SEC("xdp")
 int xdp_dispatch(struct xdp_md *ctx) {
-    __u32 q_idx = ctx->rx_queue_index;
-    __u32 if_idx = ctx->ingress_ifindex;
+	__u32 q_idx = ctx->rx_queue_index;
+	struct rx_metadata *metadata;
+	void *data;
 
-    //bpf_printk("Packet on i/f %u, queue %u\n", if_idx, q_idx);
+	/* Reserve the timestamp in the UMEM headroom immediately before the
+	 * packet data. The AF_XDP descriptor still points at packet data. */
+	if (bpf_xdp_adjust_meta(ctx, -(int)sizeof(*metadata)) < 0)
+		return XDP_ABORTED;
+
+	data = (void *)(long)ctx->data;
+	metadata = (void *)(long)ctx->data_meta;
+	if ((void *)(metadata + 1) > data)
+		return XDP_ABORTED;
+
+	metadata->timestamp = 0;
+	(void)bpf_xdp_metadata_rx_timestamp(ctx, &metadata->timestamp);
+
+    // bpf_printk("Packet on i/f %u, queue %u\n", if_idx, q_idx);
     
-    __u32 *fd= bpf_map_lookup_elem(&SOCKETS, &q_idx);
+    //__u32 *fd= bpf_map_lookup_elem(&SOCKETS, &q_idx);
 
-    // Step 3: Redirect to the specific socket at that index
+    // Redirect to the specific socket at that index
     // Note: If the socket isn't bound (no entry at final_index),
     // this acts like XDP_PASS (unless XDP_ABORTED flag is used)
     //bpf_printk("redirecting to AF_XDP, fd= %u\n", fd);
-    return bpf_redirect_map(&SOCKETS, q_idx, XDP_PASS);
+    return redirect_packet(ctx);
+}
+
+/* Used when the kernel or driver cannot load the metadata kfunc. */
+SEC("xdp")
+int xdp_dispatch_fallback(struct xdp_md *ctx) {
+    return redirect_packet(ctx);
 }
 /*
 SEC("xdp")

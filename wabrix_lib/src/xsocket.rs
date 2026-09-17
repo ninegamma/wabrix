@@ -37,6 +37,8 @@ pub struct XdpSocketConfig {
     pub busy_poll_budget: i32,
     /// GRO flush timeout in nanoseconds, used to derive the RX poll interval.
     pub napi_flush_timeout_ns: u64,
+    /// Whether this interface requests hardware RX timestamps through XDP metadata.
+    pub rx_timestamp: bool,
 }
 
 pub struct XSocket {
@@ -55,12 +57,16 @@ pub struct XSocket {
 }
 
 const MAX_FILL: usize = 2048;
+/// Bytes reserved immediately before each RX packet for XDP RX metadata.
+const RX_METADATA_HEADROOM: usize = core::mem::size_of::<u64>();
 const RX_DIAGNOSTIC_LOG_INTERVAL: u64 = 10_000;
 #[cfg(feature = "profiling")]
 const NAPI_DIAGNOSTIC_LOG_INTERVAL: u64 = 100_000;
 /// Split components for independent RX and TX access
 /// These DO NOT own the frame registry - it's accessed via thread-local storage
 pub struct XSocketRx {
+    umem: Arc<Umem>,
+    rx_metadata_enabled: bool,
     fill_queue: Arc<Mutex<FillQueue>>,
     rx_queue: Arc<Mutex<RxQueue>>,
     // THE ANCHOR: Keeps the TX side alive even if the TX node is never built
@@ -94,6 +100,8 @@ pub struct XSocketRx {
     napi_poll_packets: u64,
     #[cfg(feature = "profiling")]
     napi_poll_available_descriptors: u64,
+    #[cfg(feature = "profiling")]
+    napi_poll_available_samples: u64,
     #[cfg(feature = "profiling")]
     napi_poll_empty: u64,
     #[cfg(feature = "profiling")]
@@ -290,7 +298,6 @@ impl XSocket {
         self.umem.as_ptr() as *mut u8
     }
 
-
     /// Returns the raw file descriptor of the AF_XDP socket.
     /// This is required to register the socket in the BPF XSKS-MAP.
     #[inline]
@@ -397,7 +404,6 @@ impl XSocket {
             self.config.interface, self.config.queue_id, timeout_ns, timeout_us, budget,
         );
 
-
         Ok(())
     }
 
@@ -475,6 +481,8 @@ impl XSocket {
         }
 
         let rx = XSocketRx {
+            umem: self.umem.clone(),
+            rx_metadata_enabled: self.config.rx_timestamp,
             fill_queue: self.fill_queue.clone(),
             rx_queue: self.rx_queue.clone(),
             _tx_queue_keepalive: self.tx_queue.clone(),
@@ -502,6 +510,8 @@ impl XSocket {
             napi_poll_packets: 0,
             #[cfg(feature = "profiling")]
             napi_poll_available_descriptors: 0,
+            #[cfg(feature = "profiling")]
+            napi_poll_available_samples: 0,
             #[cfg(feature = "profiling")]
             napi_poll_empty: 0,
             #[cfg(feature = "profiling")]
@@ -1046,6 +1056,9 @@ impl BatchRx for XSocketRx {
                 {
                     let available_after_poll = rx_guard.nb_avail_exact() as usize;
                     self.napi_poll_available_descriptors += available_after_poll as u64;
+                    if available_after_poll > 0 {
+                        self.napi_poll_available_samples += 1;
+                    }
                     self.max_napi_poll_available =
                         self.max_napi_poll_available.max(available_after_poll);
                 }
@@ -1146,6 +1159,7 @@ impl BatchRx for XSocketRx {
                 self.napi_poll_attempts = 0;
                 self.napi_poll_packets = 0;
                 self.napi_poll_available_descriptors = 0;
+                self.napi_poll_available_samples = 0;
                 self.napi_poll_empty = 0;
                 self.max_napi_poll_consume = 0;
                 self.max_napi_poll_available = 0;
@@ -1199,8 +1213,12 @@ impl BatchRx for XSocketRx {
             {
                 let average_napi_poll_consume =
                     self.napi_poll_packets as f64 / self.napi_poll_attempts as f64;
-                let average_napi_poll_available = self.napi_poll_available_descriptors as f64
-                    / self.napi_poll_attempts as f64;
+                let average_napi_poll_available = if self.napi_poll_available_samples > 0 {
+                    self.napi_poll_available_descriptors as f64
+                        / self.napi_poll_available_samples as f64
+                } else {
+                    0.0
+                };
                 debug!(
                     "{}: NAPI poll diagnostics: attempts={}, available_descriptors={}, average_available_after_poll={:.2}, max_available_after_poll={}, packets={}, average_consume_after_poll={:.2}, empty={}, max_consume_after_poll={}, receive_calls={}, total_rx={}, rcvd= {}",
                     self.source_id(),
@@ -1292,10 +1310,27 @@ impl BatchRx for XSocketRx {
             let global_idx = encode_global_frame(group_id, local_idx);
 
             let mut pdu = Pdu::new(*desc, global_idx, worker_id, bus_ptr, frame_size_log2);
-            // Capture the host TSC when the RX descriptor is converted into a
-            // pipeline packet. The Wasm-facing timestamp is carried with the
-            // PDU for downstream telemetry and processing.
-            pdu.w.set_timestamp(unsafe { core::arch::x86_64::_rdtsc() });
+
+            // XDP writes the hardware RX timestamp into the UMEM headroom
+            // immediately before packet data. A zero value means the driver
+            // did not provide a timestamp for this packet.
+            let hardware_timestamp = if self.rx_metadata_enabled
+                && desc.addr() >= RX_METADATA_HEADROOM as u64
+            {
+                let timestamp_ptr = unsafe {
+                    (self.umem.as_ptr() as *const u8)
+                        .add(desc.addr() as usize - RX_METADATA_HEADROOM)
+                        as *const u64
+                };
+                unsafe { timestamp_ptr.read_unaligned() }
+            } else {
+                0
+            };
+            pdu.w.set_rx_timestamp(hardware_timestamp);
+            // Keep the existing host-TSC timestamp for latency calculations;
+            // hardware RX time is exposed separately through rx_timestamp().
+            pdu.w
+                .set_timestamp(unsafe { core::arch::x86_64::_rdtsc() });
 
             // Since we ALREADY calculated max_to_pull to guarantee capacity,
             // we can confidently unwrap/ignore the error branch.

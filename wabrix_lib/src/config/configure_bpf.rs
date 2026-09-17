@@ -16,6 +16,7 @@ use crate::xscrubber_skel::{XscrubberSkel, XscrubberSkelBuilder};
 #[allow(clippy::type_complexity)]
 pub fn setup_bpf(
     unique_ifaces: Vec<String>,
+    rx_timestamp_ifaces: &std::collections::HashSet<String>,
 ) -> Result<(HashMap<String, Arc<XscrubberSkel<'static>>>, Vec<Link>)> {
     // Instead of one global skeleton, we store one per interface.
     // Key: Interface Name -> Value: Arc<Skeleton>
@@ -43,10 +44,6 @@ pub fn setup_bpf(
         // Load a FRESH skeleton instance for this interface
         let builder = XscrubberSkelBuilder::default();
         let open_object = Box::leak(Box::new(MaybeUninit::uninit()));
-        let open_skel = builder.open(open_object)?;
-        let skel = open_skel.load()?;
-
-        // Attach to THIS specific interface
         let ifindex = {
             let c_name = std::ffi::CString::new(iface_name.as_str())?;
             let idx = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
@@ -59,8 +56,50 @@ pub fn setup_bpf(
             idx as u32
         };
 
-        let prog = &skel.progs.xdp_dispatch;
-        let link_xdp = prog.attach_xdp(ifindex as i32).map_err(|e| {
+        let metadata_requested = rx_timestamp_ifaces.contains(&iface_name);
+        let (skel, metadata_enabled) = if !metadata_requested {
+            log::info!(
+                "RX metadata disabled for {}; loading fallback XDP program",
+                iface_name
+            );
+            let mut fallback = builder.open(open_object)?;
+            fallback.progs.xdp_dispatch.set_autoload(false);
+            (fallback.load()?, false)
+        } else {
+            let mut open_skel = builder.open(open_object)?;
+            open_skel.progs.xdp_dispatch_fallback.set_autoload(false);
+            // RX metadata kfuncs require the program to be device-bound while
+            // the kernel verifies and loads it, before the XDP link is attached.
+            open_skel.progs.xdp_dispatch.set_ifindex(ifindex);
+            open_skel
+                .progs
+                .xdp_dispatch
+                .set_flags(libbpf_rs::libbpf_sys::BPF_F_XDP_DEV_BOUND_ONLY);
+            match open_skel.load() {
+                Ok(skel) => (skel, true),
+                Err(metadata_error) => {
+                    log::warn!(
+                        "RX metadata kfunc unavailable on {}; loading fallback XDP program: {}",
+                        iface_name, metadata_error
+                    );
+
+                    let fallback_builder = XscrubberSkelBuilder::default();
+                    let fallback_object = Box::leak(Box::new(MaybeUninit::uninit()));
+                    let mut fallback = fallback_builder.open(fallback_object)?;
+                    fallback.progs.xdp_dispatch.set_autoload(false);
+                    (fallback.load()?, false)
+                }
+            }
+        };
+
+        let link_xdp = if metadata_enabled {
+            skel.progs.xdp_dispatch.attach_xdp(ifindex as i32)
+        } else {
+            skel.progs
+                .xdp_dispatch_fallback
+                .attach_xdp(ifindex as i32)
+        }
+        .map_err(|e| {
             error!("Failed to attach XDP program to {}: {}", iface_name, e);
             e
         })?;

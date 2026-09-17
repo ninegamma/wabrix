@@ -518,8 +518,7 @@ mod tests {
         // The current data starts at 256
         let initial_desc_addr = initial_headroom;
 
-        let desc =
-            FrameDesc::new(initial_desc_addr).with_length(initial_payload_len);
+        let desc = FrameDesc::new(initial_desc_addr).with_length(initial_payload_len);
 
         //let desc = FrameDesc {
         //    addr: initial_desc_addr,

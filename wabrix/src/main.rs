@@ -318,8 +318,18 @@ async fn main() -> anyhow::Result<()> {
                 .context("Failed to configure NAPI system parameters")?;
 
                 // Setup BPF
+                let rx_timestamp_ifaces: HashSet<String> = current_config
+                    .wabrix
+                    .ifaces
+                    .iter()
+                    .filter(|iface| iface.rx_timestamp)
+                    .map(|iface| iface.name.clone())
+                    .collect();
                 let (interface_skels, _xdp_links) =
-                    wabrix_lib::config::configure_bpf::setup_bpf(interfaces.clone())
+                    wabrix_lib::config::configure_bpf::setup_bpf(
+                        interfaces.clone(),
+                        &rx_timestamp_ifaces,
+                    )
                         .context("Failed to setup BPF programs")?;
 
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;

@@ -1,7 +1,7 @@
 [wabrix]
 ifaces= [
     { name = "enp2s0f0np0", rxd = 8096, txd = 8096, irq_core = 2, napi = { flush_timeout_ns = 60000, defer_irqs = 256 } },
-    { name = "enp2s0f1np1", rxd = 8096, txd = 8096, irq_core = 3, napi = { flush_timeout_ns = 60000, defer_irqs = 256 } },
+    { name = "enp2s0f1np1", rxd = 8096, txd = 8096, irq_core = 3, rx_timestamp = false, napi = { flush_timeout_ns = 100000, defer_irqs = 512 } },
     #{ name = "enp2s0f1np1", rxd = 8096, txd = 8096, irq_core = 3 } ,
 ]
 umem= [
@@ -35,7 +35,7 @@ workers = [0]
 poll_frequency = 40000
 # Target lifecycle state for this pipeline
 # Valid values: "Running", "Paused",
-desired_state = "Running delay=1000"
+desired_state = "Running delay=1"
 
 [[pipelines.nodes]]
 id = "generator_engine"

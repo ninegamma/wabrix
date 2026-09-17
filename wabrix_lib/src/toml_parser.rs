@@ -82,6 +82,7 @@ fn default_ifaces() -> Vec<InterfaceConfig> {
         ipnet: None,
         master: None,
         checksum_offload: None,
+        rx_timestamp: false,
         napi: None,
     }]
 }
@@ -140,6 +141,9 @@ pub struct InterfaceConfig {
     /// Defaults to false. For veth interfaces the ethtool command targets the peer interface.
     #[serde(default)]
     pub checksum_offload: Option<bool>,
+    /// Enable hardware RX timestamps through XDP metadata for this interface.
+    #[serde(default)]
+    pub rx_timestamp: bool,
     /// Interface-wide Linux NAPI busy-poll settings.
     #[serde(default)]
     pub napi: Option<NapiConfig>,
@@ -1690,6 +1694,13 @@ impl WabricksConfig {
                     napi_poll_timeout_ns: xsk_map.napi_poll_timeout_ns,
                     busy_poll_ns: xsk_map.busy_poll_ns,
                     busy_poll_budget: xsk_map.busy_poll_budget,
+                    rx_timestamp: self
+                        .wabrix
+                        .ifaces
+                        .iter()
+                        .find(|iface| iface.name == xsk_map.iface)
+                        .map(|iface| iface.rx_timestamp)
+                        .unwrap_or(false),
                     napi_flush_timeout_ns: self
                         .wabrix
                         .ifaces
