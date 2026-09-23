@@ -18,7 +18,7 @@ license-file = "LICENSE"
 wabrix_api = { path = "../wabrix_api/wabrix_api", features=["host"] }
 wabrix_base = { path = "wabrix_base" }
 wabrix_wasm = { path = "wabrix_wasm" }
-libbpf-rs = "^0.26.2"
+libbpf-rs = "0.27.1"
 libbpf-sys = { version = "1.7", default-features = false }
 xsk-core = { version = "0.1.0" }
 # Add these for the Wasm side of the house:
@@ -48,6 +48,6 @@ libbpf-cargo = "0.27.0"
 
 
 [patch.crates-io]
-#xsk-core = { git = "https://github.com/ninegamma/xsk-core.git", branch = "master" }
+xsk-core = { git = "https://github.com/ninegamma/xsk-core.git", branch = "main" }
 libxdp-sys = { git = "https://github.com/ninegamma/libxdp-sys.git", branch = "ninegamma" }
-xsk-core = { path= "../xsk-core" }
+#xsk-core = { path= "../xsk-core" }

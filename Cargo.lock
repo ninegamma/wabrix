@@ -1628,7 +1628,7 @@ dependencies = [
  "anyhow",
  "cargo_metadata 0.19.2",
  "clap",
- "libbpf-rs 0.27.0",
+ "libbpf-rs",
  "memmap2",
  "serde",
  "serde_json",
@@ -1639,21 +1639,9 @@ dependencies = [
 
 [[package]]
 name = "libbpf-rs"
-version = "0.26.2"
+version = "0.27.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd8e8db46a2d5967b5b3dba7aba32a875dc38f222395040607045635ec1f9b63"
-dependencies = [
- "bitflags 2.13.1",
- "libbpf-sys",
- "libc",
- "vsprintf",
-]
-
-[[package]]
-name = "libbpf-rs"
-version = "0.27.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e69ad90c37d14f657291712f297a1460a1d1b647da45e0e372996b807c38f02"
+checksum = "e31aef1b2b743b2ebcc8eded144207c0f05c2d59e2d8c1d40dfa65f59437b60f"
 dependencies = [
  "bitflags 2.13.1",
  "libbpf-sys",
@@ -3204,7 +3192,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "ipnet",
  "libbpf-cargo",
- "libbpf-rs 0.26.2",
+ "libbpf-rs",
  "libbpf-sys",
  "libc",
  "log",
@@ -4027,6 +4015,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 [[package]]
 name = "xsk-core"
 version = "0.1.0"
+source = "git+https://github.com/ninegamma/xsk-core.git?branch=main#c221eb80c8d3ff9ed09f7ad650e567ef89929012"
 dependencies = [
  "bitflags 2.13.1",
  "cfg-if",
