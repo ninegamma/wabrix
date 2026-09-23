@@ -3222,6 +3222,7 @@ dependencies = [
  "anyhow",
  "crossbeam-channel",
  "dashmap",
+ "libc",
  "log",
  "tokio",
  "wabrix_api",
@@ -4015,7 +4016,6 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 [[package]]
 name = "xsk-core"
 version = "0.1.0"
-source = "git+https://github.com/ninegamma/xsk-core.git?branch=main#c221eb80c8d3ff9ed09f7ad650e567ef89929012"
 dependencies = [
  "bitflags 2.13.1",
  "cfg-if",

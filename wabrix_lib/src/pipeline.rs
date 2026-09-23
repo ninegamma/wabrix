@@ -113,8 +113,6 @@ impl PipelineFactory {
         platform_data: &PlatformData,
         #[cfg(feature = "wasm")] wasm_managers: &[Option<Arc<WasmManager>>],
         shared_state: Arc<crate::config::hot_config::SharedSystemState>,
-        #[cfg(feature = "wasm")] wasm_instance_totals: &[usize],
-        #[cfg(feature = "wasm")] wasm_instance_counters: &mut [u32],
     ) -> Result<(Vec<Box<dyn Node>>, Vec<usize>), String> {
         // --- PASS 1: ID Resolution ---
         // Map "string_id" -> NodeId
@@ -511,7 +509,7 @@ impl PipelineFactory {
                     // NEW: Resolve WASM properties if the feature is enabled
                     // =========================================================
                     #[cfg(feature = "wasm")]
-                    let (wasm_mgr_opt, wasm_path_opt, partition_start_bytes) = if let Some(path) =
+                    let (wasm_mgr_opt, wasm_path_opt) = if let Some(path) =
                         node_instance.node_config.args.get("wasm_file_path")
                     {
                         let manager = wasm_managers[umem_group_id].as_ref().ok_or(format!(
@@ -519,31 +517,9 @@ impl PipelineFactory {
                             node_instance.node_config.id, umem_group_id
                         ))?;
 
-                        // Compute this instance's scratchpad partition.
-                        // Scratchpads occupy [0, reserved_bytes - control_block_bytes); the
-                        // Control Block is at the end of the reserved region, so partition_start
-                        // starts at UMEM offset 0 for instance 0.
-                        let instance_idx = wasm_instance_counters[umem_group_id];
-                        let total_instances = wasm_instance_totals[umem_group_id].max(1);
-                        let umem_info = manager.umem();
-                        let cb_frames = wabrix_base::mailbox::control_block_frames(
-                            total_instances as u32,
-                            umem_info.frame_size,
-                        );
-                        let scratchpad_frames = umem_info.reserved_frames.saturating_sub(cb_frames);
-                        let frames_per_instance = if total_instances > 0 {
-                            scratchpad_frames / total_instances as u32
-                        } else {
-                            0
-                        };
-                        let p_start = instance_idx * frames_per_instance * umem_info.frame_size;
-
-                        // Increment the counter so the next plugin gets the next memory slice
-                        wasm_instance_counters[umem_group_id] += 1;
-
-                        (Some(manager.as_ref()), Some(path.as_str()), p_start)
+                        (Some(manager.as_ref()), Some(path.as_str()))
                     } else {
-                        (None, None, 0)
+                        (None, None)
                     };
 
                     Box::new(GeneratorNode::new(
@@ -570,8 +546,6 @@ impl PipelineFactory {
                         wasm_mgr_opt,
                         #[cfg(feature = "wasm")]
                         wasm_path_opt,
-                        #[cfg(feature = "wasm")]
-                        partition_start_bytes,
                         #[cfg(feature = "wasm")]
                         node_instance
                             .node_config
@@ -821,27 +795,8 @@ impl PipelineFactory {
                         force_sync_flag: Some(tm_force_sync.clone()),
                     };
 
-                    // Compute this instance's scratchpad partition.
-                    // Scratchpads occupy [0, reserved_bytes - control_block_bytes); the
-                    // Control Block is at the end of the reserved region, so partition_start
-                    // starts at UMEM offset 0 for instance 0.
-                    let instance_idx = wasm_instance_counters[umem_id];
-                    let total_instances = wasm_instance_totals[umem_id].max(1);
                     let umem_info = manager.umem();
-                    let cb_frames = wabrix_base::mailbox::control_block_frames(
-                        total_instances as u32,
-                        umem_info.frame_size,
-                    );
-                    let scratchpad_frames = umem_info.reserved_frames.saturating_sub(cb_frames);
-                    let frames_per_instance = if total_instances > 0 {
-                        scratchpad_frames / total_instances as u32
-                    } else {
-                        0
-                    };
-                    let mailbox_offset = umem_info.mailbox_offset(instance_idx);
-                    let partition_start_bytes =
-                        instance_idx * frames_per_instance * umem_info.frame_size;
-                    wasm_instance_counters[umem_id] += 1;
+                    let mailbox_offset = umem_info.mailbox_offset(0);
 
                     // Engine plugins need the merged startup data while planning timers,
                     // before the first process-batch callback is made.
@@ -857,7 +812,6 @@ impl PipelineFactory {
                         wasm_path,
                         routing_table,
                         telemetry_metrics,
-                        partition_start_bytes,
                         umem_id as u8,
                         combined_node_data,
                         platform_data,

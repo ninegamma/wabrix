@@ -7,7 +7,7 @@ ifaces= [
 # A single UMEM group is utilized to ensure zero-copy forwarding between both physical interfaces
 # The second Umem partition allows for hot spin-up of a second worker (todo)
 umem= [
-    { id = 0, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 2, reserved = 131072 }
+    { id = 0, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 2 }
 ]
 
 xsk= [

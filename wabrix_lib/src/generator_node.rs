@@ -91,7 +91,7 @@ pub struct GeneratorNode {
     #[cfg(feature = "wasm")]
     bindings: Option<GeneratorPlugin>,
     #[cfg(feature = "wasm")]
-    partition_start_bytes: u32,
+    partition_offset: u32,
     platform_data: PlatformData,
 }
 
@@ -125,17 +125,20 @@ impl GeneratorNode {
         tm_is_running: Arc<AtomicBool>,
         #[cfg(feature = "wasm")] wasm_manager: Option<&WasmManager>,
         #[cfg(feature = "wasm")] wasm_file_path: Option<&str>,
-        #[cfg(feature = "wasm")] partition_start_bytes: u32,
         #[cfg(feature = "wasm")] node_data: std::collections::HashMap<String, String>,
         platform_data: PlatformData,
     ) -> Self {
+        #[cfg(feature = "wasm")]
+        let mut wasm_partition_offset = 0;
+
         #[cfg(feature = "wasm")]
         let (store, bindings) = if let (Some(manager), Some(path)) = (wasm_manager, wasm_file_path)
         {
             let component = manager
                 .get_component(path)
                 .expect("Failed to load Gen Wasm");
-            let partition_handle = manager.make_partition_handle(partition_start_bytes);
+            let partition_handle = manager.make_partition_handle();
+            wasm_partition_offset = partition_handle.wasm_partition_offset();
             manager.set_instantiation_handle(partition_handle.clone());
 
             let wasi_ctx = WasiCtxBuilder::new()
@@ -147,7 +150,7 @@ impl GeneratorNode {
                 MyHostState {
                     ctx: wasi_ctx,
                     table: ResourceTable::new(),
-                    umem: partition_handle,
+                    umem: partition_handle.clone(),
                 },
             );
 
@@ -207,7 +210,7 @@ impl GeneratorNode {
             #[cfg(feature = "wasm")]
             bindings,
             #[cfg(feature = "wasm")]
-            partition_start_bytes,
+            partition_offset: wasm_partition_offset,
             platform_data,
         }
     }
@@ -512,7 +515,7 @@ impl Node for GeneratorNode {
             // Just pass the bytes and the offset. The plugin handles the rest!
             let lengths = bindings
                 .wabrix_plugins_generator()
-                .call_generate_batch(store, batch_bytes, self.partition_start_bytes)
+                .call_generate_batch(store, batch_bytes, self.partition_offset)
                 .unwrap_or_else(|e| {
                     log::error!("WASM Generator failed: {}", e);
                     vec![0; allocated]

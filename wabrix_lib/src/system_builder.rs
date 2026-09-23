@@ -82,69 +82,6 @@ impl SystemBuilder {
                 .push(config);
         }
 
-        // Pre-scan: count WASM instances per umem_id and adjust reserved_frames so that
-        // the Control Block fits and the remaining scratchpad is evenly divisible by instance count.
-        #[cfg(feature = "wasm")]
-        let wasm_counts: Vec<usize> = {
-            let mut counts = vec![0usize; MAX_UMEM];
-            for worker in &self.workers {
-                for pipeline in &worker.pipelines {
-                    for node in &pipeline.node_instances {
-                        if node.node_config.effective_arg("wasm_file_path").is_some() {
-                            if let Some(id_str) = node.node_config.args.get("umem") {
-                                if let Ok(uid) = id_str.parse::<usize>() {
-                                    if uid < MAX_UMEM {
-                                        counts[uid] += 1;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            for (uid, &count) in counts.iter().enumerate() {
-                if count == 0 {
-                    continue;
-                }
-                if let Some(umem_conf_arc) = self.runtime_umems[uid].as_ref() {
-                    let orig = umem_conf_arc.reserved_frames;
-                    let frame_size = umem_conf_arc.frame_size;
-                    let cb_frames =
-                        wabrix_base::mailbox::control_block_frames(count as u32, frame_size);
-                    let scratchpad = orig.saturating_sub(cb_frames);
-                    let per_instance = if count > 0 {
-                        scratchpad / count as u32
-                    } else {
-                        0
-                    };
-                    let adjusted = cb_frames + per_instance * count as u32;
-                    if adjusted != orig {
-                        let mut new_conf = (**umem_conf_arc).clone();
-                        new_conf.reserved_frames = adjusted;
-                        self.runtime_umems[uid] = Some(Arc::new(new_conf));
-                        log::info!(
-                            "UMEM {}: reserved_frames adjusted from {} to {} \
-                             (control_block={} + {}×{} scratchpad frames)",
-                            uid,
-                            orig,
-                            adjusted,
-                            cb_frames,
-                            count,
-                            per_instance
-                        );
-                    }
-                    log::info!(
-                        "UMEM {}: {} WASM instance(s): control_block={} frames, {} scratchpad frames each",
-                        uid,
-                        count,
-                        cb_frames,
-                        per_instance
-                    );
-                }
-            }
-            counts
-        };
-
         // 3. Calculate partition allocation for each worker
         // Indexed by worker_id (0..num_workers).
         let mut worker_partitions: Vec<Vec<(usize, UmemPartition)>> = vec![Vec::new(); num_workers];
@@ -173,11 +110,9 @@ impl SystemBuilder {
                     )
                 })?;
 
-                // Calculate partition size from usable (non-reserved) frames only
-                let usable_frames = umem_conf.frame_count - umem_conf.reserved_frames;
-                let partition_size = usable_frames / umem_conf.partitions;
-                // Worker partitions begin after the reserved region
-                let usable_start = umem_conf.group_start_frame_idx + umem_conf.reserved_frames;
+                // All UMEM frames are available to worker partitions.
+                let partition_size = umem_conf.frame_count / umem_conf.partitions;
+                let usable_start = umem_conf.group_start_frame_idx;
 
                 // Get the starting partition index for this allocation
                 let partition_idx = &mut umem_partition_counters[umem_group_id];
@@ -204,14 +139,13 @@ impl SystemBuilder {
                 *partition_idx += partition_req.count;
 
                 debug!(
-                    "Allocated merged partition for worker {}: UMEM {} partitions [{}-{}) covering frames [{}-{}) (reserved: [0-{}))",
+                    "Allocated merged partition for worker {}: UMEM {} partitions [{}-{}) covering frames [{}-{})",
                     worker_id,
                     umem_group_id,
                     first_partition_idx,
                     first_partition_idx + partition_req.count,
                     start_idx,
-                    end_idx,
-                    umem_conf.reserved_frames
+                    end_idx
                 );
             }
 
@@ -384,21 +318,17 @@ impl SystemBuilder {
         #[cfg(feature = "wasm")]
         for (umem_id, umem_conf_opt) in self.runtime_umems.iter().enumerate() {
             if let Some(umem_conf) = umem_conf_opt {
-                if umem_conf.reserved_frames > 0 {
-                    if let Some((umem, _)) = &initialized_umems[umem_id] {
-                        self.wasm_managers[umem_id] = Some(Arc::new(WasmManager::new(
-                            umem_conf.frame_size,
-                            umem_conf.reserved_frames,
-                            umem_conf.frame_count,
-                            umem.clone(),
-                            wasm_counts[umem_id] as u32,
-                        )?));
-                    } else {
-                        log::error!(
-                            "🔥 Failed to initialize WASM Manager for UMEM {}. Umem not found.",
-                            umem_id
-                        );
-                    }
+                if let Some((umem, _)) = &initialized_umems[umem_id] {
+                    self.wasm_managers[umem_id] = Some(Arc::new(WasmManager::new(
+                        umem_conf.frame_size,
+                        umem_conf.frame_count,
+                        umem.clone(),
+                    )?));
+                } else {
+                    log::error!(
+                        "🔥 Failed to initialize WASM Manager for UMEM {}. Umem not found.",
+                        umem_id
+                    );
                 }
             }
         }
@@ -454,12 +384,6 @@ impl SystemBuilder {
         wabrix_system.shared_state = shared_state.clone();
         // ==========================================================
 
-        // Reuse the wasm_counts computed in the pre-scan above.
-        #[cfg(feature = "wasm")]
-        let wasm_instance_totals: Vec<usize> = wasm_counts.clone();
-        #[cfg(feature = "wasm")]
-        let mut wasm_instance_counters = vec![0u32; MAX_UMEM];
-
         // Crossbeam receivers are multi-consumer, not broadcast. Give each
         // runner its own queue and fan out events after construction.
         let mut control_senders: Vec<Sender<Arc<ControlEvent>>> = Vec::new();
@@ -500,10 +424,6 @@ impl SystemBuilder {
                     #[cfg(feature = "wasm")]
                     &self.wasm_managers,
                     shared_state.clone(),
-                    #[cfg(feature = "wasm")]
-                    &wasm_instance_totals,
-                    #[cfg(feature = "wasm")]
-                    &mut wasm_instance_counters,
                 )
                 .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -626,7 +546,6 @@ mod tests {
             cq_size: 512,
             group_start_frame_idx: 0,
             partitions: 2,
-            reserved_frames: 0,
         }));
 
         (bus, configs)
@@ -701,7 +620,6 @@ mod tests {
             cq_size: 512,
             group_start_frame_idx: 0,
             partitions: 2,
-            reserved_frames: 0,
         }));
         configs[1] = Some(Arc::new(RuntimeUmemConfig {
             group_id: 1,
@@ -713,7 +631,6 @@ mod tests {
             cq_size: 512,
             group_start_frame_idx: 4096,
             partitions: 1,
-            reserved_frames: 0,
         }));
 
         let mut registry = FrameRegistry::new(
@@ -785,7 +702,6 @@ mod tests {
             cq_size: 512,
             group_start_frame_idx: 100,
             partitions: 1,
-            reserved_frames: 0,
         }));
 
         let mut registry = FrameRegistry::new(

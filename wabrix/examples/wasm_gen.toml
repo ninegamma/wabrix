@@ -3,7 +3,7 @@ ifaces= [
     { name = "enp2s0f0np0", rxd = 8096, txd = 2048, irq_core = 8 },
 ]
 umem= [
-    { id = 0, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 16384, head_room = 128, partitions = 2, reserved = 30720 },
+    { id = 0, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 16384, head_room = 128, partitions = 2 },
 ]
 xsk= [
     { iface = "enp2s0f0np0", queues = [0, 1], umem = 0, rxq_size = 16384, txq_size = 4096, zerocopy = true, xdp_mode = "auto" },
@@ -41,4 +41,3 @@ src_ip = "192.168.177.224"
 rng_seed = "235467"
 dst_mac = "44:49:88:06:63:39"
 dst_ip = "192.168.177.222"
-

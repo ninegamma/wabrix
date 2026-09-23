@@ -58,9 +58,10 @@ pub struct WasmEngine {
     #[cfg(feature = "profiling")]
     total_cycles: u64,
     telemetry_metrics: TelemetryMetrics,
-    /// Byte offset from Umem base where WASM address 0 begins for this instance.
-    partition_start_bytes: u32,
-    /// UMEM-relative byte offset of this instance's BatchMetadata mailbox.
+    /// ABI offset used to translate UMEM-relative packet descriptors into the
+    /// stitched linear memory (heap below, UMEM above).
+    partition_offset: u32,
+    /// Wasm-linear-memory offset of this instance's private mailbox.
     mailbox_offset: u32,
     /// The Umem this node is bound to. Every incoming PDU must carry this id.
     umem_id: u8,
@@ -99,7 +100,6 @@ impl WasmEngine {
         wasm_file_path: &str,
         routing_table: Vec<NodeId>, // Accept any number of routes
         telemetry_metrics: TelemetryMetrics,
-        partition_start_bytes: u32,
         umem_id: u8,
         node_data: HashMap<String, String>,
         platform_data: &PlatformData,
@@ -119,15 +119,9 @@ impl WasmEngine {
             .get_component(wasm_file_path)
             .expect("Failed to load Wasm component");
 
-        // 2. Build the partition-specific UmemHandle for this instance.
-        //    WASM address 0 will map to `umem_base + partition_start_bytes`.
-        //    The window extends to the end of the full Umem.
-        let partition_handle = manager.make_partition_handle(partition_start_bytes);
-        log::info!(
-            "NODE {}: Partition start bytes: {}",
-            id,
-            partition_start_bytes
-        );
+        // 2. Build an instance-specific handle with a private linear mapping
+        //    and an alias of the complete shared UMEM.
+        let partition_handle = manager.make_partition_handle();
 
         // 3. Pre-load the partition handle into the shared XdpMemoryCreator so
         //    that Wasmtime picks it up when it calls new_memory() during instantiate().
@@ -147,7 +141,7 @@ impl WasmEngine {
             MyHostState {
                 ctx: wasi_ctx,
                 table: ResourceTable::new(),
-                umem: partition_handle, // Host-side state also sees the partition window
+                umem: partition_handle.clone(), // Host-side state also sees the partition window
             },
         );
 
@@ -209,7 +203,7 @@ impl WasmEngine {
             #[cfg(feature = "profiling")]
             total_cycles: 0,
             telemetry_metrics,
-            partition_start_bytes,
+            partition_offset: partition_handle.wasm_partition_offset(),
             mailbox_offset,
             umem_id,
             supports_oob_telemetry: false,
@@ -244,10 +238,10 @@ impl WasmEngine {
         // this instance's mailbox slice is exclusively owned by this thread
         // during the entire call window (write before call, read after return).
         let mailbox_ptr: *mut HostBatch = {
-            let base = self.store.data().umem.ptr;
-            // SAFETY: mailbox_offset is within the Control Block, which the host
-            // guarantees is backed by allocated UMEM memory.
-            unsafe { base.add(self.mailbox_offset as usize) as *mut HostBatch }
+            let base = self.store.data().umem.linear_base();
+            // SAFETY: mailbox_offset is within this instance's private linear
+            // memory mapping, which the host created before instantiation.
+            unsafe { (base as *mut u8).add(self.mailbox_offset as usize) as *mut HostBatch }
         };
 
         // ==========================================================
@@ -276,7 +270,7 @@ impl WasmEngine {
             .call_process_batch(
                 &mut self.store,
                 len as u32,
-                self.partition_start_bytes,
+                self.partition_offset,
                 self.mailbox_offset,
             )
             .unwrap_or_else(|e| {

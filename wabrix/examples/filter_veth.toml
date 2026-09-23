@@ -6,7 +6,7 @@ ifaces = [
 
 # Single UMEM region shared across both veth sockets for zero-copy path
 umem = [
-    { id = 0, frame_size = 2048, frame_count = 131072, fq_size = 4096, cq_size = 4096, head_room = 128, partitions = 2, reserved = 10240 }
+    { id = 0, frame_size = 2048, frame_count = 131072, fq_size = 4096, cq_size = 4096, head_room = 128, partitions = 2 }
 ]
 
 xsk = [

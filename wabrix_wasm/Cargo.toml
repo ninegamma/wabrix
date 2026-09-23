@@ -16,6 +16,7 @@ wabrix_api = { workspace = true }
 crossbeam-channel = { workspace = true }
 tokio = { workspace = true }
 anyhow = "1.0.104"
+libc = { workspace = true }
 
 [lib]
 name = "wabrix_wasm"

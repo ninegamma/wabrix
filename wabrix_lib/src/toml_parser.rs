@@ -96,7 +96,6 @@ fn default_umem_configs() -> Vec<UmemConfig> {
         cq_size: 8192,
         head_room: 128,
         partitions: 1,
-        reserved: 0,
     }]
 }
 
@@ -171,10 +170,6 @@ pub struct UmemConfig {
     pub head_room: u32,
     #[serde(default = "default_partitions")]
     pub partitions: u32,
-    /// Number of frames at the start of this UMEM exclusively reserved for WASM plugins.
-    /// These frames are never assigned to worker partitions or sockets.
-    #[serde(default)]
-    pub reserved: u32,
 }
 
 fn default_partitions() -> u32 {
@@ -699,7 +694,7 @@ impl WabricksConfig {
     }
 
     /// Validates that the defined UMEM resources are mathematically sufficient
-    /// to support the requested XSK rings, hardware queues, and reserved frames.
+    /// to support the requested XSK rings and hardware queues.
     pub fn validate_umem_resources(&self) -> Result<()> {
         for umem in &self.wabrix.umem {
             let mut hardware_locked_frames = 0;
@@ -718,7 +713,7 @@ impl WabricksConfig {
                 }
             }
 
-            let total_required = umem.reserved + hardware_locked_frames;
+            let total_required = hardware_locked_frames;
 
             // We need frames left over for the application pipelines to actually generate/buffer packets
             // We assume a minimum safe buffer of ~4096 frames per partition.
@@ -728,12 +723,11 @@ impl WabricksConfig {
             if umem.frame_count <= total_required {
                 anyhow::bail!(
                     "🔥 UMEM {} Configuration Trap! Total frames ({}) cannot support the requested hardware rings.\n\
-                    Reserved: {}, Hardware Locked (FQ+RX+TX across {} sockets): {}.\n\
+                    Hardware Locked (FQ+RX+TX across {} sockets): {}.\n\
                     Shortfall: {} frames.\n\
                     Fix: Increase `frame_count` or decrease ring sizes (fq_size, rxq_size) in your TOML!",
                     umem.id,
                     umem.frame_count,
-                    umem.reserved,
                     socket_count,
                     hardware_locked_frames,
                     total_required - umem.frame_count
@@ -741,7 +735,7 @@ impl WabricksConfig {
             } else if umem.frame_count < safe_minimum {
                 log::warn!(
                     "⚠️ UMEM {} is dangerously low on free frames.\n\
-                    Total: {}, Hardware+Reserved: {}. Leaves only {} frames for {} workers to share.\n\
+                    Total: {}, Hardware Locked: {}. Leaves only {} frames for {} workers to share.\n\
                     This may cause 'Starvation!' warnings under load. Consider increasing frame_count.",
                     umem.id,
                     umem.frame_count,
@@ -848,25 +842,12 @@ impl WabricksConfig {
                 ));
             }
 
-            // Validate reserved frame count
-            if umem_cfg.reserved >= umem_cfg.frame_count {
+            // Validate that all frames are evenly divisible into partitions
+            if umem_cfg.frame_count % umem_cfg.partitions != 0 {
                 return Err(anyhow!(
-                    "UMEM {}: reserved ({}) must be < frame_count ({})",
+                    "UMEM {}: frame_count ({}) must be evenly divisible by partitions ({})",
                     umem_cfg.id,
-                    umem_cfg.reserved,
-                    umem_cfg.frame_count
-                ));
-            }
-
-            // Validate that non-reserved frames are evenly divisible into partitions
-            let usable_frames = umem_cfg.frame_count - umem_cfg.reserved;
-            if usable_frames % umem_cfg.partitions != 0 {
-                return Err(anyhow!(
-                    "UMEM {}: usable frames ({} = frame_count {} - reserved {}) must be evenly divisible by partitions ({})",
-                    umem_cfg.id,
-                    usable_frames,
                     umem_cfg.frame_count,
-                    umem_cfg.reserved,
                     umem_cfg.partitions
                 ));
             }
@@ -1646,7 +1627,6 @@ impl WabricksConfig {
                 cq_size: umem_cfg.cq_size,
                 group_start_frame_idx: current_global_frame_idx,
                 partitions: umem_cfg.partitions,
-                reserved_frames: umem_cfg.reserved,
             });
 
             runtime_umems[umem_cfg.id] = Some(rc);

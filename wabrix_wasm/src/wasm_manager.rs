@@ -1,13 +1,24 @@
 use crate::wasm_engine;
 use dashmap::DashMap;
 use std::cell::RefCell;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use wabrix_api::BatchMetadata;
-use wabrix_base::mailbox::{control_block_frames, MAILBOX_STRIDE};
+use wabrix_base::mailbox::MAILBOX_STRIDE;
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, LinearMemory, MemoryCreator, MemoryType, OptLevel, Result};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use xsk_core::Umem;
+
+/// Maximum virtual address space reserved for each instance's lower Wasm region.
+/// The final `BatchMetadata` bytes of this region are reserved for the mailbox.
+///
+/// The AF_XDP UMEM is already mapped and registered with the kernel by
+/// `xsk-core`. Each instance maps an alias of those same memfd-backed pages
+/// after its own ordinary Wasm region, so no DMA registration is moved.
+const MAX_WASM_HEAP_BYTES: usize = 2 * 1024 * 1024 * 1024;
+const WASM_PAGE_BYTES: usize = 64 * 1024;
 
 // A thread-local slot to securely hold the partition handle during instantiation
 thread_local! {
@@ -18,84 +29,89 @@ thread_local! {
 
 /// Thread-safe handle to the mmap'd AF_XDP UMEM region.
 ///
-/// Each WASM instance gets its own handle with a distinct `partition_start_bytes`
-/// so that WASM address 0 maps to the start of that instance's private scratchpad.
-/// The window extends to the end of the full Umem, giving the plugin positive-address
-/// access to its mailbox, other instances' scratchpads above it, and all AF_XDP frames.
+/// The UMEM remains at the address allocated and registered by `xsk-core`; moving
+/// that original mapping would invalidate the AF_XDP DMA registration. The custom
+/// `MemoryCreator` reserves a private contiguous range for each instance, maps
+/// the ordinary Wasm region at its start, and aliases the same memfd-backed UMEM
+/// pages immediately after it. Wasm memory 0 therefore presents one contiguous
+/// range without copying packet data:
 ///
-/// Memory layout (host-side byte offsets from Umem base):
 /// ```text
-/// [0 .. reserved_bytes - control_block_bytes)            per-instance scratchpad partitions
-///   partition_start_bytes_0 = 0
-///   partition_start_bytes_1 = partition_size
-///   partition_start_bytes_N = N * partition_size
-/// [reserved_bytes - control_block_bytes .. reserved_bytes) Control Block (per-instance mailboxes)
-///   mailbox_offset_N = reserved_bytes - (N+1) * sizeof(BatchMetadata)
-/// [reserved_bytes .. total_size)                           AF_XDP payload frames
+/// Wasm address 0                                      Wasm UMEM offset
+///      |                                                   |
+///      v                                                   v
+///      [ ordinary Wasm region ][ private mailbox ][ UMEM alias ]
+///      ^                                                   ^
+///      |                                                   |
+///      linear memory base                                  same pages as AF_XDP UMEM
 /// ```
-/// For instance N (`partition_start_bytes = N * partition_size`):
+///
+/// The UMEM's internal layout is unchanged and uses offsets relative to the
+/// original UMEM host pointer. Mailboxes are private to each Wasm mapping:
 /// ```text
-/// WASM addr 0                              == host offset partition_start_bytes_N
-/// WASM addr mailbox_offset_N - start_N     == instance N's BatchMetadata (positive, in-bounds)
-/// WASM addr desc_addr        - start_N     == AF_XDP frame payload   (positive, in-bounds)
+/// [0 .. total_size)                                       AF_XDP payload frames
+/// ```
+/// Each instance aliases the complete UMEM, so packet descriptors remain
+/// UMEM-relative while mailbox offsets are Wasm-linear addresses. The host passes
+/// `wasm_partition_offset = 0 - MAX_WASM_HEAP_BYTES`
+/// through the existing ABI. The plugin then computes:
+/// ```text
+/// linear_memory_base + mailbox_offset
+///     == this instance's private BatchMetadata mailbox
+/// linear_memory_base + MAX_WASM_HEAP_BYTES + desc_addr
+///     == host UMEM base + desc_addr
 /// ```
 #[derive(Clone)]
 pub struct UmemHandle {
     pub ptr: *mut u8,
+    /// Duplicated memfd which backs the AF_XDP UMEM pages.
+    pub backing_fd: Arc<OwnedFd>,
+    /// Base address of this instance's stitched linear memory.
+    linear_base: Arc<AtomicUsize>,
     /// Total Umem size in bytes (`frame_count * frame_size`).
     pub size: usize,
-    /// Byte offset from `ptr` where this instance's WASM address 0 begins.
-    /// Zero for non-partitioned or first-instance use.
-    pub partition_start_bytes: u32,
-    /// Number of frames at the start of the UMEM exclusively reserved for WASM plugins.
-    /// Byte range: [0, reserved_frames * frame_size).
-    pub reserved_frames: u32,
-    pub frame_size: u32,
-    /// Number of WASM plugin instances sharing this UMEM. Determines Control Block size.
-    pub instance_count: u32,
 }
 
 impl UmemHandle {
-    /// Number of UMEM frames occupied by the Control Block (all per-instance mailboxes).
+    /// Wasm-linear-memory byte offset of this instance's private mailbox.
     #[inline]
-    pub fn control_block_frame_count(&self) -> u32 {
-        control_block_frames(self.instance_count, self.frame_size)
+    pub fn mailbox_offset(&self, _instance_idx: u32) -> u32 {
+        (MAX_WASM_HEAP_BYTES - MAILBOX_STRIDE) as u32
     }
 
-    /// Byte size of the Control Block located at the end of the reserved region.
-    #[inline]
-    pub fn control_block_bytes(&self) -> usize {
-        self.control_block_frame_count() as usize * self.frame_size as usize
-    }
-
-    /// UMEM-relative byte offset to instance N's `BatchMetadata` mailbox.
-    #[inline]
-    pub fn mailbox_offset(&self, instance_idx: u32) -> u32 {
-        self.reserved_bytes() as u32 - (instance_idx + 1) * MAILBOX_STRIDE as u32
-    }
-
-    /// Raw pointer to instance N's `BatchMetadata` within the shared UMEM.
+    /// Raw pointer to this instance's mailbox in its private Wasm memory.
     ///
     /// # Safety
     /// Caller must ensure exclusive access to this instance's mailbox slice and that
-    /// `instance_idx < instance_count`. Control Block frames are excluded from the
-    /// AF_XDP Fill Queue so the NIC never DMAs here.
+    /// the linear memory has already been created for this instance.
     #[inline]
     pub unsafe fn mailbox_ptr(&self, instance_idx: u32) -> *mut BatchMetadata {
-        // SAFETY: caller guarantees the slice is exclusively owned.
-        unsafe { self.ptr.add(self.mailbox_offset(instance_idx) as usize) as *mut BatchMetadata }
+        let base = self.linear_base.load(Ordering::Acquire);
+        debug_assert_ne!(base, 0, "Wasm linear memory has not been created");
+        // SAFETY: the MemoryCreator maps the mailbox offset inside this
+        // instance's private linear-memory mapping before the Wasm instance is
+        // exposed to the host.
+        unsafe {
+            (base as *mut u8).add(self.mailbox_offset(instance_idx) as usize) as *mut BatchMetadata
+        }
     }
 
-    /// Byte size of the region reserved exclusively for WASM plugins: [0, reserved_bytes()) and their mailboxes.
+    /// Offset of the UMEM from the base pointer exposed as Wasm memory 0.
     #[inline]
-    pub fn reserved_bytes(&self) -> usize {
-        self.reserved_frames as usize * self.frame_size as usize
+    pub fn wasm_umem_offset(&self) -> usize {
+        MAX_WASM_HEAP_BYTES
     }
 
-    /// Size of the WASM linear memory window: from `partition_start_bytes` to end of Umem.
+    /// ABI value which makes `umem_base + desc_addr` point into the UMEM
+    /// portion of the stitched linear memory.
     #[inline]
-    pub fn window_size_bytes(&self) -> usize {
-        self.size - (self.partition_start_bytes as usize)
+    pub fn wasm_partition_offset(&self) -> u32 {
+        0u32.wrapping_sub(self.wasm_umem_offset() as u32)
+    }
+
+    #[inline]
+    pub fn linear_base(&self) -> usize {
+        self.linear_base.load(Ordering::Acquire)
     }
 }
 
@@ -103,24 +119,154 @@ impl UmemHandle {
 unsafe impl Send for UmemHandle {}
 unsafe impl Sync for UmemHandle {}
 
-unsafe impl LinearMemory for UmemHandle {
-    /// The visible window starts at `partition_start_bytes` and reaches the end of the Umem.
-    fn byte_size(&self) -> usize {
-        self.window_size_bytes()
-    }
-    fn byte_capacity(&self) -> usize {
-        self.window_size_bytes()
-    }
-    fn grow_to(&mut self, _new_size: usize) -> Result<()> {
-        Err(wasmtime::Error::msg(
-            "XBricks: Memory growth disabled for zero-copy UMEM",
-        ))
+/// A Wasm linear memory whose lower virtual-address region is the ordinary Wasm
+/// region and whose upper region aliases the shared AF_XDP UMEM.
+struct StitchedLinearMemory {
+    handle: Arc<UmemHandle>,
+    base_ptr: *mut u8,
+}
+
+// SAFETY: `base_ptr` identifies a private virtual mapping owned by this
+// object. Wasmtime may move the object between threads, but it never permits
+// concurrent mutable access to one LinearMemory implementation.
+unsafe impl Send for StitchedLinearMemory {}
+unsafe impl Sync for StitchedLinearMemory {}
+
+impl StitchedLinearMemory {
+    fn new(handle: Arc<UmemHandle>, initial_size: usize) -> std::result::Result<Self, String> {
+        let heap_size = align_up(initial_size, WASM_PAGE_BYTES)?;
+        if heap_size > MAX_WASM_HEAP_BYTES {
+            return Err(format!(
+                "Wasm minimum memory exceeds {} bytes",
+                MAX_WASM_HEAP_BYTES
+            ));
+        }
+
+        let mapping_size = MAX_WASM_HEAP_BYTES
+            .checked_add(handle.size)
+            .ok_or_else(|| "stitched Wasm mapping size overflow".to_string())?;
+        // SAFETY: A null hint lets the kernel choose an unused contiguous range;
+        // the range is private to this memory object until Drop.
+        let reservation = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                mapping_size,
+                libc::PROT_NONE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        if reservation == libc::MAP_FAILED {
+            return Err(format!(
+                "could not reserve {} bytes for stitched Wasm memory: {}",
+                mapping_size,
+                std::io::Error::last_os_error()
+            ));
+        }
+        let base_addr = reservation as usize;
+
+        // SAFETY: The range was reserved above and is exclusively owned by this
+        // object until Drop. Mapping the complete lower portion makes it part
+        // of the accessible linear memory; physical pages remain
+        // demand-allocated by the kernel.
+        let mapped = unsafe {
+            libc::mmap(
+                base_addr as *mut libc::c_void,
+                MAX_WASM_HEAP_BYTES,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED,
+                -1,
+                0,
+            )
+        };
+        if mapped == libc::MAP_FAILED {
+            // SAFETY: The preceding mmap reserved exactly this private range.
+            unsafe { libc::munmap(base_addr as *mut libc::c_void, mapping_size) };
+            return Err(format!(
+                "could not map initial Wasm heap: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        // SAFETY: The upper range is inside the reservation made above, and
+        // `backing_fd` refers to the same pages registered as the AF_XDP UMEM.
+        let umem_mapping = unsafe {
+            libc::mmap(
+                (base_addr + MAX_WASM_HEAP_BYTES) as *mut libc::c_void,
+                handle.size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED | libc::MAP_FIXED,
+                handle.backing_fd.as_raw_fd(),
+                0,
+            )
+        };
+        if umem_mapping == libc::MAP_FAILED {
+            // SAFETY: The reservation is owned by this object and the lower
+            // mapping has not escaped this constructor.
+            unsafe { libc::munmap(base_addr as *mut libc::c_void, mapping_size) };
+            return Err(format!(
+                "could not alias AF_XDP UMEM into Wasm memory: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        handle.linear_base.store(base_addr, Ordering::Release);
+
+        Ok(Self {
+            handle,
+            base_ptr: base_addr as *mut u8,
+        })
     }
 
-    /// WASM address 0 maps to `ptr + partition_start_bytes`.
+    fn total_size(&self) -> usize {
+        MAX_WASM_HEAP_BYTES + self.handle.size
+    }
+}
+
+fn align_up(value: usize, alignment: usize) -> std::result::Result<usize, String> {
+    value
+        .checked_add(alignment - 1)
+        .map(|value| value & !(alignment - 1))
+        .ok_or_else(|| "Wasm memory size overflow".to_string())
+}
+
+unsafe impl LinearMemory for StitchedLinearMemory {
+    /// The exposed memory contains both the ordinary heap and the UMEM.
+    fn byte_size(&self) -> usize {
+        self.total_size()
+    }
+
+    fn byte_capacity(&self) -> usize {
+        self.total_size()
+    }
+
+    fn grow_to(&mut self, new_size: usize) -> Result<()> {
+        if new_size > self.total_size() {
+            return Err(wasmtime::Error::msg(
+                "Wasm memory growth exceeds the stitched mapping",
+            ));
+        }
+        Ok(())
+    }
+
     fn as_ptr(&self) -> *mut u8 {
-        // SAFETY: partition_start_bytes is always <= size, validated at construction.
-        unsafe { self.ptr.add(self.partition_start_bytes as usize) }
+        self.base_ptr
+    }
+}
+
+impl Drop for StitchedLinearMemory {
+    fn drop(&mut self) {
+        // SAFETY: This is the exact reservation created by `new`; the UMEM
+        // starts at its upper boundary. The original AF_XDP mapping is owned
+        // by xsk-core and is deliberately left mapped.
+        unsafe {
+            libc::munmap(
+                self.base_ptr as *mut libc::c_void,
+                MAX_WASM_HEAP_BYTES + self.handle.size,
+            );
+            self.handle.linear_base.store(0, Ordering::Release);
+        }
     }
 }
 
@@ -144,7 +290,8 @@ unsafe impl MemoryCreator for XdpMemoryCreator {
                     .to_string()
             })?;
 
-        Ok(Box::new((*handle).clone()))
+        let initial_size = _minimum;
+        Ok(Box::new(StitchedLinearMemory::new(handle, initial_size)?))
     }
 }
 
@@ -189,44 +336,28 @@ pub struct WasmManager {
 }
 
 impl WasmManager {
-    pub fn new(
-        frame_size: u32,
-        reserved_frames: u32,
-        frame_count: u32,
-        umem: Arc<Umem>,
-        instance_count: u32,
-    ) -> Result<Self> {
-        let min_ctrl = control_block_frames(instance_count, frame_size);
-        // Reserved region must hold both the Control Block (at the end) and at least
-        // one scratchpad frame per instance (at the start).
-        let min_reserved = min_ctrl + instance_count;
-        if reserved_frames < min_reserved {
-            return Err(wasmtime::Error::msg(format!(
-                "WasmManager: reserved_frames ({}) is too small. Need at least {} frames: \
-                 {} for the Control Block ({} instances × {} B mailbox) + {} scratchpad frames (1 per instance)",
-                reserved_frames, min_reserved, min_ctrl, instance_count, MAILBOX_STRIDE, instance_count
-            )));
-        }
-
+    pub fn new(frame_size: u32, frame_count: u32, umem: Arc<Umem>) -> Result<Self> {
         // The UMEM is already shared with AF_XDP, so `Arc::get_mut` cannot be used.
         // Convert the read-only raw pointer to a writable one; the disjoint-access
         // invariants documented on `UmemHandle` must be upheld by every caller.
         let umem_ptr = umem.as_ptr() as *mut u8;
         let total_umem_size = frame_count as usize * frame_size as usize;
+        let backing_fd = umem
+            .backing_fd()
+            .map_err(|e| wasmtime::Error::msg(format!("failed to duplicate UMEM fd: {e}")))?;
         let umem_handle = Arc::new(UmemHandle {
             ptr: umem_ptr,
+            // SAFETY: `backing_fd` is a newly duplicated, owned descriptor.
+            backing_fd: Arc::new(unsafe { OwnedFd::from_raw_fd(backing_fd) }),
+            linear_base: Arc::new(AtomicUsize::new(0)),
             size: total_umem_size,
-            partition_start_bytes: 0,
-            reserved_frames,
-            frame_size,
-            instance_count,
         });
 
         let mut config = Config::new();
         config
             .wasm_component_model(true)
             .wasm_memory64(true)
-            .memory_reservation(total_umem_size as u64)
+            .memory_reservation((MAX_WASM_HEAP_BYTES + total_umem_size) as u64)
             .memory_may_move(false) // Critical for AF_XDP stability
             .cranelift_opt_level(OptLevel::Speed)
             .with_host_memory(Arc::new(XdpMemoryCreator))
@@ -353,30 +484,13 @@ impl WasmManager {
         });
     }
 
-    /// Create a windowed `UmemHandle` for a specific WASM instance partition.
-    ///
-    /// `partition_start_bytes` is the byte offset from the Umem base where this
-    /// instance's WASM address 0 begins. The window extends from that offset to
-    /// the end of the full Umem, so the plugin can access both its own scratchpad
-    /// and all packet frames above the reserved region.
-    ///
-    /// # Panics
-    /// Panics if `partition_start_bytes >= self.umem.size`.
-    pub fn make_partition_handle(&self, partition_start_bytes: u32) -> Arc<UmemHandle> {
-        assert!(
-            (partition_start_bytes as usize) < self.umem.size,
-            "partition_start_bytes ({}) must be less than total Umem size ({})",
-            partition_start_bytes,
-            self.umem.size
-        );
-
+    /// Create a handle for a new Wasm instance sharing this UMEM.
+    pub fn make_partition_handle(&self) -> Arc<UmemHandle> {
         Arc::new(UmemHandle {
             ptr: self.umem.ptr,
+            backing_fd: self.umem.backing_fd.clone(),
+            linear_base: Arc::new(AtomicUsize::new(0)),
             size: self.umem.size,
-            partition_start_bytes,
-            reserved_frames: self.umem.reserved_frames,
-            frame_size: self.umem.frame_size,
-            instance_count: self.umem.instance_count,
         })
     }
 }

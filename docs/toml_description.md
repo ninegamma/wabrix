@@ -72,20 +72,19 @@ Default: one entry with `id=0`, `frame_size=2048`, `frame_count=65536`, `fq_size
 |-------|------|----------|-------------|
 | `id` | integer | **yes** | Unique UMEM identifier. Must be 0–255. |
 | `frame_size` | integer | **yes** | Size in bytes of each frame. Must be a power of 2 and > 0. |
-| `frame_count` | integer | **yes** | Total number of frames in the UMEM. Must be > 0. Usable frames (`frame_count - reserved`) must be evenly divisible by `partitions`. |
+| `frame_count` | integer | **yes** | Total number of frames in the UMEM. Must be > 0 and evenly divisible by `partitions`. |
 | `fq_size` | integer | **yes** | Fill queue ring size. Must be > 0. |
 | `cq_size` | integer | **yes** | Completion queue ring size. Must be > 0. |
 | `head_room` | integer | **yes** | Reserved bytes at the start of each frame for metadata headers. Must be < `frame_size`. |
 | `partitions` | integer | no | Number of memory partitions (one per worker). Default `1`. Must be a power of 2 and ≥ 1. |
-| `reserved` | integer | no | Number of frames exclusively reserved for WASM plugins. Default `0`. Must be < `frame_count`. |
 
-**Sizing guidance:** `frame_count` must cover hardware-locked frames (`fq_size + rxq_size + txq_size` per socket) plus `reserved`, plus at least ~4096 frames per partition for the application.
+**Sizing guidance:** `frame_count` must cover hardware-locked frames (`fq_size + rxq_size + txq_size` per socket) plus the frames needed by the application.
 
 **Example:**
 ```toml
 umem = [
     { id = 0, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 16384,
-      head_room = 128, partitions = 4, reserved = 30720 },
+      head_room = 128, partitions = 4 },
 ]
 ```
 
@@ -408,8 +407,7 @@ workers = [1]
 | `partitions` | Power of 2, ≥ 1 |
 | `rxq_size` / `txq_size` | Power of 2, > 0 |
 | `head_room` | < `frame_size` |
-| `reserved` | < `frame_count` |
-| Usable frames | (`frame_count` − `reserved`) % `partitions` == 0 |
+| Frame count | `frame_count` % `partitions` == 0 |
 | Worker `core` | < total logical CPUs on the system |
 | Node `queues` length | Must equal pipeline `workers` length |
 | `pps` format | Integer, decimal, `k`/`m`/`g` suffix, or `"max"` |

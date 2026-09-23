@@ -32,9 +32,6 @@ pub struct RuntimeUmemConfig {
     pub group_start_frame_idx: u32,
     /// Number of partitions this UMEM is divided into
     pub partitions: u32,
-    /// Frames at the start of this UMEM exclusively reserved for WASM plugins.
-    /// Worker partitions are allocated starting after these frames.
-    pub reserved_frames: u32,
 }
 
 impl Drop for RuntimeUmemConfig {

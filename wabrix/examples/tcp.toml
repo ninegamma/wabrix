@@ -4,8 +4,8 @@ ifaces= [
     { name = "veth_wabrix", rxd = 1024, txd = 1024, type = "veth", namespace = "ns-wabrix", peer = "tap-veth", mac_if = "enp2s0f0np0", ipnet = "10.10.10.222/24", checksum_offload = false },
 ]
 umem= [
-    { id = 0, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 16384, head_room = 128, partitions = 1, reserved = 30720 },
-    { id = 1, frame_size = 2048, frame_count = 131072, fq_size = 16384, cq_size = 16384, head_room = 128, partitions = 1, reserved = 10240 },
+    { id = 0, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 16384, head_room = 128, partitions = 1 },
+    { id = 1, frame_size = 2048, frame_count = 131072, fq_size = 16384, cq_size = 16384, head_room = 128, partitions = 1 },
 ]
 xsk= [
     { iface = "enp2s0f0np0", queues = [0], umem = 0, rxq_size = 16384, txq_size = 4096, zerocopy = true, xdp_mode = "auto" },
