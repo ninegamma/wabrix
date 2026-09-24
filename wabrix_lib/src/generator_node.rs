@@ -91,7 +91,7 @@ pub struct GeneratorNode {
     #[cfg(feature = "wasm")]
     bindings: Option<GeneratorPlugin>,
     #[cfg(feature = "wasm")]
-    partition_offset: u32,
+    umem_offset: u32,
     platform_data: PlatformData,
 }
 
@@ -129,7 +129,7 @@ impl GeneratorNode {
         platform_data: PlatformData,
     ) -> Self {
         #[cfg(feature = "wasm")]
-        let mut wasm_partition_offset = 0;
+        let mut wasm_umem_offset = 0;
 
         #[cfg(feature = "wasm")]
         let (store, bindings) = if let (Some(manager), Some(path)) = (wasm_manager, wasm_file_path)
@@ -138,7 +138,7 @@ impl GeneratorNode {
                 .get_component(path)
                 .expect("Failed to load Gen Wasm");
             let partition_handle = manager.make_partition_handle();
-            wasm_partition_offset = partition_handle.wasm_partition_offset();
+            wasm_umem_offset = partition_handle.wasm_umem_offset();
             manager.set_instantiation_handle(partition_handle.clone());
 
             let wasi_ctx = WasiCtxBuilder::new()
@@ -210,7 +210,7 @@ impl GeneratorNode {
             #[cfg(feature = "wasm")]
             bindings,
             #[cfg(feature = "wasm")]
-            partition_offset: wasm_partition_offset,
+            umem_offset: wasm_umem_offset,
             platform_data,
         }
     }
@@ -515,7 +515,7 @@ impl Node for GeneratorNode {
             // Just pass the bytes and the offset. The plugin handles the rest!
             let lengths = bindings
                 .wabrix_plugins_generator()
-                .call_generate_batch(store, batch_bytes, self.partition_offset)
+                .call_generate_batch(store, batch_bytes, self.umem_offset)
                 .unwrap_or_else(|e| {
                     log::error!("WASM Generator failed: {}", e);
                     vec![0; allocated]

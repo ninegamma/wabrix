@@ -67,14 +67,16 @@ impl WabrixSystem {
             // Spawn the worker with all its pipelines and frame registry
             let handle = crate::pipeline::spawn_worker_pipelines(
                 runners,
-                core_id,
-                frame_registry,
-                shutdown_clone,
-                workers_completed_clone,
-                &self.platform_data,
-                is_one_shot,
-                worker_control_rx,
-                worker_control_senders,
+                crate::pipeline::WorkerPipelineSpawnConfig {
+                    core_id,
+                    frame_registry,
+                    shutdown: shutdown_clone,
+                    workers_completed: workers_completed_clone,
+                    tsc_frequency: self.platform_data.tsc_frequency,
+                    is_one_shot,
+                    control_rx: worker_control_rx,
+                    control_senders: worker_control_senders,
+                },
             );
 
             handles.push(handle);

@@ -17,21 +17,21 @@ Wasm address 0                                      Wasm address 2 GiB
 ```
 
 The UMEM itself has no reserved prefix or control block. Every frame is
-available to AF_XDP queues. Mailboxes are outside the UMEM and are therefore
-never offered to the NIC. Each Wasm instance gets its own mailbox, while all
+available to AF_XDP queues. Each Wasm instance gets its own mailbox, while all
 instances see the same packet frames through their UMEM alias.
 
 The host keeps packet descriptor addresses relative to the native UMEM base.
-The UMEM starts at `MAX_WASM_HEAP_BYTES` in Wasm memory, so the host passes:
+The UMEM starts at `MAX_WASM_HEAP_BYTES` in Wasm memory, so the host passes the
+positive offset directly:
 
 ```text
-wasm_partition_offset = 0 - MAX_WASM_HEAP_BYTES   (u32 wrapping arithmetic)
+umem_offset = MAX_WASM_HEAP_BYTES
 ```
 
 The guest computes the Wasm address of a UMEM-relative descriptor as:
 
 ```text
-umem_addr = 0u32.wrapping_sub(partition_offset)
+umem_addr = umem_offset
 packet_wasm_addr = umem_addr + desc.addr
 ```
 
@@ -39,6 +39,11 @@ For the current mapping this is equivalent to adding 2 GiB to the UMEM
 offset. The same UMEM-relative descriptor can therefore be used by every
 instance, while each instance's private mailbox is addressed by its own
 Wasm-linear `mailbox_offset`.
+
+The host must keep `umem_offset + desc.addr + packet_length` within the
+stitched mapping. For a `wasm32` guest, the complete stitched range must also
+remain within the 4 GiB linear address space. The current ABI carries the
+base offset as `u32`, while descriptor offsets are retained as `u64`.
 
 ## Mailboxes
 

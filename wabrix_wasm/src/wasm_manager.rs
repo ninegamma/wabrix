@@ -52,9 +52,9 @@ thread_local! {
 /// [0 .. total_size)                                       AF_XDP payload frames
 /// ```
 /// Each instance aliases the complete UMEM, so packet descriptors remain
-/// UMEM-relative while mailbox offsets are Wasm-linear addresses. The host passes
-/// `wasm_partition_offset = 0 - MAX_WASM_HEAP_BYTES`
-/// through the existing ABI. The plugin then computes:
+/// UMEM-relative while mailbox offsets are Wasm-linear addresses. The host
+/// passes `umem_offset = MAX_WASM_HEAP_BYTES` through the existing ABI. The
+/// plugin then computes:
 /// ```text
 /// linear_memory_base + mailbox_offset
 ///     == this instance's private BatchMetadata mailbox
@@ -96,17 +96,10 @@ impl UmemHandle {
         }
     }
 
-    /// Offset of the UMEM from the base pointer exposed as Wasm memory 0.
+    /// Positive Wasm-linear offset where the shared UMEM begins.
     #[inline]
-    pub fn wasm_umem_offset(&self) -> usize {
-        MAX_WASM_HEAP_BYTES
-    }
-
-    /// ABI value which makes `umem_base + desc_addr` point into the UMEM
-    /// portion of the stitched linear memory.
-    #[inline]
-    pub fn wasm_partition_offset(&self) -> u32 {
-        0u32.wrapping_sub(self.wasm_umem_offset() as u32)
+    pub fn wasm_umem_offset(&self) -> u32 {
+        MAX_WASM_HEAP_BYTES as u32
     }
 
     #[inline]

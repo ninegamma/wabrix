@@ -237,9 +237,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     loop {
-        let next_cmd;
-
-        if dataplane_active {
+        let next_cmd = if dataplane_active {
             info!("--- Initializing Data Plane ---");
 
             let action = {
@@ -491,18 +489,18 @@ async fn main() -> anyhow::Result<()> {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             info!("Data plane teardown complete.");
 
-            next_cmd = action;
+            action
         } else {
             // Idle state handling
             info!("Dataplane is currently OFFLINE. Awaiting CLI commands...");
 
-            next_cmd = tokio::select! {
+            tokio::select! {
                 _ = tokio::signal::ctrl_c() => SystemCommand::Shutdown,
                 _ = terminate_signal.recv() => SystemCommand::Shutdown,
                 Some(c) = cmd_rx.recv() => c,
                 else => SystemCommand::Shutdown,
-            };
-        }
+            }
+        };
 
         // State machine evaluation
         match next_cmd {

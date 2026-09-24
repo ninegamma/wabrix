@@ -134,7 +134,7 @@ impl Pdu {
         frame_size_log2: u8,
     ) -> Self {
         let w = WPdu::new(
-            desc.addr() as u64,
+            desc.addr(),
             desc.length(),
             desc.options(),
             global_frame_idx,

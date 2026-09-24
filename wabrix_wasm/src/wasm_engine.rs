@@ -60,7 +60,7 @@ pub struct WasmEngine {
     telemetry_metrics: TelemetryMetrics,
     /// ABI offset used to translate UMEM-relative packet descriptors into the
     /// stitched linear memory (heap below, UMEM above).
-    partition_offset: u32,
+    umem_offset: u32,
     /// Wasm-linear-memory offset of this instance's private mailbox.
     mailbox_offset: u32,
     /// The Umem this node is bound to. Every incoming PDU must carry this id.
@@ -203,7 +203,7 @@ impl WasmEngine {
             #[cfg(feature = "profiling")]
             total_cycles: 0,
             telemetry_metrics,
-            partition_offset: partition_handle.wasm_partition_offset(),
+            umem_offset: partition_handle.wasm_umem_offset(),
             mailbox_offset,
             umem_id,
             supports_oob_telemetry: false,
@@ -270,7 +270,7 @@ impl WasmEngine {
             .call_process_batch(
                 &mut self.store,
                 len as u32,
-                self.partition_offset,
+                self.umem_offset,
                 self.mailbox_offset,
             )
             .unwrap_or_else(|e| {
@@ -742,27 +742,25 @@ impl Node for WasmEngine {
 
 impl Drop for WasmEngine {
     fn drop(&mut self) {
-        if !self.timer_diagnostics_enabled {
-            return;
+        if self.timer_diagnostics_enabled {
+            #[cfg(feature = "runtime-diagnostics")]
+            log::info!(
+                "NODE {}: final timer runtime counters: pipeline='{}', worker_id={}, worker_index={}, requested={}, allocated={}, unallocated={}, routed={}, retained={}, allocation_shortfalls={}, batch_mismatches={}, mailbox_conservation_failures={}, route_counts={:?}",
+                self.id,
+                self.pipeline_name,
+                self.worker_id,
+                self.worker_index,
+                self.timer_requested_frames,
+                self.timer_allocated_frames,
+                self.timer_requested_frames
+                    .saturating_sub(self.timer_allocated_frames),
+                self.timer_routed_frames,
+                self.timer_retained_frames,
+                self.timer_allocation_shortfalls,
+                self.timer_batch_mismatches,
+                self.mailbox_conservation_failures,
+                self.timer_route_counts,
+            );
         }
-
-        #[cfg(feature = "runtime-diagnostics")]
-        log::info!(
-            "NODE {}: final timer runtime counters: pipeline='{}', worker_id={}, worker_index={}, requested={}, allocated={}, unallocated={}, routed={}, retained={}, allocation_shortfalls={}, batch_mismatches={}, mailbox_conservation_failures={}, route_counts={:?}",
-            self.id,
-            self.pipeline_name,
-            self.worker_id,
-            self.worker_index,
-            self.timer_requested_frames,
-            self.timer_allocated_frames,
-            self.timer_requested_frames
-                .saturating_sub(self.timer_allocated_frames),
-            self.timer_routed_frames,
-            self.timer_retained_frames,
-            self.timer_allocation_shortfalls,
-            self.timer_batch_mismatches,
-            self.mailbox_conservation_failures,
-            self.timer_route_counts,
-        );
     }
 }

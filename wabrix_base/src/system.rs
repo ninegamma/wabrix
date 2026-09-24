@@ -832,7 +832,7 @@ fn build_generic_netlink_request(
 fn netlink_attrs(payload: &[u8]) -> impl Iterator<Item = (u16, &[u8])> {
     let mut offset = 0;
     std::iter::from_fn(move || {
-        while offset + NLA_HEADER_LEN <= payload.len() {
+        if offset + NLA_HEADER_LEN <= payload.len() {
             let length = u16::from_ne_bytes([payload[offset], payload[offset + 1]]) as usize;
             let kind = u16::from_ne_bytes([payload[offset + 2], payload[offset + 3]]) & 0x3fff;
             if length < NLA_HEADER_LEN || offset + length > payload.len() {

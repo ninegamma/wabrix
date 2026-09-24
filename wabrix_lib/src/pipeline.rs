@@ -1518,27 +1518,33 @@ fn cpu_seconds(cycles: u64, tsc_frequency: u64) -> String {
 /// When a worker has multiple pipelines assigned, this spawns them all
 /// and runs them cooperatively (round-robin style) on the same core.
 ///
-/// # Arguments
-/// * `runners` - Vector of PipelineRunners for this worker
-/// * `core_id` - Logical core ID to pin to
-/// * `frame_registry` - The worker's frame registry (one per worker)
-/// * `shutdown` - Shutdown signal
-/// * `platform_data` - Platform data including TSC frequency
-///
 /// # Returns
 /// JoinHandle that resolves to aggregated statistics
+pub struct WorkerPipelineSpawnConfig {
+    pub core_id: CoreId,
+    pub frame_registry: wabrix_base::frame_registry::FrameRegistry,
+    pub shutdown: Arc<AtomicBool>,
+    pub workers_completed: Arc<AtomicUsize>,
+    pub tsc_frequency: u64,
+    pub is_one_shot: bool,
+    pub control_rx: Option<Receiver<Arc<ControlEvent>>>,
+    pub control_senders: Vec<crossbeam_channel::Sender<Arc<ControlEvent>>>,
+}
+
 pub fn spawn_worker_pipelines(
     mut runners: Vec<PipelineRunner>,
-    core_id: CoreId,
-    mut frame_registry: wabrix_base::frame_registry::FrameRegistry,
-    shutdown: Arc<AtomicBool>,
-    workers_completed: Arc<AtomicUsize>,
-    platform_data: &PlatformData,
-    is_one_shot: bool,
-    mut control_rx: Option<Receiver<Arc<ControlEvent>>>,
-    control_senders: Vec<crossbeam_channel::Sender<Arc<ControlEvent>>>,
+    config: WorkerPipelineSpawnConfig,
 ) -> tokio::task::JoinHandle<Result<Vec<PipelineStats>, String>> {
-    let tsc_freq = platform_data.tsc_frequency;
+    let WorkerPipelineSpawnConfig {
+        core_id,
+        mut frame_registry,
+        shutdown,
+        workers_completed,
+        tsc_frequency: tsc_freq,
+        is_one_shot,
+        mut control_rx,
+        control_senders,
+    } = config;
 
     // Capture the TSC start timestamp
     let tsc_start: u64;

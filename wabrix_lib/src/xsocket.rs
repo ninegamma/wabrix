@@ -462,7 +462,7 @@ impl XSocket {
                                                                       // Socket splitting can happen before the worker initializes its
                                                                       // thread-local TSC frequency. Keep the same 2.5 GHz fallback used by
                                                                       // `rdtsc_us()` so the NAPI poll interval never becomes zero.
-        let tsc_frequency = try_get_tsc_frequency().unwrap_or_else(|| 2_500_000_000);
+        let tsc_frequency = try_get_tsc_frequency().unwrap_or(2_500_000_000);
         let napi_poll_target_cycles =
             (((target_us as u128) * (tsc_frequency as u128)) / 1_000_000).max(1) as u64;
         let napi_poll_timeout = rustix::time::Timespec {
@@ -646,18 +646,17 @@ impl XSocketRx {
 
         self.fill_replenish_attempts += 1;
 
-        if requested_count > MAX_FILL {
-            if self
+        if requested_count > MAX_FILL
+            && self
                 .fill_replenish_attempts
                 .is_multiple_of(RX_DIAGNOSTIC_LOG_INTERVAL)
-            {
-                log::warn!(
-                    "Requested {} frames to replenish Fill Queue, but max is {} (attempt {})",
-                    requested_count,
-                    MAX_FILL,
-                    self.fill_replenish_attempts
-                );
-            }
+        {
+            log::warn!(
+                "Requested {} frames to replenish Fill Queue, but max is {} (attempt {})",
+                requested_count,
+                MAX_FILL,
+                self.fill_replenish_attempts
+            );
         }
 
         let requested_count = requested_count.min(MAX_FILL);
@@ -835,7 +834,7 @@ impl XSocketRx {
                 "Worker {}: Replenished {} frames to {} queue {} Fill Ring, free frames remaining: {}",
                 self.config.worker_id,
                 produced,
-                &self.config.interface,
+                self.config.interface,
                 self.config.queue_id,
                 frame_registry.total_free_frames()
             );
@@ -1318,7 +1317,7 @@ impl BatchRx for XSocketRx {
                 && desc.addr() >= RX_METADATA_HEADROOM as u64
             {
                 let timestamp_ptr = unsafe {
-                    (self.umem.as_ptr() as *const u8)
+                    self.umem.as_ptr()
                         .add(desc.addr() as usize - RX_METADATA_HEADROOM)
                         as *const u64
                 };
@@ -1677,7 +1676,7 @@ impl XSocketTx {
                     self.config.worker_id,
                     self.config.interface,
                     self.config.queue_id,
-                    &self.total_consumed
+                    self.total_consumed
                 );
                 self.last_logged_block = current_block;
             }
