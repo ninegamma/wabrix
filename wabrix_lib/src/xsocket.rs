@@ -65,6 +65,8 @@ const NAPI_DIAGNOSTIC_LOG_INTERVAL: u64 = 100_000;
 /// Split components for independent RX and TX access
 /// These DO NOT own the frame registry - it's accessed via thread-local storage
 pub struct XSocketRx {
+    /// Worker that owns this RX half. This may differ from the TX owner.
+    worker_id: usize,
     umem: Arc<Umem>,
     rx_metadata_enabled: bool,
     fill_queue: Arc<Mutex<FillQueue>>,
@@ -128,6 +130,8 @@ pub struct XSocketRx {
 }
 
 pub struct XSocketTx {
+    /// Worker that owns this TX half. This may differ from the RX owner.
+    worker_id: usize,
     umem: Arc<Umem>,
     comp_descs_helper: Vec<u64>,
     comp_queue: Arc<Mutex<CompQueue>>,
@@ -481,6 +485,7 @@ impl XSocket {
         }
 
         let rx = XSocketRx {
+            worker_id: self.config.worker_id,
             umem: self.umem.clone(),
             rx_metadata_enabled: self.config.rx_timestamp,
             fill_queue: self.fill_queue.clone(),
@@ -537,6 +542,7 @@ impl XSocket {
         };
 
         let tx = XSocketTx {
+            worker_id: self.config.worker_id,
             umem: self.umem,
             comp_descs_helper: vec![0; 4 * MAX_BATCH_SIZE],
             comp_queue: self.comp_queue,
@@ -566,6 +572,11 @@ use wabrix_base::system::{rdtsc_us, try_get_tsc_frequency};
 use wabrix_base::{RuntimeUmemConfig, SystemBus};
 
 impl XSocketRx {
+    /// Rebind this half to the worker that takes ownership of it.
+    pub(crate) fn assign_worker_id(&mut self, worker_id: usize) {
+        self.worker_id = worker_id;
+    }
+
     /// Returns the UMEM group ID for this socket
     #[inline]
     pub fn umem_group_id(&self) -> usize {
@@ -832,7 +843,7 @@ impl XSocketRx {
             }
             log::trace!(
                 "Worker {}: Replenished {} frames to {} queue {} Fill Ring, free frames remaining: {}",
-                self.config.worker_id,
+                self.worker_id,
                 produced,
                 self.config.interface,
                 self.config.queue_id,
@@ -915,6 +926,21 @@ impl XSocketRx {
         }
 
         produced
+    }
+}
+
+impl XSocketRx {
+    fn determine_owner(&self, frame_idx: u32) -> usize {
+        for partition in &self.bus.umem_partitions {
+            if partition.owns_encoded(frame_idx) {
+                return partition.worker_id;
+            }
+        }
+        log::warn!(
+            "determine_owner: no partition owns frame_idx={}, defaulting to worker 0",
+            frame_idx
+        );
+        0
     }
 }
 
@@ -1297,7 +1323,6 @@ impl BatchRx for XSocketRx {
         // 6. Process the received packets
         let frame_size_log2 = self.config.umem_config.frame_size_log2;
         let bus_ptr = &*self.bus as *const _;
-        let worker_id = self.config.worker_id as u8;
         let group_id = self.config.umem_config.group_id;
 
         // This guarantees zero bounds-checking overhead
@@ -1307,29 +1332,33 @@ impl BatchRx for XSocketRx {
             // Replaces ~20 cycle division with a 1 cycle shift
             let local_idx = (desc.addr() as u32) >> frame_size_log2; // local_idx is wrt. current Umem
             let global_idx = encode_global_frame(group_id, local_idx);
+            // The worker owning the RX ring is not necessarily the owner of
+            // this frame. The initial Fill Queue may contain frames supplied
+            // by another worker, and frames returned through the shared bus
+            // retain their original partition ownership.
+            let frame_owner = self.determine_owner(global_idx) as u8;
 
-            let mut pdu = Pdu::new(*desc, global_idx, worker_id, bus_ptr, frame_size_log2);
+            let mut pdu = Pdu::new(*desc, global_idx, frame_owner, bus_ptr, frame_size_log2);
 
             // XDP writes the hardware RX timestamp into the UMEM headroom
             // immediately before packet data. A zero value means the driver
             // did not provide a timestamp for this packet.
-            let hardware_timestamp = if self.rx_metadata_enabled
-                && desc.addr() >= RX_METADATA_HEADROOM as u64
-            {
-                let timestamp_ptr = unsafe {
-                    self.umem.as_ptr()
-                        .add(desc.addr() as usize - RX_METADATA_HEADROOM)
-                        as *const u64
+            let hardware_timestamp =
+                if self.rx_metadata_enabled && desc.addr() >= RX_METADATA_HEADROOM as u64 {
+                    let timestamp_ptr = unsafe {
+                        self.umem
+                            .as_ptr()
+                            .add(desc.addr() as usize - RX_METADATA_HEADROOM)
+                            as *const u64
+                    };
+                    unsafe { timestamp_ptr.read_unaligned() }
+                } else {
+                    0
                 };
-                unsafe { timestamp_ptr.read_unaligned() }
-            } else {
-                0
-            };
             pdu.w.set_rx_timestamp(hardware_timestamp);
             // Keep the existing host-TSC timestamp for latency calculations;
             // hardware RX time is exposed separately through rx_timestamp().
-            pdu.w
-                .set_timestamp(unsafe { core::arch::x86_64::_rdtsc() });
+            pdu.w.set_timestamp(unsafe { core::arch::x86_64::_rdtsc() });
 
             // Since we ALREADY calculated max_to_pull to guarantee capacity,
             // we can confidently unwrap/ignore the error branch.
@@ -1476,14 +1505,14 @@ impl BatchTx for XSocketTx {
                 drop(tx_guard);
                 log::warn!(
                     "🔥 [TX SATURATED] Worker {} Queue {}: TX Ring is 100% full! (Batch size: {}). Wasm engine is outrunning the hardware.",
-                    self.config.worker_id, self.config.queue_id, original_batch_len
+                    self.worker_id, self.config.queue_id, original_batch_len
                 );
                 return Ok(0);
             }
         } else if free_slots < original_batch_len {
             log::info!(
                 "⚠️ [TX BACKPRESSURE] Worker {} Queue {}: Batch of {} packets, but only {} TX slots free.",
-                self.config.worker_id,
+                self.worker_id,
                 self.config.queue_id,
                 original_batch_len,
                 free_slots
@@ -1542,7 +1571,7 @@ impl BatchTx for XSocketTx {
                         // 🚨 PROBE 3: UMEM STARVATION 🚨
                         log::error!(
                             "🩸 [UMEM STARVATION] Worker {}: Failed to allocate frame in UMEM {} for cross-pool swap! Free frames: {}",
-                            self.config.worker_id, my_umem_id, frame_registry.total_free_frames()
+                            self.worker_id, my_umem_id, frame_registry.total_free_frames()
                         );
                         break;
                     }
@@ -1617,6 +1646,11 @@ impl BatchTx for XSocketTx {
 
 // Add helper methods for XSocketTx
 impl XSocketTx {
+    /// Rebind this half to the worker that takes ownership of it.
+    pub(crate) fn assign_worker_id(&mut self, worker_id: usize) {
+        self.worker_id = worker_id;
+    }
+
     /// Give the kernel an opportunity to run NAPI and complete TX descriptors.
     ///
     /// The completion queue is consumed by userspace, so `POLLOUT` readiness
@@ -1644,7 +1678,7 @@ impl XSocketTx {
             // If the flag is set:
             unsafe {
                 if self.tx_queue.needs_wakeup() {
-                    //trace!("Worker {}: TX Queue needs wakeup! Triggering syscall...", self.config.worker_id);
+                    //trace!("Worker {}: TX Queue needs wakeup! Triggering syscall...", self.worker_id);
                     // The sendto call with MSG_DONTWAIT and 0 len is the standard wakeup trigger
                     let ret = libc::sendto(self.fd, std::ptr::null(), 0, libc::MSG_DONTWAIT, std::ptr::null_mut(), 0);
                     if ret < 0 {
@@ -1673,7 +1707,7 @@ impl XSocketTx {
             if current_block > self.last_logged_block {
                 log::trace!(
                     "Worker {}, I/f {}, Queue {}: Drained {} frames from completion queue",
-                    self.config.worker_id,
+                    self.worker_id,
                     self.config.interface,
                     self.config.queue_id,
                     self.total_consumed
@@ -1694,7 +1728,7 @@ impl XSocketTx {
                 let global_idx = encode_global_frame(self.config.umem_config.group_id, local_idx);
                 trace!(
                     "drain_completion_queue: Worker {}: Releasing frame_idx={} (local_idx={}, umem_group_id={})",
-                    self.config.worker_id,
+                    self.worker_id,
                     global_idx,
                     local_idx,
                     self.config.umem_config.group_id
@@ -1709,7 +1743,7 @@ impl XSocketTx {
                 if pending_in_hardware > 10000 {
                     log::warn!(
                         "👻 [CQ GHOST TOWN] Worker {} Queue {}: {} packets sent to TX, but NIC has not completed them! Hardware stall imminent.",
-                        self.config.worker_id, self.config.queue_id, pending_in_hardware
+                        self.worker_id, self.config.queue_id, pending_in_hardware
                     );
                 }
             }
@@ -1722,29 +1756,26 @@ impl XSocketTx {
         /*
         log::trace!(
             "Worker {}: Releasing frame_idx={}, determined owner={}, my worker_id={}",
-            self.config.worker_id,
+            self.worker_id,
             frame_idx,
             owner,
-            self.config.worker_id
+            self.worker_id
         );
         */
         // FAST PATH: If the frame belongs to this worker, bypass the MPSC channel entirely!
-        if owner == self.config.worker_id {
+        if owner == self.worker_id {
             unsafe {
                 let registry_ptr = wabrix_base::frame_registry::get_worker_frame_registry();
                 if !registry_ptr.is_null() {
                     trace!(
                         "Worker {}: Released frame {} to local registry (fast path)",
-                        self.config.worker_id,
+                        self.worker_id,
                         frame_idx
                     );
                     (*registry_ptr).release_local(frame_idx);
                     return;
                 } else {
-                    log::warn!(
-                        "Worker {}: Frame registry ptr is null!",
-                        self.config.worker_id
-                    );
+                    log::warn!("Worker {}: Frame registry ptr is null!", self.worker_id);
                 }
             }
         }
@@ -1752,7 +1783,7 @@ impl XSocketTx {
         // SLOW PATH: Only use the cross-thread bus for frames belonging to OTHER workers
         log::trace!(
             "Worker {}: Sending frame {} to owner {} via bus (slow path)",
-            self.config.worker_id,
+            self.worker_id,
             frame_idx,
             owner
         );

@@ -323,12 +323,11 @@ async fn main() -> anyhow::Result<()> {
                     .filter(|iface| iface.rx_timestamp)
                     .map(|iface| iface.name.clone())
                     .collect();
-                let (interface_skels, _xdp_links) =
-                    wabrix_lib::config::configure_bpf::setup_bpf(
-                        interfaces.clone(),
-                        &rx_timestamp_ifaces,
-                    )
-                        .context("Failed to setup BPF programs")?;
+                let (interface_skels, _xdp_links) = wabrix_lib::config::configure_bpf::setup_bpf(
+                    interfaces.clone(),
+                    &rx_timestamp_ifaces,
+                )
+                .context("Failed to setup BPF programs")?;
 
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 

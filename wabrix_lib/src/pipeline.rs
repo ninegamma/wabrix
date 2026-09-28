@@ -81,20 +81,20 @@ fn restore_worker_scheduling(worker_id: usize) {
 
 /// Trait for managing XDP socket access
 /// This abstracts away the details of how XDP sockets are stored and retrieved
-/// Note: XSockets implement both BatchRx and BatchTx
+/// RX and TX halves of one AF_XDP socket may be assigned to different workers.
 pub trait XSocketRxTxProvider {
-    /// Get an owned XSocket for RX operations on a specific queue and interface
-    /// The socket implements both BatchRx and BatchTx
+    /// Take the RX half of a socket for the requested worker.
     fn take_rx_socket(
         &mut self,
+        worker_id: usize,
         queue_id: usize,
         interface: &str,
     ) -> Option<Box<dyn BatchRx + Send>>;
 
-    /// Get an owned XSocket for TX operations on a specific queue and interface
-    /// The socket implements both BatchRx and BatchTx
+    /// Take the TX half of a socket for the requested worker.
     fn take_tx_socket(
         &mut self,
+        worker_id: usize,
         queue_id: usize,
         interface: &str,
     ) -> Option<Box<dyn BatchTx + Send>>;
@@ -235,10 +235,12 @@ impl PipelineFactory {
                         ));
                     }
                     // Take ownership of the RX component of the socket
-                    let rx_source = xsocket_mgr.take_rx_socket(queue_id, iface).ok_or(format!(
-                        "Could not find RX socket for queue {} / iface {}",
-                        queue_id, iface
-                    ))?;
+                    let rx_source = xsocket_mgr
+                        .take_rx_socket(worker_id, queue_id, iface)
+                        .ok_or(format!(
+                            "Could not find RX socket for queue {} / iface {}",
+                            queue_id, iface
+                        ))?;
 
                     Box::new(BatchRxNode::new(
                         my_id.clone(),
@@ -509,18 +511,17 @@ impl PipelineFactory {
                     // NEW: Resolve WASM properties if the feature is enabled
                     // =========================================================
                     #[cfg(feature = "wasm")]
-                    let (wasm_mgr_opt, wasm_path_opt) = if let Some(path) =
-                        node_instance.node_config.args.get("wasm_file_path")
-                    {
-                        let manager = wasm_managers[umem_group_id].as_ref().ok_or(format!(
-                            "PacketGenerator {}: no WasmManager for umem {}",
-                            node_instance.node_config.id, umem_group_id
-                        ))?;
+                    let (wasm_mgr_opt, wasm_path_opt) =
+                        if let Some(path) = node_instance.node_config.args.get("wasm_file_path") {
+                            let manager = wasm_managers[umem_group_id].as_ref().ok_or(format!(
+                                "PacketGenerator {}: no WasmManager for umem {}",
+                                node_instance.node_config.id, umem_group_id
+                            ))?;
 
-                        (Some(manager.as_ref()), Some(path.as_str()))
-                    } else {
-                        (None, None)
-                    };
+                            (Some(manager.as_ref()), Some(path.as_str()))
+                        } else {
+                            (None, None)
+                        };
 
                     Box::new(GeneratorNode::new(
                         my_id.clone(),
@@ -572,10 +573,12 @@ impl PipelineFactory {
                     let queue_id = node_instance.node_config.queues.as_ref().unwrap()[0] as usize;
 
                     // Take ownership of the TX component of the socket
-                    let tx_sink = xsocket_mgr.take_tx_socket(queue_id, iface).ok_or(format!(
-                        "Could not find TX socket for queue {} / iface {}",
-                        queue_id, iface
-                    ))?;
+                    let tx_sink = xsocket_mgr
+                        .take_tx_socket(worker_id, queue_id, iface)
+                        .ok_or(format!(
+                            "Could not find TX socket for queue {} / iface {}",
+                            queue_id, iface
+                        ))?;
 
                     Box::new(BatchTxNode::new(my_id.clone(), tx_sink))
                 }

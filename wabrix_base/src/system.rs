@@ -1191,10 +1191,7 @@ pub fn probe_xdp_interfaces() {
                     }
                 })
                 .unwrap_or_else(|| "?".to_string());
-            [
-                r.name.clone(),
-                feature_names,
-            ]
+            [r.name.clone(), feature_names]
         })
         .collect();
     let xsk_widths: Vec<usize> = (0..xsk_headers.len())

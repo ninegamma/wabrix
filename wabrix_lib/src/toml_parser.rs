@@ -1354,13 +1354,15 @@ impl WabricksConfig {
             }
         }
 
-        // 7. Validate no duplicate queue assignments across pipelines
-        // Build a map of (interface, queue) -> (pipeline_name, node_id, worker_id)
-        // to detect conflicts where two different pipeline instances try to use the same queue
+        // 7. Validate no duplicate ring assignments across pipelines
+        // RX and TX halves of one AF_XDP socket may belong to different workers,
+        // but each direction may have only one owner.
         use std::collections::HashMap;
         #[allow(clippy::type_complexity)]
-        let mut queue_assignments: HashMap<(String, u32), Vec<(String, String, usize)>> =
-            HashMap::new();
+        let mut queue_assignments: HashMap<
+            (String, u32, &'static str),
+            Vec<(String, String, usize)>,
+        > = HashMap::new();
 
         for pipeline in &self.pipelines {
             for node in &pipeline.nodes {
@@ -1372,7 +1374,12 @@ impl WabricksConfig {
                             for (idx, &queue_id) in queues.iter().enumerate() {
                                 if idx < pipeline.workers.len() {
                                     let worker_id = pipeline.workers[idx];
-                                    let key = (interface.clone(), queue_id);
+                                    let direction = if node.node_type == "BatchRxNode" {
+                                        "rx"
+                                    } else {
+                                        "tx"
+                                    };
+                                    let key = (interface.clone(), queue_id, direction);
 
                                     queue_assignments.entry(key).or_default().push((
                                         pipeline.name.clone(),
@@ -1387,8 +1394,8 @@ impl WabricksConfig {
             }
         }
 
-        // Check for conflicts: same (interface, queue) assigned to multiple workers
-        for ((interface, queue_id), assignments) in &queue_assignments {
+        // Check for conflicts: same ring assigned to multiple workers.
+        for ((interface, queue_id, direction), assignments) in &queue_assignments {
             if assignments.len() > 1 {
                 // Check if all assignments are to the same worker (allowed - same pipeline instance)
                 let first_worker = assignments[0].2;
@@ -1404,9 +1411,10 @@ impl WabricksConfig {
                         .collect();
 
                     return Err(anyhow!(
-                        "Queue conflict: interface '{}' queue {} is assigned to multiple workers:\n  {}",
+                        "Queue conflict: interface '{}' queue {} {} ring is assigned to multiple workers:\n  {}",
                         interface,
                         queue_id,
+                        direction,
                         conflict_details.join("\n  ")
                     ));
                 }
@@ -1499,6 +1507,12 @@ impl WabricksConfig {
         let mut iface_serving_cores: HashMap<String, Vec<usize>> = HashMap::new();
         for pipeline in &self.pipelines {
             for node in &pipeline.nodes {
+                // IRQ/NAPI affinity follows the RX ring owner. A TX-only
+                // worker may legitimately run on another core when RX and TX
+                // halves of an AF_XDP socket are split.
+                if node.node_type != "BatchRxNode" {
+                    continue;
+                }
                 if let Some(iface) = node.args.get("interface") {
                     if let Some(queues) = &node.queues {
                         for (idx, _) in queues.iter().enumerate() {
@@ -1563,9 +1577,9 @@ impl WabricksConfig {
             worker_core_map[w.id] = Some(w.core);
         }
 
-        // Map: (Interface Name, Queue ID) -> Worker ID
-        // We scan all pipelines to discover which worker is assigned to which queue.
-        let mut queue_owner_map: HashMap<(String, u32), usize> = HashMap::new();
+        // Map each ring direction independently. RX and TX halves of one AF_XDP
+        // socket may intentionally belong to different workers.
+        let mut queue_owner_map: HashMap<(String, u32, &'static str), usize> = HashMap::new();
 
         for pipeline in &self.pipelines {
             for node in &pipeline.nodes {
@@ -1584,25 +1598,33 @@ impl WabricksConfig {
 
                     // Try to identify the interface. Usually passed in 'args'.
                     // If 'interface' is missing, we skip mapping (assuming it's not a hardware-bound node).
-                    if let Some(iface) = node.args.get("interface") {
+                    let direction = match node.node_type.as_str() {
+                        "BatchRxNode" => Some("rx"),
+                        "BatchTxNode" => Some("tx"),
+                        _ => None,
+                    };
+
+                    if let (Some(iface), Some(direction)) = (node.args.get("interface"), direction)
+                    {
                         for (i, &queue_id) in queues.iter().enumerate() {
                             let worker_id = pipeline.workers[i];
 
-                            // Detect conflicts: Two workers cannot own the same queue
+                            // Detect conflicts: each ring direction has one owner.
                             if let Some(&existing_owner) =
-                                queue_owner_map.get(&(iface.clone(), queue_id))
+                                queue_owner_map.get(&(iface.clone(), queue_id, direction))
                             {
                                 if existing_owner != worker_id {
                                     return Err(anyhow!(
-                                        "Configuration Conflict: Interface '{}' Queue {} is assigned to both Worker {} and Worker {}",
+                                        "Configuration Conflict: Interface '{}' Queue {} {} ring is assigned to both Worker {} and Worker {}",
                                         iface,
                                         queue_id,
+                                        direction,
                                         existing_owner,
                                         worker_id
                                     ));
                                 }
                             }
-                            queue_owner_map.insert((iface.clone(), queue_id), worker_id);
+                            queue_owner_map.insert((iface.clone(), queue_id, direction), worker_id);
                         }
                     }
                 }
@@ -1644,10 +1666,15 @@ impl WabricksConfig {
             })?;
 
             for &queue_id in &xsk_map.queues {
-                // Find who owns this queue (Worker & Core)
-                let worker_id = *queue_owner_map.get(&(xsk_map.iface.clone(), queue_id))
+                // The socket is created using the RX owner when present. The
+                // RX and TX halves are rebound to their actual workers when
+                // the pipeline nodes take ownership of them.
+                let worker_id = queue_owner_map
+                    .get(&(xsk_map.iface.clone(), queue_id, "rx"))
+                    .or_else(|| queue_owner_map.get(&(xsk_map.iface.clone(), queue_id, "tx")))
+                    .copied()
                     .ok_or_else(|| anyhow!(
-                        "XSK Config Error: Interface '{}' Queue {} is defined but not assigned to any Worker in the pipelines.",
+                        "XSK Config Error: Interface '{}' Queue {} is defined but neither its RX nor TX ring is assigned to a worker.",
                         xsk_map.iface, queue_id
                     ))?;
 

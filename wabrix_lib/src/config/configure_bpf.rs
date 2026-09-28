@@ -80,7 +80,8 @@ pub fn setup_bpf(
                 Err(metadata_error) => {
                     log::warn!(
                         "RX metadata kfunc unavailable on {}; loading fallback XDP program: {}",
-                        iface_name, metadata_error
+                        iface_name,
+                        metadata_error
                     );
 
                     let fallback_builder = XscrubberSkelBuilder::default();
@@ -95,9 +96,7 @@ pub fn setup_bpf(
         let link_xdp = if metadata_enabled {
             skel.progs.xdp_dispatch.attach_xdp(ifindex as i32)
         } else {
-            skel.progs
-                .xdp_dispatch_fallback
-                .attach_xdp(ifindex as i32)
+            skel.progs.xdp_dispatch_fallback.attach_xdp(ifindex as i32)
         }
         .map_err(|e| {
             error!("Failed to attach XDP program to {}: {}", iface_name, e);

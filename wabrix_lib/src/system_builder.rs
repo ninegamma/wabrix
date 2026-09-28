@@ -498,6 +498,7 @@ impl XSocketRegistry {
 impl crate::pipeline::XSocketRxTxProvider for XSocketRegistry {
     fn take_rx_socket(
         &mut self,
+        worker_id: usize,
         queue_id: usize,
         interface: &str,
     ) -> Option<Box<dyn BatchRx + Send>> {
@@ -505,11 +506,15 @@ impl crate::pipeline::XSocketRxTxProvider for XSocketRegistry {
         self.sockets
             .get_mut(&key)
             .and_then(|(rx_opt, _tx_opt)| rx_opt.take())
-            .map(|rx| Box::new(rx) as Box<dyn BatchRx + Send>)
+            .map(|mut rx| {
+                rx.assign_worker_id(worker_id);
+                Box::new(rx) as Box<dyn BatchRx + Send>
+            })
     }
 
     fn take_tx_socket(
         &mut self,
+        worker_id: usize,
         queue_id: usize,
         interface: &str,
     ) -> Option<Box<dyn BatchTx + Send>> {
@@ -517,7 +522,10 @@ impl crate::pipeline::XSocketRxTxProvider for XSocketRegistry {
         self.sockets
             .get_mut(&key)
             .and_then(|(_rx_opt, tx_opt)| tx_opt.take())
-            .map(|tx| Box::new(tx) as Box<dyn BatchTx + Send>)
+            .map(|mut tx| {
+                tx.assign_worker_id(worker_id);
+                Box::new(tx) as Box<dyn BatchTx + Send>
+            })
     }
 }
 

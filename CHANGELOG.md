@@ -40,5 +40,49 @@ AF_XDP UMEM ownership across workers and Wasm instances.
 
 ## [0.3.0]
 
-Baseline release before the shared Wasm memory and positive UMEM offset work
-described in 0.4.0.
+Release before the shared Wasm memory and positive UMEM offset work described
+in 0.4.0.
+
+### Added
+
+- NAPI-aware polling, busy-poll configuration, and interface-aware IRQ
+  affinity checks.
+- SMT-aware pre-flight diagnostics and restoration of interface settings after
+  NAPI configuration changes.
+
+### Changed
+
+- Improved AF_XDP receive performance and timestamp telemetry validation.
+- Updated the workspace to the xsk-rs 0.10.0 API baseline.
+
+## [0.2.0] - 2026-08-25
+
+Release tag: `f3e9d3c9`.
+
+### Added
+
+- Unified Wasm engines and multi-worker runtime diagnostics.
+- Generator-engine token-bucket rate control, runtime diagnostics, SYN and UDP
+  generation, protocol selection, and hot-update support.
+- Delayed `Running` lifecycle handling and timer-aware worker scheduling.
+- TSC timestamp support, Grafana dashboards, and expanded monitoring.
+- SMT-aware IRQ affinity warnings and improved data-plane telemetry.
+
+### Fixed
+
+- Preserved SYN timer reservations and added Wasm batch validation.
+- Improved data-plane latency and configuration handling.
+- Resolved xsk-rs 0.9 dependency issues through local patches.
+
+## [0.1.0] - 2026-08-07
+
+Stable data-plane baseline before the Wasm multi-memory work.
+
+### Added
+
+- Initial workspace split into the core Wabrix crates and public plugin/API
+  components.
+- AF_XDP dataplane, pipeline, telemetry, configuration, and Wasm host
+  foundations.
+
+Release tag: `v0.1.0` (`eef29e7`).
