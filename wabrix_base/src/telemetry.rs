@@ -8,6 +8,10 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::broadcast::Sender;
 use ts_rs::TS;
+pub use wabrix_api::{
+    INSPECTOR_DELAY_HISTOGRAM_BUCKETS, INSPECTOR_DELAY_HISTOGRAM_BUCKET_WIDTH_US,
+    INSPECTOR_DELAY_HISTOGRAM_FINITE_BUCKETS,
+};
 
 const SIOCETHTOOL: libc::c_ulong = 0x8946;
 const ETHTOOL_GDRVINFO: u32 = 0x0000_0003;
@@ -157,6 +161,59 @@ pub struct TMLiveStats {
     pub rates_pkts: Vec<u64>,
     pub rates_bytes: Vec<u64>,
     pub is_active_run: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay_histogram: Option<DelayHistogramSnapshot>,
+}
+
+/// Cumulative inspector delay histogram snapshot. `buckets` stores disjoint
+/// intervals; the final entry contains samples above the last finite bound.
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+pub struct DelayHistogramSnapshot {
+    pub buckets: Vec<u64>,
+    pub sum_us: u64,
+}
+
+/// Shared counters populated by the WASM host when it reads inspector telemetry.
+pub struct DelayHistogramMetrics {
+    pub buckets: Vec<AtomicU64>,
+    pub sum_us: AtomicU64,
+    pub ready: AtomicBool,
+}
+
+impl DelayHistogramMetrics {
+    pub fn new() -> Self {
+        Self {
+            buckets: (0..INSPECTOR_DELAY_HISTOGRAM_BUCKETS)
+                .map(|_| AtomicU64::new(0))
+                .collect(),
+            sum_us: AtomicU64::new(0),
+            ready: AtomicBool::new(false),
+        }
+    }
+
+    pub fn store_snapshot(&self, sum_us: u64, buckets: &[u64]) {
+        if buckets.len() != self.buckets.len() {
+            return;
+        }
+        self.sum_us.store(sum_us, Ordering::Relaxed);
+        for (counter, value) in self.buckets.iter().zip(buckets) {
+            counter.store(*value, Ordering::Relaxed);
+        }
+        self.ready.store(true, Ordering::Release);
+    }
+
+    fn snapshot(&self) -> Option<DelayHistogramSnapshot> {
+        self.ready
+            .load(Ordering::Acquire)
+            .then(|| DelayHistogramSnapshot {
+                buckets: self
+                    .buckets
+                    .iter()
+                    .map(|counter| counter.load(Ordering::Relaxed))
+                    .collect(),
+                sum_us: self.sum_us.load(Ordering::Relaxed),
+            })
+    }
 }
 
 /// Represents a single node's metrics
@@ -170,6 +227,7 @@ pub struct TelemetryMetrics {
     /// When Some, overrides the `is_active_run` heuristic with an explicit flag.
     pub active_flag: Option<Arc<AtomicBool>>,
     pub force_sync_flag: Option<Arc<AtomicBool>>,
+    pub delay_histogram: Option<Arc<DelayHistogramMetrics>>,
 }
 
 /// Registry to hold references to all telemetry nodes
@@ -193,6 +251,7 @@ impl TelemetryRegistry {
         counters_bytes: Vec<Arc<CachePadded<AtomicU64>>>,
         active_flag: Option<Arc<AtomicBool>>,
         force_sync_flag: Option<Arc<AtomicBool>>,
+        delay_histogram: Option<Arc<DelayHistogramMetrics>>,
     ) {
         self.metrics.push(TelemetryMetrics {
             node_id,
@@ -201,6 +260,7 @@ impl TelemetryRegistry {
             counters_bytes,
             active_flag,
             force_sync_flag,
+            delay_histogram,
         });
     }
 
@@ -210,7 +270,14 @@ impl TelemetryRegistry {
 }
 
 /// (node_id, pkt_counters, byte_counters, labels, active_flag) aggregated across workers.
-type AggregatedMetric = (String, Vec<u64>, Vec<u64>, Vec<String>, Option<bool>);
+type AggregatedMetric = (
+    String,
+    Vec<u64>,
+    Vec<u64>,
+    Vec<String>,
+    Option<bool>,
+    Option<DelayHistogramSnapshot>,
+);
 
 /// Periodically reads pipeline node counters from the TelemetryRegistry and
 /// broadcasts them over the same WebSocket channel as NIC telemetry.
@@ -257,6 +324,10 @@ pub fn spawn_pipeline_telemetry(
                     .active_flag
                     .as_ref()
                     .map(|f| f.load(Ordering::Relaxed));
+                let delay_histogram = metrics
+                    .delay_histogram
+                    .as_ref()
+                    .and_then(|histogram| histogram.snapshot());
 
                 if let Some(entry) = seen.iter_mut().find(|(id, ..)| id == &metrics.node_id) {
                     for (acc, v) in entry.1.iter_mut().zip(pkts.iter()) {
@@ -271,6 +342,18 @@ pub fn spawn_pipeline_telemetry(
                         (Some(a), None) | (None, Some(a)) => Some(a),
                         (None, None) => None,
                     };
+                    if let Some(histogram) = delay_histogram {
+                        if let Some(aggregate) = &mut entry.5 {
+                            for (total, value) in
+                                aggregate.buckets.iter_mut().zip(histogram.buckets)
+                            {
+                                *total = total.saturating_add(value);
+                            }
+                            aggregate.sum_us = aggregate.sum_us.saturating_add(histogram.sum_us);
+                        } else {
+                            entry.5 = Some(histogram);
+                        }
+                    }
                 } else {
                     seen.push((
                         metrics.node_id.clone(),
@@ -278,6 +361,7 @@ pub fn spawn_pipeline_telemetry(
                         bytes,
                         metrics.labels.clone(),
                         active,
+                        delay_histogram,
                     ));
                 }
             }
@@ -292,7 +376,7 @@ pub fn spawn_pipeline_telemetry(
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         {
             let baseline_now = Instant::now();
-            for (node_id, pkts, bytes, _, _) in aggregate() {
+            for (node_id, pkts, bytes, _, _, _) in aggregate() {
                 rate_tracker.insert(node_id, (baseline_now, pkts, bytes));
             }
         }
@@ -324,7 +408,9 @@ pub fn spawn_pipeline_telemetry(
             // RATE CALCULATION & DISPATCH PHASE
             let now = Instant::now();
 
-            for (node_id, counters_pkts, counters_bytes, labels, active_flag) in seen {
+            for (node_id, counters_pkts, counters_bytes, labels, active_flag, delay_histogram) in
+                seen
+            {
                 let mut rates_pkts = vec![0; counters_pkts.len()];
                 let mut rates_bytes = vec![0; counters_bytes.len()];
 
@@ -365,6 +451,7 @@ pub fn spawn_pipeline_telemetry(
                     rates_pkts,
                     rates_bytes,
                     is_active_run,
+                    delay_histogram,
                 };
                 let _ = telemetry_tx.send(stats);
             }
@@ -589,6 +676,7 @@ pub fn spawn_telemetry_ice(
                         rates_pkts: vec![],
                         rates_bytes: vec![],
                         is_active_run: in_run,
+                        delay_histogram: None,
                     };
                     log::trace!(
                         "ICE telemetry {}: sw_drops={}, hw_drops={}, active={}",

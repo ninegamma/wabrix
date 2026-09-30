@@ -59,3 +59,21 @@ While `TelemetryMetrics` is raw, live memory, `TMLiveStats` is a fixed, serializ
 2. **Execution:** Workers process packets at line-rate, incrementing their atomic counters.
 3. **Polling:** Every second, a background thread reads the `TelemetryRegistry`.
 4. **Formatting:** The background thread calculates the speeds (PPS/BPS), packages the results into a `TMLiveStats` snapshot, and broadcasts it to the outside world.
+
+## Inspector packet delay histogram
+
+The inspector keeps fixed 10 µs bins on the packet path, with finite bounds from
+10 µs through 1 ms and a `+Inf` bucket for larger delays. The host aggregates
+the worker snapshots and exports a Prometheus histogram named
+`wabrix_packet_delay_seconds`.
+
+Use this query in a Grafana Heatmap panel to plot the per-second distribution:
+
+```promql
+sum by (le) (rate(wabrix_packet_delay_seconds_bucket[1m]))
+```
+
+Set the panel unit to seconds; each bucket boundary is 10 µs apart. The
+histogram sample sum and count are also available as
+`wabrix_packet_delay_seconds_sum` and
+`wabrix_packet_delay_seconds_count`.

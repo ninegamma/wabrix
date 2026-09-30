@@ -6,7 +6,10 @@ use std::sync::atomic::Ordering;
 use wabrix_api::helpers::parse_suffixed_number;
 use wabrix_api::tcp_common::EngineTimerPlan;
 use wabrix_api::{
-    BatchMetadata, MAX_BATCH_SIZE, TIMER_KIND_NONE, TIMER_KIND_SYN, TIMER_KIND_TIMEOUT,
+    BatchMetadata, INSPECTOR_DELAY_HISTOGRAM_BUCKETS, INSPECTOR_DELAY_HISTOGRAM_BUCKETS_INDEX,
+    INSPECTOR_DELAY_HISTOGRAM_MAGIC, INSPECTOR_DELAY_HISTOGRAM_MARKER_INDEX,
+    INSPECTOR_DELAY_HISTOGRAM_SUM_INDEX, MAX_BATCH_SIZE, TIMER_KIND_NONE, TIMER_KIND_SYN,
+    TIMER_KIND_TIMEOUT,
 };
 use wasmtime::component::{bindgen, ResourceTable};
 use wasmtime::Store;
@@ -328,9 +331,24 @@ impl WasmEngine {
                     self.id,
                     out_of_band_stats.len()
                 );
+                let expected_telemetry_len =
+                    INSPECTOR_DELAY_HISTOGRAM_BUCKETS_INDEX + INSPECTOR_DELAY_HISTOGRAM_BUCKETS;
+                let has_delay_histogram = out_of_band_stats.len() == expected_telemetry_len
+                    && out_of_band_stats.get(INSPECTOR_DELAY_HISTOGRAM_MARKER_INDEX)
+                        == Some(&INSPECTOR_DELAY_HISTOGRAM_MAGIC);
                 for (idx, &count) in out_of_band_stats.iter().enumerate() {
-                    if idx < self.telemetry_metrics.counters_pkts.len() {
+                    if idx < self.telemetry_metrics.counters_pkts.len()
+                        && (!has_delay_histogram || idx < INSPECTOR_DELAY_HISTOGRAM_MARKER_INDEX)
+                    {
                         self.telemetry_metrics.counters_pkts[idx].store(count, Ordering::Relaxed);
+                    }
+                }
+                if has_delay_histogram {
+                    if let Some(histogram) = &self.telemetry_metrics.delay_histogram {
+                        histogram.store_snapshot(
+                            out_of_band_stats[INSPECTOR_DELAY_HISTOGRAM_SUM_INDEX],
+                            &out_of_band_stats[INSPECTOR_DELAY_HISTOGRAM_BUCKETS_INDEX..],
+                        );
                     }
                 }
             }

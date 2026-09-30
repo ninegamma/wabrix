@@ -21,7 +21,7 @@ use wabrix_base::common::formatting::PreciseSeparator;
 use wabrix_base::frame_registry::{set_tsc_frequency, set_worker_frame_registry};
 use wabrix_base::node_instance_id::NodeInstanceId;
 use wabrix_base::system::PlatformData;
-use wabrix_base::telemetry::TelemetryRegistry;
+use wabrix_base::telemetry::{DelayHistogramMetrics, TelemetryRegistry};
 use wabrix_base::{ControlEvent, ControlEventResult, Directive, Node, NodeId};
 #[cfg(feature = "wasm")]
 use wabrix_wasm::wasm_manager::WasmManager;
@@ -504,6 +504,7 @@ impl PipelineFactory {
                             vec![Arc::new(CachePadded::new(AtomicU64::new(0)))],
                             Some(tm_is_running.clone()),
                             Some(tm_force_sync.clone()),
+                            None,
                         );
                     }
 
@@ -597,6 +598,7 @@ impl PipelineFactory {
                             vec![Arc::new(CachePadded::new(AtomicU64::new(0)))],
                             None,
                             None,
+                            None,
                         );
                     }
                     Box::new(DropNode::new(my_id.clone(), Some(dropped_pkts)))
@@ -686,6 +688,7 @@ impl PipelineFactory {
                             counters_bytes,
                             None,
                             Some(tm_force_sync.clone()),
+                            None,
                         );
                     }
 
@@ -774,6 +777,7 @@ impl PipelineFactory {
                         .map(|_| Arc::new(CachePadded::new(AtomicU64::new(0))))
                         .collect();
                     let tm_force_sync = Arc::new(AtomicBool::new(false));
+                    let delay_histogram = Arc::new(DelayHistogramMetrics::new());
 
                     if let Some(registry) = telemetry_registry.as_mut() {
                         registry.register(
@@ -786,6 +790,7 @@ impl PipelineFactory {
                             counters_bytes.clone(),
                             None,
                             Some(tm_force_sync.clone()),
+                            Some(delay_histogram.clone()),
                         );
                     }
 
@@ -796,6 +801,7 @@ impl PipelineFactory {
                         counters_bytes,
                         active_flag: None,
                         force_sync_flag: Some(tm_force_sync.clone()),
+                        delay_histogram: Some(delay_histogram),
                     };
 
                     let umem_info = manager.umem();
