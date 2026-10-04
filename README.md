@@ -27,9 +27,30 @@ Wabrix works by bypassing the standard Linux networking stack using a modern, ke
 ## 📦 Getting Started
 
 ### Prerequisites
-* **OS:** Linux (Kernel 6.1+ recommended for optimal AF_XDP zero-copy support and performance).
-* **Language:** Rust (Latest stable).
-* **Dependencies:** `libbpf`, `wasmtime` (recommended).
+* **OS:** Linux. Kernel 6.1+ is recommended for AF_XDP support; kernel features and
+  NIC drivers determine which XDP and zero-copy modes are available at runtime.
+* **Rust:** The latest stable Rust toolchain, installed with `rustup`.
+* **Native build tools:** A C compiler and linker, `clang`, LLVM, `pkg-config`,
+  Git, and `m4`. The build compiles libbpf/libxdp and eBPF programs.
+* **Development libraries:** libelf, zlib, and libpcap headers/libraries.
+
+On Debian or Ubuntu, install the native build prerequisites with:
+
+```bash
+sudo apt update
+sudo apt install build-essential clang llvm libelf-dev zlib1g-dev libpcap-dev pkg-config git m4
+```
+
+Install the `wasm32-wasip2` Rust target only when building Wasm guest programs
+(for example, the `generator_engine` plugin):
+
+```bash
+rustup target add wasm32-wasip2
+```
+
+Loading XDP programs and configuring network interfaces at runtime requires
+appropriate Linux capabilities; running as root is the simplest option for
+development and integration testing.
 
 ### Quick Build
 ```bash
