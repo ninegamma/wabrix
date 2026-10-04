@@ -137,6 +137,14 @@ fn append_delay_histograms(
         "# HELP wabrix_packet_delay_seconds Packet delay in seconds."
     );
     let _ = writeln!(output, "# TYPE wabrix_packet_delay_seconds histogram");
+    let _ = writeln!(
+        output,
+        "# HELP wabrix_packet_delay_microseconds_bucket_count Number of packets in each packet-delay bucket."
+    );
+    let _ = writeln!(
+        output,
+        "# TYPE wabrix_packet_delay_microseconds_bucket_count gauge"
+    );
     for (node, histogram) in snapshots.iter() {
         if histogram.buckets.len() != INSPECTOR_DELAY_HISTOGRAM_FINITE_BUCKETS + 1 {
             continue;
@@ -153,6 +161,11 @@ fn append_delay_histograms(
             let upper_bound_seconds =
                 ((index as u64 + 1) * INSPECTOR_DELAY_HISTOGRAM_BUCKET_WIDTH_US) as f64
                     / 1_000_000.0;
+            let upper_bound_us = (index as u64 + 1) * INSPECTOR_DELAY_HISTOGRAM_BUCKET_WIDTH_US;
+            let _ = writeln!(
+                output,
+                "wabrix_packet_delay_microseconds_bucket_count{{tmstats_name=\"{node}\",le_us=\"{upper_bound_us}\"}} {count}"
+            );
             let _ = writeln!(
                 output,
                 "wabrix_packet_delay_seconds_bucket{{tmstats_name=\"{node}\",le=\"{upper_bound_seconds:.5}\"}} {cumulative}"
@@ -163,6 +176,11 @@ fn append_delay_histograms(
             .buckets
             .iter()
             .fold(0u64, |total, count| total.saturating_add(*count));
+        let _ = writeln!(
+            output,
+            "wabrix_packet_delay_microseconds_bucket_count{{tmstats_name=\"{node}\",le_us=\"+Inf\"}} {}",
+            histogram.buckets[INSPECTOR_DELAY_HISTOGRAM_FINITE_BUCKETS]
+        );
         let _ = writeln!(
             output,
             "wabrix_packet_delay_seconds_bucket{{tmstats_name=\"{node}\",le=\"+Inf\"}} {sample_count}"

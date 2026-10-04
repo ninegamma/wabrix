@@ -60,7 +60,7 @@ While `TelemetryMetrics` is raw, live memory, `TMLiveStats` is a fixed, serializ
 3. **Polling:** Every second, a background thread reads the `TelemetryRegistry`.
 4. **Formatting:** The background thread calculates the speeds (PPS/BPS), packages the results into a `TMLiveStats` snapshot, and broadcasts it to the outside world.
 
-## Inspector packet delay histogram
+## Inspector engine plugin packet delay histogram
 
 The inspector keeps fixed 10 µs bins on the packet path, with finite bounds from
 10 µs through 1 ms and a `+Inf` bucket for larger delays. The host aggregates

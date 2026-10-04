@@ -549,10 +549,26 @@ impl Node for WasmEngine {
                         .unwrap_or_default();
                     if !oob.is_empty() {
                         self.supports_oob_telemetry = true;
+                        let expected_telemetry_len = INSPECTOR_DELAY_HISTOGRAM_BUCKETS_INDEX
+                            + INSPECTOR_DELAY_HISTOGRAM_BUCKETS;
+                        let has_delay_histogram = oob.len() == expected_telemetry_len
+                            && oob.get(INSPECTOR_DELAY_HISTOGRAM_MARKER_INDEX)
+                                == Some(&INSPECTOR_DELAY_HISTOGRAM_MAGIC);
                         for (idx, &count) in oob.iter().enumerate() {
-                            if idx < self.telemetry_metrics.counters_pkts.len() {
+                            if idx < self.telemetry_metrics.counters_pkts.len()
+                                && (!has_delay_histogram
+                                    || idx < INSPECTOR_DELAY_HISTOGRAM_MARKER_INDEX)
+                            {
                                 self.telemetry_metrics.counters_pkts[idx]
                                     .store(count, Ordering::Relaxed);
+                            }
+                        }
+                        if has_delay_histogram {
+                            if let Some(histogram) = &self.telemetry_metrics.delay_histogram {
+                                histogram.store_snapshot(
+                                    oob[INSPECTOR_DELAY_HISTOGRAM_SUM_INDEX],
+                                    &oob[INSPECTOR_DELAY_HISTOGRAM_BUCKETS_INDEX..],
+                                );
                             }
                         }
                     }
