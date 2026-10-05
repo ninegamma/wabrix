@@ -33,7 +33,6 @@ desired_state = "Running delay=1000"
 id = "generator_engine"
 type = "WasmEngine"
 routes = ["tx_sink_0", "drop", "drop"]
-labels = ["SentSyn", "SentSynAck", "SentSynAck2", "SentFin", "SentFinPssv", "SentAck4Fin", "SentAck", "SentRst", "RecvSyn", "RecvSynAck", "RecvSynAck2", "RecvFin", "RecvFinPssv", "RecvAck4Fin", "RecvAck", "RecvRst", "Unexpected", "RecvPayload", "SentPayload", "TickDrop", "ToLinux", "Drop", "Watermark"]
 # Node-level state override
 desired_state = "Running"
 args= { umem = "0", batch_size = "512" }
@@ -96,7 +95,6 @@ hot_args= {}
 id = "inspector"
 type = "WasmEngine"
 routes = ["drop", "drop", "drop"]
-labels = ["RecvPackets", "RecvBytes", "Unexpected", "AverageDelayUs", "StdDevDelayUs"]
 # Node-level state override
 desired_state = "Running"
 args= { umem = 1, wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/inspector_engine.wasm" }

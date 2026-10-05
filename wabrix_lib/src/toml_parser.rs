@@ -428,8 +428,6 @@ pub struct NodeConfig {
     pub routes: Vec<String>,
     #[serde(default)]
     pub queues: Option<Vec<u32>>,
-    #[serde(default)]
-    pub labels: Option<Vec<String>>,
     #[serde(default, deserialize_with = "deserialize_args")]
     pub args: HashMap<String, String>,
     /// Hot-updatable args: parsed once at startup, then mirrored into the typed
@@ -639,7 +637,6 @@ impl WabricksConfig {
                         node_type: "PacketGenerator".to_string(),
                         routes: vec![format!("wire.tx_sink_{}", worker_id)],
                         queues: None,
-                        labels: None,
                         args: {
                             let mut args = HashMap::new();
                             args.insert("umem".to_string(), "0".to_string());
@@ -669,7 +666,6 @@ impl WabricksConfig {
                         node_type: "BatchTxNode".to_string(),
                         routes: vec![],
                         queues: Some(vec![worker_id as u32]),
-                        labels: None,
                         args: {
                             let mut args = HashMap::new();
                             args.insert("sink_type".to_string(), "xsk".to_string());
@@ -1833,7 +1829,6 @@ impl WabricksConfig {
                             node_type: node_conf.node_type.clone(),
                             routes: node_conf.routes.clone(),
                             queues: Some(assigned_queue),
-                            labels: node_conf.labels.clone(),
                             args,
                             hot_args: node_conf.hot_args.clone(),
                             node_data: node_conf.node_data.clone(),
@@ -2504,10 +2499,6 @@ mod tests {
             Some(&"ethertype".to_string())
         );
         assert_eq!(telemetry_node.args.get("buckets"), Some(&"4".to_string()));
-        assert_eq!(
-            telemetry_node.args.get("labels"),
-            Some(&"IPv4,IPv6,ARP,Other".to_string())
-        );
     }
 
     #[test]

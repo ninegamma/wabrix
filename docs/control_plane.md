@@ -37,7 +37,6 @@ The control plane interacts with the Wasm-based processing nodes via specific fu
 ## Telemetry and Observability
 
 * **Counter Extraction:** The control plane periodically queries telemetry from the data plane. It utilizes `get-telemetry() -> list<u64>` to extract out-of-band counters from the Wasm plugins.
-* **In-Band Telemetry:** For high-frequency routing actions, the control plane can track metrics via the upper 16 bits of the routing actions returned by the Wasm hot-path callbacks.
 * **Broadcast:** Metrics are aggregated into `TMLiveStats` and broadcasted via Tokio channels to the API and standard output, facilitating integration with external time-series databases like Prometheus.
 
 # Read-Copy-Update (RCU) vs. Control Events

@@ -50,7 +50,6 @@ hot_args= {}
 id = "tcp_engine"
 type = "WasmEngine"
 routes = ["shared_tx_sink", "veth_sink", "drop"]
-labels = ["Drops", "Linux", "Replies", "SYNs", "FINs"]
 args= { umem = "0"  }
 hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/tcp_engine.wasm" }
 

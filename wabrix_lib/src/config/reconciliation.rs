@@ -240,7 +240,6 @@ mod tests {
                     node_type: node_type.into(),
                     routes: Vec::new(),
                     queues: None,
-                    labels: None,
                     args: HashMap::new(),
                     hot_args: HashMap::new(),
                     node_data,

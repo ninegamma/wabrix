@@ -75,21 +75,21 @@ fn verify_tcp_connection_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
             metrics_url,
             "wabrix_packets_total",
             "tcp_client/tcp_engine",
-            "SentSyn",
+            "sent_syn",
         )
         .unwrap_or(0);
         last_server_syn = get_metric_value(
             metrics_url,
             "wabrix_packets_total",
             "tcp_server/tcp_engine",
-            "RecvSyn",
+            "recv_syn",
         )
         .unwrap_or(0);
         last_client_fin = get_metric_value(
             metrics_url,
             "wabrix_packets_total",
             "tcp_client/tcp_engine",
-            "SentFin",
+            "sent_fin",
         )
         .unwrap_or(0);
 

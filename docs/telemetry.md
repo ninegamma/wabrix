@@ -62,10 +62,31 @@ While `TelemetryMetrics` is raw, live memory, `TMLiveStats` is a fixed, serializ
 
 ## Inspector engine plugin packet delay histogram
 
-The inspector keeps fixed 10 µs bins on the packet path, with finite bounds from
-10 µs through 1 ms and a `+Inf` bucket for larger delays. The host aggregates
-the worker snapshots and exports a Prometheus histogram named
-`wabrix_packet_delay_seconds`.
+The inspector records packet delays in fixed 10 µs bins on the packet path. The
+finite bins have upper bounds from 10 µs through 1 ms, followed by an overflow
+bin for delays greater than 1 ms. The bins are disjoint counts: a sample is
+stored in exactly one bin. The inspector also reports the cumulative delay sum
+in microseconds.
+
+The packet-engine WIT interface returns a list of `telemetry-metric` values.
+Existing counters are returned as `counter(u64)` entries in their configured
+order. The inspector returns its five counters followed by a `hist(histogram)`
+value containing the delay sum, sample count, and 101 disjoint bucket counts.
+The WASM host stores the latest structured snapshot. Idle telemetry polls
+process it too, so the last histogram remains available while the node is not
+processing packets. The telemetry task adds snapshots from all workers with
+the same node name.
+
+The Prometheus exporter exposes the snapshot in two forms:
+
+* `wabrix_packet_delay_seconds` is a standard cumulative Prometheus histogram.
+  Its finite `*_bucket` values include all bins up to the `le` boundary, and
+  its `+Inf` bucket is the total sample count. The `*_sum` and `*_count`
+  metrics are also exported.
+* `wabrix_packet_delay_microseconds_bucket_count` is a gauge containing the
+  original disjoint bin counts. Its `le_us` label identifies the upper bound;
+  `le_us="+Inf"` contains only the overflow bin. Use this metric for a bar
+  chart of the individual bins.
 
 Use this query in a Grafana Heatmap panel to plot the per-second distribution:
 
@@ -74,6 +95,6 @@ sum by (le) (rate(wabrix_packet_delay_seconds_bucket[1m]))
 ```
 
 Set the panel unit to seconds; each bucket boundary is 10 µs apart. The
-histogram sample sum and count are also available as
 `wabrix_packet_delay_seconds_sum` and
-`wabrix_packet_delay_seconds_count`.
+`wabrix_packet_delay_seconds_count` report the cumulative delay sum and sample
+count for each `tmstats_name`.

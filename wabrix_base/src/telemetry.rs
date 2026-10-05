@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use tokio::sync::broadcast::Sender;
 use ts_rs::TS;
@@ -155,63 +155,67 @@ fn ethtool_stats(interface: &str) -> Option<(String, HashMap<String, u64>)> {
 #[ts(export_to = "TMLiveStats.ts")]
 pub struct TMLiveStats {
     pub tmstats_name: String,
-    pub labels: Vec<String>,
+    pub counter_names: Vec<String>,
     pub counters_pkts: Vec<u64>,
     pub counters_bytes: Vec<u64>,
     pub rates_pkts: Vec<u64>,
     pub rates_bytes: Vec<u64>,
     pub is_active_run: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub delay_histogram: Option<DelayHistogramSnapshot>,
+    pub histograms: Vec<NamedHistogramSnapshot>,
 }
 
-/// Cumulative inspector delay histogram snapshot. `buckets` stores disjoint
-/// intervals; the final entry contains samples above the last finite bound.
+/// A named cumulative histogram snapshot. `buckets` stores disjoint intervals;
+/// the bucket schema is defined by the producer of the histogram.
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
-pub struct DelayHistogramSnapshot {
+pub struct NamedHistogramSnapshot {
+    pub name: String,
     pub buckets: Vec<u64>,
-    pub sum_us: u64,
+    pub sum: u64,
+    pub count: u64,
 }
 
-/// Shared counters populated by the WASM host when it reads inspector telemetry.
-pub struct DelayHistogramMetrics {
+/// Shared counters populated by the WASM host when it reads plugin telemetry.
+pub struct HistogramMetrics {
     pub buckets: Vec<AtomicU64>,
     pub sum_us: AtomicU64,
+    pub count: AtomicU64,
     pub ready: AtomicBool,
 }
 
-impl DelayHistogramMetrics {
-    pub fn new() -> Self {
+impl HistogramMetrics {
+    pub fn new(bucket_count: usize) -> Self {
         Self {
-            buckets: (0..INSPECTOR_DELAY_HISTOGRAM_BUCKETS)
-                .map(|_| AtomicU64::new(0))
-                .collect(),
+            buckets: (0..bucket_count).map(|_| AtomicU64::new(0)).collect(),
             sum_us: AtomicU64::new(0),
+            count: AtomicU64::new(0),
             ready: AtomicBool::new(false),
         }
     }
 
-    pub fn store_snapshot(&self, sum_us: u64, buckets: &[u64]) {
+    pub fn store_snapshot(&self, sum_us: u64, count: u64, buckets: &[u64]) {
         if buckets.len() != self.buckets.len() {
             return;
         }
         self.sum_us.store(sum_us, Ordering::Relaxed);
+        self.count.store(count, Ordering::Relaxed);
         for (counter, value) in self.buckets.iter().zip(buckets) {
             counter.store(*value, Ordering::Relaxed);
         }
         self.ready.store(true, Ordering::Release);
     }
 
-    fn snapshot(&self) -> Option<DelayHistogramSnapshot> {
+    fn snapshot(&self, name: &str) -> Option<NamedHistogramSnapshot> {
         self.ready
             .load(Ordering::Acquire)
-            .then(|| DelayHistogramSnapshot {
+            .then(|| NamedHistogramSnapshot {
+                name: name.to_string(),
                 buckets: self
                     .buckets
                     .iter()
                     .map(|counter| counter.load(Ordering::Relaxed))
                     .collect(),
-                sum_us: self.sum_us.load(Ordering::Relaxed),
+                sum: self.sum_us.load(Ordering::Relaxed),
+                count: self.count.load(Ordering::Relaxed),
             })
     }
 }
@@ -221,13 +225,19 @@ impl DelayHistogramMetrics {
 #[repr(align(64))]
 pub struct TelemetryMetrics {
     pub node_id: String,
-    pub labels: Vec<String>,
+    pub counter_names: Arc<RwLock<Vec<String>>>,
     pub counters_pkts: Vec<Arc<CachePadded<AtomicU64>>>,
     pub counters_bytes: Vec<Arc<CachePadded<AtomicU64>>>,
     /// When Some, overrides the `is_active_run` heuristic with an explicit flag.
     pub active_flag: Option<Arc<AtomicBool>>,
     pub force_sync_flag: Option<Arc<AtomicBool>>,
-    pub delay_histogram: Option<Arc<DelayHistogramMetrics>>,
+    pub histograms: Vec<NamedHistogramMetrics>,
+}
+
+#[derive(Clone)]
+pub struct NamedHistogramMetrics {
+    pub name: String,
+    pub metrics: Arc<HistogramMetrics>,
 }
 
 /// Registry to hold references to all telemetry nodes
@@ -246,21 +256,21 @@ impl TelemetryRegistry {
     pub fn register(
         &mut self,
         node_id: String,
-        labels: Vec<String>,
+        counter_names: Arc<RwLock<Vec<String>>>,
         counters_pkts: Vec<Arc<CachePadded<AtomicU64>>>,
         counters_bytes: Vec<Arc<CachePadded<AtomicU64>>>,
         active_flag: Option<Arc<AtomicBool>>,
         force_sync_flag: Option<Arc<AtomicBool>>,
-        delay_histogram: Option<Arc<DelayHistogramMetrics>>,
+        histograms: Vec<NamedHistogramMetrics>,
     ) {
         self.metrics.push(TelemetryMetrics {
             node_id,
-            labels,
+            counter_names,
             counters_pkts,
             counters_bytes,
             active_flag,
             force_sync_flag,
-            delay_histogram,
+            histograms,
         });
     }
 
@@ -269,14 +279,14 @@ impl TelemetryRegistry {
     }
 }
 
-/// (node_id, pkt_counters, byte_counters, labels, active_flag) aggregated across workers.
+/// (node_id, pkt_counters, byte_counters, counter_names, active_flag) aggregated across workers.
 type AggregatedMetric = (
     String,
     Vec<u64>,
     Vec<u64>,
     Vec<String>,
     Option<bool>,
-    Option<DelayHistogramSnapshot>,
+    Vec<NamedHistogramSnapshot>,
 );
 
 /// Periodically reads pipeline node counters from the TelemetryRegistry and
@@ -304,7 +314,7 @@ pub fn spawn_pipeline_telemetry(
 
         // Read the current counters and aggregate across all entries that share
         // the same node_id. We rely on insertion order: the first entry for a
-        // given id provides the labels and the initial counter values;
+        // given id provides the counter names and the initial counter values;
         // subsequent entries for the same id are summed in.
         // active_flag is OR-aggregated: true if ANY worker reports active.
         let aggregate = || {
@@ -320,14 +330,20 @@ pub fn spawn_pipeline_telemetry(
                     .iter()
                     .map(|c| c.load(Ordering::Relaxed))
                     .collect();
+                let counter_names = metrics
+                    .counter_names
+                    .read()
+                    .map(|names| names.clone())
+                    .unwrap_or_default();
                 let active = metrics
                     .active_flag
                     .as_ref()
                     .map(|f| f.load(Ordering::Relaxed));
-                let delay_histogram = metrics
-                    .delay_histogram
-                    .as_ref()
-                    .and_then(|histogram| histogram.snapshot());
+                let histograms = metrics
+                    .histograms
+                    .iter()
+                    .filter_map(|histogram| histogram.metrics.snapshot(&histogram.name))
+                    .collect::<Vec<_>>();
 
                 if let Some(entry) = seen.iter_mut().find(|(id, ..)| id == &metrics.node_id) {
                     for (acc, v) in entry.1.iter_mut().zip(pkts.iter()) {
@@ -336,22 +352,35 @@ pub fn spawn_pipeline_telemetry(
                     for (acc, v) in entry.2.iter_mut().zip(bytes.iter()) {
                         *acc += v;
                     }
+                    if entry.3.is_empty() && !counter_names.is_empty() {
+                        entry.3 = counter_names;
+                    }
                     // OR the active flags: Some(true) wins over Some(false) and None
                     entry.4 = match (entry.4, active) {
                         (Some(a), Some(b)) => Some(a || b),
                         (Some(a), None) | (None, Some(a)) => Some(a),
                         (None, None) => None,
                     };
-                    if let Some(histogram) = delay_histogram {
-                        if let Some(aggregate) = &mut entry.5 {
+                    for histogram in histograms {
+                        if let Some(aggregate) =
+                            entry.5.iter_mut().find(|item| item.name == histogram.name)
+                        {
+                            if aggregate.buckets.len() != histogram.buckets.len() {
+                                log::warn!(
+                                    "Ignoring histogram '{}' for node '{}': bucket schema differs between workers",
+                                    histogram.name, metrics.node_id
+                                );
+                                continue;
+                            }
                             for (total, value) in
                                 aggregate.buckets.iter_mut().zip(histogram.buckets)
                             {
                                 *total = total.saturating_add(value);
                             }
-                            aggregate.sum_us = aggregate.sum_us.saturating_add(histogram.sum_us);
+                            aggregate.sum = aggregate.sum.saturating_add(histogram.sum);
+                            aggregate.count = aggregate.count.saturating_add(histogram.count);
                         } else {
-                            entry.5 = Some(histogram);
+                            entry.5.push(histogram);
                         }
                     }
                 } else {
@@ -359,9 +388,9 @@ pub fn spawn_pipeline_telemetry(
                         metrics.node_id.clone(),
                         pkts,
                         bytes,
-                        metrics.labels.clone(),
+                        counter_names,
                         active,
-                        delay_histogram,
+                        histograms,
                     ));
                 }
             }
@@ -408,7 +437,7 @@ pub fn spawn_pipeline_telemetry(
             // RATE CALCULATION & DISPATCH PHASE
             let now = Instant::now();
 
-            for (node_id, counters_pkts, counters_bytes, labels, active_flag, delay_histogram) in
+            for (node_id, counters_pkts, counters_bytes, counter_names, active_flag, histograms) in
                 seen
             {
                 let mut rates_pkts = vec![0; counters_pkts.len()];
@@ -445,13 +474,13 @@ pub fn spawn_pipeline_telemetry(
                     active_flag.unwrap_or_else(|| counters_pkts.iter().any(|&v| v > 0));
                 let stats = TMLiveStats {
                     tmstats_name: node_id,
-                    labels,
+                    counter_names,
                     counters_pkts,
                     counters_bytes,
                     rates_pkts,
                     rates_bytes,
                     is_active_run,
-                    delay_histogram,
+                    histograms,
                 };
                 let _ = telemetry_tx.send(stats);
             }
@@ -652,7 +681,7 @@ pub fn spawn_telemetry_ice(
                 if in_run || idle_ticks <= 50 {
                     let stats = TMLiveStats {
                         tmstats_name: iface_name.clone(),
-                        labels: vec![
+                        counter_names: vec![
                             "rx_uc_pkts".to_string(),
                             "rx_mc_pkts".to_string(),
                             "rx_bc_pkts".to_string(),
@@ -676,7 +705,7 @@ pub fn spawn_telemetry_ice(
                         rates_pkts: vec![],
                         rates_bytes: vec![],
                         is_active_run: in_run,
-                        delay_histogram: None,
+                        histograms: vec![],
                     };
                     log::trace!(
                         "ICE telemetry {}: sw_drops={}, hw_drops={}, active={}",

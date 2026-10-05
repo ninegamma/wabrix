@@ -62,7 +62,6 @@ workers = [0, 1]
     [pipelines.nodes.args]
     algo = "ethertype"
     buckets = "4"         # We expect 4 buckets (IPv4, IPv6, ARP, Other)
-    labels = "IPv4,IPv6,ARP,Other" # Optional: For the metrics exporter to name them
 
     # --- Node 2: Sink ---
     [[pipelines.nodes]]
@@ -93,7 +92,6 @@ workers = [0, 1]
     [pipelines.nodes.args]
     algo = "ethertype"
     buckets = "4"         # We expect 4 buckets (IPv4, IPv6, ARP, Other)
-    labels = "IPv4,IPv6,ARP,Other" # Optional: For the metrics exporter to name them
 
 
     # --- Node 2: Sink ---
@@ -102,5 +100,4 @@ workers = [0, 1]
     type = "BatchTxNode"
     queues = [0, 1]
     args = { sink_type = "xsk", interface = "enp2s0f0np0"}
-
 

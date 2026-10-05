@@ -6,7 +6,7 @@ use crossbeam_utils::CachePadded;
 use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::config::hot_config::{HotNodeData, HotPipelineConfig, NodeDynamicState};
@@ -21,7 +21,7 @@ use wabrix_base::common::formatting::PreciseSeparator;
 use wabrix_base::frame_registry::{set_tsc_frequency, set_worker_frame_registry};
 use wabrix_base::node_instance_id::NodeInstanceId;
 use wabrix_base::system::PlatformData;
-use wabrix_base::telemetry::{DelayHistogramMetrics, TelemetryRegistry};
+use wabrix_base::telemetry::{HistogramMetrics, NamedHistogramMetrics, TelemetryRegistry};
 use wabrix_base::{ControlEvent, ControlEventResult, Directive, Node, NodeId};
 #[cfg(feature = "wasm")]
 use wabrix_wasm::wasm_manager::WasmManager;
@@ -489,12 +489,12 @@ impl PipelineFactory {
                                 "{}/{}",
                                 pipeline_instance.name, node_instance.node_config.id
                             ),
-                            vec![
+                            Arc::new(RwLock::new(vec![
                                 "total_generated".to_string(),
                                 "pkts_this_run".to_string(),
                                 "total_cycles".to_string(),
                                 "pps_last_run".to_string(),
-                            ],
+                            ])),
                             vec![
                                 tm_total.clone(),
                                 tm_this_run.clone(),
@@ -504,7 +504,7 @@ impl PipelineFactory {
                             vec![Arc::new(CachePadded::new(AtomicU64::new(0)))],
                             Some(tm_is_running.clone()),
                             Some(tm_force_sync.clone()),
-                            None,
+                            vec![],
                         );
                     }
 
@@ -593,12 +593,12 @@ impl PipelineFactory {
                                 "{}/{}",
                                 pipeline_instance.name, node_instance.node_config.id
                             ),
-                            vec!["dropped".to_string()],
+                            Arc::new(RwLock::new(vec!["dropped".to_string()])),
                             vec![dropped_pkts.clone()],
                             vec![Arc::new(CachePadded::new(AtomicU64::new(0)))],
                             None,
                             None,
-                            None,
+                            vec![],
                         );
                     }
                     Box::new(DropNode::new(my_id.clone(), Some(dropped_pkts)))
@@ -668,8 +668,14 @@ impl PipelineFactory {
                         .into_iter()
                         .collect();
 
-                    let labels = node_instance.node_config.labels.clone();
-                    let num_buckets = labels.as_ref().map_or(0, |l| l.len());
+                    let counter_names = Arc::new(RwLock::new(
+                        wabrix_api::tcp_common::TCP_STAT_NAMES
+                            .iter()
+                            .map(|name| name.to_string())
+                            .chain(std::iter::once("watermark".to_string()))
+                            .collect::<Vec<String>>(),
+                    ));
+                    let num_buckets = counter_names.read().map(|names| names.len()).unwrap_or(0);
                     let counters_pkts: Vec<Arc<CachePadded<AtomicU64>>> = (0..num_buckets)
                         .map(|_| Arc::new(CachePadded::new(AtomicU64::new(0))))
                         .collect();
@@ -683,12 +689,12 @@ impl PipelineFactory {
                                 "{}/{}",
                                 pipeline_instance.name, node_instance.node_config.id
                             ),
-                            labels.clone().unwrap_or_default(),
+                            counter_names,
                             counters_pkts.clone(),
                             counters_bytes,
                             None,
                             Some(tm_force_sync.clone()),
-                            None,
+                            vec![],
                         );
                     }
 
@@ -768,8 +774,15 @@ impl PipelineFactory {
                         routing_table.push(target_id);
                     }
 
-                    let labels = node_instance.node_config.labels.clone();
-                    let num_buckets = labels.as_ref().map_or(0, |l| l.len());
+                    let counter_names = Arc::new(RwLock::new(Vec::new()));
+                    let num_buckets = match node_instance.node_config.effective_arg("wasm_file_path")
+                    {
+                        Some(path) if path.contains("inspector_engine") => 5,
+                        Some(path) if path.contains("filter_engine") => 2,
+                        Some(path) if path.contains("generator_engine") => 23,
+                        Some(path) if path.contains("tcp_engine") => 23,
+                        _ => 0,
+                    };
                     let counters_pkts: Vec<Arc<CachePadded<AtomicU64>>> = (0..num_buckets)
                         .map(|_| Arc::new(CachePadded::new(AtomicU64::new(0))))
                         .collect();
@@ -777,7 +790,9 @@ impl PipelineFactory {
                         .map(|_| Arc::new(CachePadded::new(AtomicU64::new(0))))
                         .collect();
                     let tm_force_sync = Arc::new(AtomicBool::new(false));
-                    let delay_histogram = Arc::new(DelayHistogramMetrics::new());
+                    let delay_histogram = Arc::new(HistogramMetrics::new(
+                        wabrix_base::telemetry::INSPECTOR_DELAY_HISTOGRAM_BUCKETS,
+                    ));
 
                     if let Some(registry) = telemetry_registry.as_mut() {
                         registry.register(
@@ -785,23 +800,29 @@ impl PipelineFactory {
                                 "{}/{}",
                                 pipeline_instance.name, node_instance.node_config.id
                             ),
-                            labels.clone().unwrap_or_default(),
+                            counter_names.clone(),
                             counters_pkts.clone(),
                             counters_bytes.clone(),
                             None,
                             Some(tm_force_sync.clone()),
-                            Some(delay_histogram.clone()),
+                            vec![NamedHistogramMetrics {
+                                name: "delay".to_string(),
+                                metrics: delay_histogram.clone(),
+                            }],
                         );
                     }
 
                     let telemetry_metrics = wabrix_base::telemetry::TelemetryMetrics {
                         node_id: node_instance.node_config.id.clone(),
-                        labels: labels.unwrap_or_default(),
+                        counter_names,
                         counters_pkts,
                         counters_bytes,
                         active_flag: None,
                         force_sync_flag: Some(tm_force_sync.clone()),
-                        delay_histogram: Some(delay_histogram),
+                        histograms: vec![NamedHistogramMetrics {
+                            name: "delay".to_string(),
+                            metrics: delay_histogram,
+                        }],
                     };
 
                     let umem_info = manager.umem();

@@ -59,7 +59,6 @@ hot_args= {}
 id = "client"
 type = "WasmEngine"
 routes = ["shared_tx_sink", "veth_sink", "drop"]
-labels = ["SentSyn", "SentSynAck", "SentSynAck2", "SentFin", "SentFinPssv", "SentAck4Fin", "SentAck", "SentRst", "RecvSyn", "RecvSynAck", "RecvSynAck2", "RecvFin", "RecvFinPssv", "RecvAck4Fin", "RecvAck", "RecvRst", "Unexpected", "RecvPayload", "SentPayload", "TickDrop", "ToLinux", "Drop", "Watermark"]
 # Node-level state override
 desired_state = "Running"
 args= { umem = "0", batch_size = "512" }
@@ -143,7 +142,6 @@ hot_args= {}
 id = "server"
 type = "WasmEngine"
 routes = ["shared_tx_sink", "veth_sink", "drop"]
-labels = ["SentSyn", "SentSynAck", "SentSynAck2", "SentFin", "SentFinPssv", "SentAck4Fin", "SentAck", "SentRst", "RecvSyn", "RecvSynAck", "RecvSynAck2", "RecvFin", "RecvFinPssv", "RecvAck4Fin", "RecvAck", "RecvRst", "Unexpected", "RecvPayload", "SentPayload", "TickDrop", "ToLinux", "Drop", "Watermerk"]
 # Node-level state override
 desired_state = "Running"
 args= { umem = "1", wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/tcp_engine.wasm",  batch_size = "512" }

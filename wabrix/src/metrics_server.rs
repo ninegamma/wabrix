@@ -5,10 +5,7 @@ use std::fmt::Write as FmtWrite;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast::Receiver;
-use wabrix_base::telemetry::{DelayHistogramSnapshot, TMLiveStats};
-use wabrix_base::telemetry::{
-    INSPECTOR_DELAY_HISTOGRAM_BUCKET_WIDTH_US, INSPECTOR_DELAY_HISTOGRAM_FINITE_BUCKETS,
-};
+use wabrix_base::telemetry::{NamedHistogramSnapshot, TMLiveStats};
 
 /// Spawns the Prometheus metrics exporter in the background.
 /// It listens to the Wabrix telemetry broadcast and updates standard gauges.
@@ -17,7 +14,7 @@ pub fn spawn_metrics_server(mut tm_rx: Receiver<TMLiveStats>) {
         // Setup Prometheus Registry & Gauges
         let registry = Registry::new();
 
-        // Create Gauge Vectors with labels for pipeline name and specific node/interface label
+        // Create Gauge Vectors with labels for pipeline name and counter name.
         let packets_total = IntGaugeVec::new(
             Opts::new("wabrix_packets_total", "Total packets processed"),
             &["tmstats_name", "data_label"],
@@ -47,23 +44,25 @@ pub fn spawn_metrics_server(mut tm_rx: Receiver<TMLiveStats>) {
         registry.register(Box::new(pps_live.clone())).unwrap();
         registry.register(Box::new(bps_live.clone())).unwrap();
 
-        let delay_histograms =
-            Arc::new(RwLock::new(HashMap::<String, DelayHistogramSnapshot>::new()));
-        let receiver_histograms = Arc::clone(&delay_histograms);
+        let histograms = Arc::new(RwLock::new(HashMap::<
+            (String, String),
+            NamedHistogramSnapshot,
+        >::new()));
+        let receiver_histograms = Arc::clone(&histograms);
         let metrics_registry = registry.clone();
 
         // Background task to map Wabrix telemetry to Prometheus metrics
         tokio::spawn(async move {
             while let Ok(stats) = tm_rx.recv().await {
                 let tmstats_name = &stats.tmstats_name;
-                if let Some(histogram) = stats.delay_histogram {
-                    if let Ok(mut snapshots) = receiver_histograms.write() {
-                        snapshots.insert(tmstats_name.clone(), histogram);
+                if let Ok(mut snapshots) = receiver_histograms.write() {
+                    for histogram in stats.histograms {
+                        snapshots.insert((tmstats_name.clone(), histogram.name.clone()), histogram);
                     }
                 }
 
-                // Iterate over the labels and safely update the corresponding data vectors
-                for (i, data_label) in stats.labels.iter().enumerate() {
+                // Iterate over named counters and safely update the corresponding data vectors.
+                for (i, data_label) in stats.counter_names.iter().enumerate() {
                     let label_values = &[tmstats_name.as_str(), data_label.as_str()];
 
                     if let Some(&val) = stats.counters_pkts.get(i) {
@@ -85,7 +84,7 @@ pub fn spawn_metrics_server(mut tm_rx: Receiver<TMLiveStats>) {
         });
 
         // Expose the registry over HTTP for Prometheus to scrape
-        let histogram_snapshots = Arc::clone(&delay_histograms);
+        let histogram_snapshots = Arc::clone(&histograms);
         let app = Router::new().route(
             "/metrics",
             get(move || {
@@ -99,7 +98,7 @@ pub fn spawn_metrics_server(mut tm_rx: Receiver<TMLiveStats>) {
                         log::error!("Failed to encode prometheus metrics: {}", e);
                     }
                     let mut output = String::from_utf8(buffer).unwrap_or_default();
-                    append_delay_histograms(&mut output, &histogram_snapshots);
+                    append_histograms(&mut output, &histogram_snapshots);
                     output
                 }
             }),
@@ -121,9 +120,9 @@ pub fn spawn_metrics_server(mut tm_rx: Receiver<TMLiveStats>) {
     });
 }
 
-fn append_delay_histograms(
+fn append_histograms(
     output: &mut String,
-    snapshots: &RwLock<HashMap<String, DelayHistogramSnapshot>>,
+    snapshots: &RwLock<HashMap<(String, String), NamedHistogramSnapshot>>,
 ) {
     let Ok(snapshots) = snapshots.read() else {
         return;
@@ -134,65 +133,37 @@ fn append_delay_histograms(
 
     let _ = writeln!(
         output,
-        "# HELP wabrix_packet_delay_seconds Packet delay in seconds."
+        "# HELP wabrix_histogram_bucket_count Number of samples in each histogram bucket."
     );
-    let _ = writeln!(output, "# TYPE wabrix_packet_delay_seconds histogram");
+    let _ = writeln!(output, "# TYPE wabrix_histogram_bucket_count gauge");
     let _ = writeln!(
         output,
-        "# HELP wabrix_packet_delay_microseconds_bucket_count Number of packets in each packet-delay bucket."
+        "# HELP wabrix_histogram_sum Sum of histogram samples."
     );
+    let _ = writeln!(output, "# TYPE wabrix_histogram_sum gauge");
     let _ = writeln!(
         output,
-        "# TYPE wabrix_packet_delay_microseconds_bucket_count gauge"
+        "# HELP wabrix_histogram_count Number of histogram samples."
     );
-    for (node, histogram) in snapshots.iter() {
-        if histogram.buckets.len() != INSPECTOR_DELAY_HISTOGRAM_FINITE_BUCKETS + 1 {
-            continue;
-        }
+    let _ = writeln!(output, "# TYPE wabrix_histogram_count gauge");
+    for ((node, name), histogram) in snapshots.iter() {
         let node = escape_label_value(node);
-        let mut cumulative = 0u64;
-        for (index, count) in histogram
-            .buckets
-            .iter()
-            .take(INSPECTOR_DELAY_HISTOGRAM_FINITE_BUCKETS)
-            .enumerate()
-        {
-            cumulative = cumulative.saturating_add(*count);
-            let upper_bound_seconds =
-                ((index as u64 + 1) * INSPECTOR_DELAY_HISTOGRAM_BUCKET_WIDTH_US) as f64
-                    / 1_000_000.0;
-            let upper_bound_us = (index as u64 + 1) * INSPECTOR_DELAY_HISTOGRAM_BUCKET_WIDTH_US;
+        let name = escape_label_value(name);
+        for (index, count) in histogram.buckets.iter().enumerate() {
             let _ = writeln!(
                 output,
-                "wabrix_packet_delay_microseconds_bucket_count{{tmstats_name=\"{node}\",le_us=\"{upper_bound_us}\"}} {count}"
-            );
-            let _ = writeln!(
-                output,
-                "wabrix_packet_delay_seconds_bucket{{tmstats_name=\"{node}\",le=\"{upper_bound_seconds:.5}\"}} {cumulative}"
+                "wabrix_histogram_bucket_count{{tmstats_name=\"{node}\",histogram=\"{name}\",bucket=\"{index}\"}} {count}"
             );
         }
-
-        let sample_count = histogram
-            .buckets
-            .iter()
-            .fold(0u64, |total, count| total.saturating_add(*count));
         let _ = writeln!(
             output,
-            "wabrix_packet_delay_microseconds_bucket_count{{tmstats_name=\"{node}\",le_us=\"+Inf\"}} {}",
-            histogram.buckets[INSPECTOR_DELAY_HISTOGRAM_FINITE_BUCKETS]
+            "wabrix_histogram_sum{{tmstats_name=\"{node}\",histogram=\"{name}\"}} {}",
+            histogram.sum
         );
         let _ = writeln!(
             output,
-            "wabrix_packet_delay_seconds_bucket{{tmstats_name=\"{node}\",le=\"+Inf\"}} {sample_count}"
-        );
-        let delay_sum_seconds = histogram.sum_us as f64 / 1_000_000.0;
-        let _ = writeln!(
-            output,
-            "wabrix_packet_delay_seconds_sum{{tmstats_name=\"{node}\"}} {delay_sum_seconds:.6}"
-        );
-        let _ = writeln!(
-            output,
-            "wabrix_packet_delay_seconds_count{{tmstats_name=\"{node}\"}} {sample_count}"
+            "wabrix_histogram_count{{tmstats_name=\"{node}\",histogram=\"{name}\"}} {}",
+            histogram.count
         );
     }
 }

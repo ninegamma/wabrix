@@ -6,10 +6,7 @@ use std::sync::atomic::Ordering;
 use wabrix_api::helpers::parse_suffixed_number;
 use wabrix_api::tcp_common::EngineTimerPlan;
 use wabrix_api::{
-    BatchMetadata, INSPECTOR_DELAY_HISTOGRAM_BUCKETS, INSPECTOR_DELAY_HISTOGRAM_BUCKETS_INDEX,
-    INSPECTOR_DELAY_HISTOGRAM_MAGIC, INSPECTOR_DELAY_HISTOGRAM_MARKER_INDEX,
-    INSPECTOR_DELAY_HISTOGRAM_SUM_INDEX, MAX_BATCH_SIZE, TIMER_KIND_NONE, TIMER_KIND_SYN,
-    TIMER_KIND_TIMEOUT,
+    BatchMetadata, MAX_BATCH_SIZE, TIMER_KIND_NONE, TIMER_KIND_SYN, TIMER_KIND_TIMEOUT,
 };
 use wasmtime::component::{bindgen, ResourceTable};
 use wasmtime::Store;
@@ -39,6 +36,8 @@ bindgen!({
     // async: true,
 });
 
+use self::exports::wabrix::plugins::packet_engine::TelemetryMetric;
+
 pub struct WasmEngine {
     id: NodeId,
     #[cfg(feature = "runtime-diagnostics")]
@@ -55,8 +54,6 @@ pub struct WasmEngine {
     routing_table: Vec<NodeId>,
     /// Control event receiver channel
     processed_packets: u64,
-    /// helper for reducing telemetry fetching frequency
-    batch_count: u32,
     /// Aggregate execution cycles retained for the shutdown summary.
     #[cfg(feature = "profiling")]
     total_cycles: u64,
@@ -68,9 +65,6 @@ pub struct WasmEngine {
     mailbox_offset: u32,
     /// The Umem this node is bound to. Every incoming PDU must carry this id.
     umem_id: u8,
-    /// Set permanently true once call_get_telemetry() returns non-empty stats.
-    /// Disables in-band telemetry extraction which lacks TELEMETRY_FLAG guarding.
-    supports_oob_telemetry: bool,
     /// Set permanently true after WASM returns a malformed response.
     /// All further WASM calls are skipped to prevent SIGSEGV from bad UMEM writes.
     poisoned: bool,
@@ -202,14 +196,12 @@ impl WasmEngine {
             bindings,
             routing_table,
             processed_packets: 0,
-            batch_count: 0,
             #[cfg(feature = "profiling")]
             total_cycles: 0,
             telemetry_metrics,
             umem_offset: partition_handle.wasm_umem_offset(),
             mailbox_offset,
             umem_id,
-            supports_oob_telemetry: false,
             poisoned: false,
             timer_requested_frames: 0,
             timer_allocated_frames: 0,
@@ -226,6 +218,42 @@ impl WasmEngine {
             timer_diagnostics_enabled,
             timer_diagnostics_active: false,
         })
+    }
+
+    fn store_oob_telemetry(&self, metrics: Vec<TelemetryMetric>) {
+        let mut counter_index = 0;
+        for metric in metrics {
+            match metric {
+                TelemetryMetric::Counter(counter) => {
+                    if let Ok(mut names) = self.telemetry_metrics.counter_names.write() {
+                        if counter_index >= names.len() {
+                            names.resize(counter_index + 1, String::new());
+                        }
+                        names[counter_index] = counter.name;
+                    }
+                    if let Some(counter_slot) =
+                        self.telemetry_metrics.counters_pkts.get(counter_index)
+                    {
+                        counter_slot.store(counter.value, Ordering::Relaxed);
+                    }
+                    counter_index += 1;
+                }
+                TelemetryMetric::Hist(histogram) => {
+                    if let Some(named_histogram) = self
+                        .telemetry_metrics
+                        .histograms
+                        .iter()
+                        .find(|candidate| candidate.name == histogram.name)
+                    {
+                        named_histogram.metrics.store_snapshot(
+                            histogram.sum,
+                            histogram.count,
+                            &histogram.buckets,
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// PRIVATE HELPER: Handles WASM execution, Length mutation, Telemetry, and Routing
@@ -299,10 +327,8 @@ impl WasmEngine {
         }
 
         // ==========================================================
-        //  HYBRID TELEMETRY EXTRACTION
+        //  OUT-OF-BAND TELEMETRY EXTRACTION
         // ==========================================================
-        self.batch_count = self.batch_count.wrapping_add(1);
-
         let control_plane_wants_sync = match &self.telemetry_metrics.force_sync_flag {
             Some(flag) => flag.load(Ordering::Relaxed),
             None => false,
@@ -325,32 +351,12 @@ impl WasmEngine {
                     vec![]
                 });
             if !out_of_band_stats.is_empty() {
-                self.supports_oob_telemetry = true;
                 log::trace!(
                     "NODE {}: Extracted {} OOB telemetry packets",
                     self.id,
                     out_of_band_stats.len()
                 );
-                let expected_telemetry_len =
-                    INSPECTOR_DELAY_HISTOGRAM_BUCKETS_INDEX + INSPECTOR_DELAY_HISTOGRAM_BUCKETS;
-                let has_delay_histogram = out_of_band_stats.len() == expected_telemetry_len
-                    && out_of_band_stats.get(INSPECTOR_DELAY_HISTOGRAM_MARKER_INDEX)
-                        == Some(&INSPECTOR_DELAY_HISTOGRAM_MAGIC);
-                for (idx, &count) in out_of_band_stats.iter().enumerate() {
-                    if idx < self.telemetry_metrics.counters_pkts.len()
-                        && (!has_delay_histogram || idx < INSPECTOR_DELAY_HISTOGRAM_MARKER_INDEX)
-                    {
-                        self.telemetry_metrics.counters_pkts[idx].store(count, Ordering::Relaxed);
-                    }
-                }
-                if has_delay_histogram {
-                    if let Some(histogram) = &self.telemetry_metrics.delay_histogram {
-                        histogram.store_snapshot(
-                            out_of_band_stats[INSPECTOR_DELAY_HISTOGRAM_SUM_INDEX],
-                            &out_of_band_stats[INSPECTOR_DELAY_HISTOGRAM_BUCKETS_INDEX..],
-                        );
-                    }
-                }
+                self.store_oob_telemetry(out_of_band_stats);
             }
         }
 
@@ -378,20 +384,10 @@ impl WasmEngine {
             .collect();
         let mut pdu_index = 0;
 
-        batch.distribute(&mut outputs, |pdu| {
+        batch.distribute(&mut outputs, |_pdu| {
             // SAFETY: exclusive access restored after WASM returned.
             let action = unsafe { (*mailbox_ptr).actions[pdu_index] };
             pdu_index += 1;
-
-            if !self.supports_oob_telemetry {
-                let telemetry_bucket = ((action >> 16) & 0xFF) as usize;
-                if telemetry_bucket < self.telemetry_metrics.counters_pkts.len() {
-                    self.telemetry_metrics.counters_pkts[telemetry_bucket]
-                        .fetch_add(1, Ordering::Relaxed);
-                    self.telemetry_metrics.counters_bytes[telemetry_bucket]
-                        .fetch_add(pdu.w.data_len() as u64, Ordering::Relaxed);
-                }
-            }
 
             let route_id = (action & 0xFF) as usize;
             if route_id >= num_routes {
@@ -548,29 +544,7 @@ impl Node for WasmEngine {
                         .call_get_telemetry(&mut self.store)
                         .unwrap_or_default();
                     if !oob.is_empty() {
-                        self.supports_oob_telemetry = true;
-                        let expected_telemetry_len = INSPECTOR_DELAY_HISTOGRAM_BUCKETS_INDEX
-                            + INSPECTOR_DELAY_HISTOGRAM_BUCKETS;
-                        let has_delay_histogram = oob.len() == expected_telemetry_len
-                            && oob.get(INSPECTOR_DELAY_HISTOGRAM_MARKER_INDEX)
-                                == Some(&INSPECTOR_DELAY_HISTOGRAM_MAGIC);
-                        for (idx, &count) in oob.iter().enumerate() {
-                            if idx < self.telemetry_metrics.counters_pkts.len()
-                                && (!has_delay_histogram
-                                    || idx < INSPECTOR_DELAY_HISTOGRAM_MARKER_INDEX)
-                            {
-                                self.telemetry_metrics.counters_pkts[idx]
-                                    .store(count, Ordering::Relaxed);
-                            }
-                        }
-                        if has_delay_histogram {
-                            if let Some(histogram) = &self.telemetry_metrics.delay_histogram {
-                                histogram.store_snapshot(
-                                    oob[INSPECTOR_DELAY_HISTOGRAM_SUM_INDEX],
-                                    &oob[INSPECTOR_DELAY_HISTOGRAM_BUCKETS_INDEX..],
-                                );
-                            }
-                        }
+                        self.store_oob_telemetry(oob);
                     }
                 }
                 Directive::Stop

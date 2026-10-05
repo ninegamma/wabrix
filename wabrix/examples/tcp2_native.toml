@@ -58,7 +58,6 @@ id = "tcp_engine"
 type = "TcpNode"
 routes = ["shared_tx_sink", "veth_sink", "drop"]
 desired_state = "Running"
-labels = ["SentSyn", "SentSynAck", "SentSynAck2", "SentFin", "SentFinPssv", "SentAck4Fin", "SentAck", "SentRst", "RecvSyn", "RecvSynAck", "RecvSynAck2", "RecvFin", "RecvFinPssv", "RecvAck4Fin", "RecvAck", "RecvRst", "Unexpected", "RecvPayload", "SentPayload", "TickDrop", "ToLinux", "Drop", "Watermark"]
 args= { umem = "0" }
 hot_args= { }
 
@@ -134,7 +133,6 @@ id = "tcp_engine"
 type = "TcpNode"
 routes = ["shared_tx_sink", "veth_sink", "drop"]
 desired_state = "Running"
-labels = ["SentSyn", "SentSynAck", "SentSynAck2", "SentFin", "SentFinPssv", "SentAck4Fin", "SentAck", "SentRst", "RecvSyn", "RecvSynAck", "RecvSynAck2", "RecvFin", "RecvFinPssv", "RecvAck4Fin", "RecvAck", "RecvRst", "Unexpected", "RecvPayload", "SentPayload", "TickDrop", "ToLinux", "Drop", "Watermerk"]
 args= { umem = "1" }
 hot_args= {}
 
