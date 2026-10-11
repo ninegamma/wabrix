@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.5.0] - 2026-10-05
+
+This release replaces positional and in-band plugin telemetry with named
+out-of-band metrics and extends telemetry to support multiple histograms per
+node.
+
+### Added
+
+- Named counter and histogram records in the WIT telemetry interface.
+- Packet-delay histogram export with cumulative counts, sums, and samples.
+- Generic multi-histogram aggregation and Prometheus export.
+- Stable counter names for filter, generator, inspector, and TCP plugins.
+- Updated telemetry snapshots and TypeScript bindings for named counters and
+  histograms.
+- Bounded per-worker reuse of `Batch` packet storage after downstream batches
+  are dropped.
+
+### Changed
+
+- Migrated plugin telemetry from positional `u64` values and in-band markers
+  to structured out-of-band records.
+- Removed counter-label arrays from node configuration and example TOML files.
+- Updated the host, endpoint UI, metrics exporter, and integration tests to
+  consume named counters.
+- Updated the workspace to the current `xsk-core`, `libbpf-rs`, and Wabrix API
+  dependency versions.
+- Initialized AF_XDP fill queues during socket creation with preallocated
+  addresses via `xsk-core` 0.2.1.
+- Refreshed the one-worker generator example for the current benchmark topology
+  and packet rate.
+
+### Fixed
+
+- Preserved histogram snapshots during idle Wasm telemetry synchronization.
+- Validated histogram bucket schemas while aggregating metrics across workers.
+- Skipped serving-core IRQ-affinity checks when an interface has no RX worker
+  assigned.
+
 ## [0.4.0] - 2026-09-24
 
 This release extends the Wasm dataplane memory model while retaining shared

@@ -1,11 +1,11 @@
 [wabrix]
 ifaces= [
-    { name = "enp2s0f0np0", rxd = 8096, txd = 8096, irq_core = 4, napi = { flush_timeout_ns = 60000, defer_irqs = 256 } },
+    { name = "enp2s0f0np0", rxd = 8096, txd = 8096, irq_core = 2, napi = { flush_timeout_ns = 60000, defer_irqs = 256 } },
     { name = "enp2s0f1np1", rxd = 8096, txd = 8096, irq_core = 3, rx_timestamp = false, napi = { flush_timeout_ns = 100000, defer_irqs = 512 } },
     #{ name = "enp2s0f1np1", rxd = 8096, txd = 8096, irq_core = 5 } ,
 ]
 umem= [
-    { id = 0, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 2 },
+    { id = 0, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 1 },
     { id = 1, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 1 },
 ]
 
@@ -23,7 +23,6 @@ xsk= [
 workers= [
     { id = 0, core = 2, partitions = [{ umem = 0, count = 1 }] },
     { id = 1, core = 3, partitions = [{ umem = 1, count = 1 }] },
-    { id = 2, core = 4, partitions = [{ umem = 0, count = 1 }] },
 ]
 
 
@@ -56,7 +55,7 @@ src_ip = "10.10.10.222"
 
 [pipelines.nodes.hot_node_data]
 generation_limit = "500M"
-generation_rate = "11000K"
+generation_rate = "16000K"
 
 [[pipelines.nodes]]
 id = "tx_f0np0"
@@ -80,7 +79,7 @@ hot_args= {}
 # ===================================================================
 name = "inspector_pipe"
 workers = [1]
-poll_frequency = 1000
+poll_frequency = 5000
 # Target lifecycle state for this pipeline
 # Valid values: "Running", "Paused",
 desired_state = "Running"
@@ -103,7 +102,8 @@ hot_args= {}
 [[pipelines.nodes]]
 id = "inspector"
 type = "WasmEngine"
-routes = ["tx_f1np1"]
+routes = ["drop", "drop"]
+#routes = ["tx_f1np1", "drop"]
 # Node-level state override
 desired_state = "Running"
 args= { umem = "1", wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/inspector_engine.wasm" }
@@ -122,32 +122,6 @@ type = "BatchTxNode"
 routes = []
 queues = [0]
 args= { sink_type = "xsk", interface = "enp2s0f1np1" }
-hot_args= {}
-
-[[pipelines.nodes]]
-id = "drop"
-type = "DropNode"
-routes = []
-args= {}
-hot_args= {}
-
-[[pipelines]]
-# ===================================================================
-# PIPELINE: evaluator
-# ===================================================================
-name = "evaluator_pipe"
-workers = [2]
-poll_frequency = 1000
-# Target lifecycle state for this pipeline
-# Valid values: "Running", "Paused",
-desired_state = "Running"
-
-[[pipelines.nodes]]
-id = "rx_f0np0"
-type = "BatchRxNode"
-routes = ["drop"]
-queues = [0]
-args= { interface = "enp2s0f0np0", batch_size = "512" }
 hot_args= {}
 
 [[pipelines.nodes]]

@@ -4,13 +4,54 @@ use core::mem::MaybeUninit;
 use core::ops::{Bound, RangeBounds};
 use core::ptr;
 use log::trace;
+use std::cell::RefCell;
 use wabrix_api::MAX_BATCH_SIZE;
+
+type PacketStorage = Vec<MaybeUninit<Pdu>>;
+
+// Batch storage is only used by one worker at a time. Keeping a small per-thread
+// cache avoids synchronisation and lets output batches reuse their backing memory
+// after downstream processing drops them.
+const BATCH_STORAGE_POOL_CAPACITY: usize = 16;
+
+thread_local! {
+    static BATCH_STORAGE_POOL: RefCell<Vec<PacketStorage>> =
+        RefCell::new(Vec::with_capacity(BATCH_STORAGE_POOL_CAPACITY));
+}
+
+fn allocate_packet_storage() -> PacketStorage {
+    BATCH_STORAGE_POOL
+        .try_with(|pool| pool.borrow_mut().pop())
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| {
+            // Allocate uninitialized packet slots without zeroing the 32 KiB
+            // backing store. The vector length is fixed for every Batch.
+            let mut packets = Vec::with_capacity(MAX_BATCH_SIZE);
+            // SAFETY: `MaybeUninit<Pdu>` is valid for every bit pattern, and
+            // the vector owns capacity for at least MAX_BATCH_SIZE elements.
+            unsafe {
+                packets.set_len(MAX_BATCH_SIZE);
+            }
+            packets
+        })
+}
+
+fn recycle_packet_storage(packets: PacketStorage) {
+    let _ = BATCH_STORAGE_POOL.try_with(|pool| {
+        let mut pool = pool.borrow_mut();
+        if pool.len() < BATCH_STORAGE_POOL_CAPACITY {
+            pool.push(packets);
+        }
+        // `packets` is dropped here when the bounded cache is full.
+    });
+}
 
 pub struct Batch {
     /// A dense array of uninitialized memory.
     /// NO padding between PDUs.
     /// For RTC, we usually fill the first `count` slots.
-    packets: [MaybeUninit<Pdu>; MAX_BATCH_SIZE],
+    packets: PacketStorage,
     /// Number of packets currently in the batch
     count: usize,
 }
@@ -24,9 +65,10 @@ impl Default for Batch {
 impl Batch {
     /// Create an empty batch
     pub fn new() -> Self {
-        // Safe because MaybeUninit doesn't require initialization
-        let packets = unsafe { MaybeUninit::uninit().assume_init() };
-        Self { packets, count: 0 }
+        Self {
+            packets: allocate_packet_storage(),
+            count: 0,
+        }
     }
 
     /// Add a PDU to the batch
@@ -344,6 +386,10 @@ impl Batch {
 impl Drop for Batch {
     fn drop(&mut self) {
         self.bulk_drop();
+        // SAFETY: `bulk_drop` leaves no live PDUs in the storage, so it can be
+        // safely returned to the pool and reused by a future Batch.
+        let packets = core::mem::replace(&mut self.packets, Vec::new());
+        recycle_packet_storage(packets);
     }
 }
 
@@ -416,6 +462,16 @@ mod tests {
         let batch = Batch::new();
         assert_eq!(batch.len(), 0);
         assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn test_batch_storage_is_reused_after_drop() {
+        let first = Batch::new();
+        let storage_ptr = first.as_ptr();
+        drop(first);
+
+        let second = Batch::new();
+        assert_eq!(second.as_ptr(), storage_ptr);
     }
 
     #[test]

@@ -777,6 +777,7 @@ impl PipelineFactory {
                     let counter_names = Arc::new(RwLock::new(Vec::new()));
                     let num_buckets = match node_instance.node_config.effective_arg("wasm_file_path")
                     {
+                        //TODO calculate the num_buckets, or retrieve it from the wasm file
                         Some(path) if path.contains("inspector_engine") => 5,
                         Some(path) if path.contains("filter_engine") => 2,
                         Some(path) if path.contains("generator_engine") => 23,

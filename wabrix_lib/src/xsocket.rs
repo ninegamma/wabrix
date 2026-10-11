@@ -213,8 +213,15 @@ impl XSocket {
         let iface_handle = Interface::new(c_iface);
 
         probe_kernel_fds("PRE Socket::new");
-        let (tx_q, rx_q, queues_opt) =
-            unsafe { Socket::new(socket_config, &umem, &iface_handle, config.queue_id)? };
+        let (tx_q, rx_q, queues_opt) = unsafe {
+            Socket::new_with_initial_fill(
+                socket_config,
+                &umem,
+                &iface_handle,
+                config.queue_id,
+                &initial_addrs,
+            )?
+        };
         probe_kernel_fds("POST Socket::new");
 
         // 3. Resolve Fill/Comp Queues
@@ -234,23 +241,6 @@ impl XSocket {
                 queues_opt.ok_or("Primary socket failed to return Fill/Comp queues")?;
             (Arc::new(Mutex::new(raw_fq)), Arc::new(Mutex::new(raw_cq)))
         };
-
-        // ==========================================
-        //     IMMEDIATELY PRE-FILL THE QUEUE
-        // ==========================================
-        // We must push the allocated descriptors into the ring right now so the
-        // Intel driver can grab them the first time we call poll() in the RX loop!
-        if !initial_addrs.is_empty() {
-            let mut fq_guard = fq.lock();
-            unsafe {
-                let produced = fq_guard.produce(&initial_addrs);
-                log::info!(
-                    "Worker {}: Pre-filled FQ ring with {} empty frames.",
-                    config.worker_id,
-                    produced
-                );
-            }
-        }
 
         let fd = rx_q.fd().as_raw_fd();
         let xdp_fm = Self {

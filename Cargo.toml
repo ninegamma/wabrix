@@ -20,7 +20,7 @@ wabrix_base = { path = "wabrix_base" }
 wabrix_wasm = { path = "wabrix_wasm" }
 libbpf-rs = "0.27.1"
 libbpf-sys = { version = "1.7", default-features = false }
-xsk-core = { git = "https://github.com/ninegamma/xsk-core.git", branch = "main", version= "0.2.0" }
+xsk-core = { git = "https://github.com/ninegamma/xsk-core.git", branch = "main", version= "0.2.1" }
 # Add these for the Wasm side of the house:
 wit-bindgen = "0.60.0"
 wasmtime = { version = "43.0", features = ["component-model"] }

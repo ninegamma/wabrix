@@ -465,6 +465,19 @@ pub fn check_interface_irq_affinity(iface: &InterfaceCheckConfig, all_worker_cor
                     iface.name
                 );
             }
+
+            if iface.serving_worker_cores.is_empty() {
+                match iface.irq_core {
+                    Some(irq_core) => info!(
+                        "✓ Interface {} has no RX worker assigned; serving-core IRQ affinity check skipped (configured IRQ core: {}).",
+                        iface.name, irq_core
+                    ),
+                    None => info!(
+                        "✓ Interface {} has no RX worker assigned; serving-core IRQ affinity check skipped.",
+                        iface.name
+                    ),
+                }
+            }
         }
         _ => {
             // userspace_ring_spin (default)
@@ -511,7 +524,8 @@ pub fn check_interface_irq_affinity(iface: &InterfaceCheckConfig, all_worker_cor
                         }
 
                         for &worker_core in all_worker_cores {
-                            if !iface.serving_worker_cores.contains(&worker_core)
+                            if !iface.serving_worker_cores.is_empty()
+                                && !iface.serving_worker_cores.contains(&worker_core)
                                 && allowed_cpus.contains(&worker_core)
                             {
                                 warn!(

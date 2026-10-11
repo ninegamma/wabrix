@@ -4015,8 +4015,8 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "xsk-core"
-version = "0.2.0"
-source = "git+https://github.com/ninegamma/xsk-core.git?branch=main#9647d03c4b06337b29428db70d600cb094f92440"
+version = "0.2.1"
+source = "git+https://github.com/ninegamma/xsk-core.git?branch=main#5effa9eec0ce6d859a50c3b0395db6117ec45985"
 dependencies = [
  "bitflags 2.13.1",
  "cfg-if",
