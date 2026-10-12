@@ -9,10 +9,44 @@ Designed for environments where standard firewalls fail—such as proprietary Io
 ---
 
 ## 🚀 Performance Metrics
+
 * **Throughput:** Capable of 25 Gbps+ on standard COTS hardware.
 * **Stateful Inspection:** High-speed, wire-speed tracking of millions of concurrent connection states (L4/L7) with a minimal, deterministic memory footprint.
 * **Efficiency:** Demonstrated setup and release of more than **1 million TCP connections/second per performance CPU core** (Intel© Core™ i7-14700K).
 * **Latency:** Deterministic, microsecond-level processing for time-sensitive industrial control loops and high-frequency trading (HFT).
+
+Wabrix's TOML configuration lets deployments tune the tradeoff between
+throughput and latency. This supports both low-latency applications and
+workloads that require extreme throughput per core while avoiding long latency tails.
+
+### 16 Mpps/core latency distribution of 500 million UDP packets
+
+In [`gen_engine_1w.toml`](wabrix/examples/gen_engine_1w.toml), the generator is
+configured for 16 Mpps of UDP traffic on worker core 2. Packets leave one port
+of the Intel E830VDA2 NIC, cross a DAC to its other port, and reach the
+single-core inspector on worker core 3 for latency measurement. The run is using NAPI busy polling,
+i.e., no extra cores for softirq interrupts.
+
+```mermaid
+flowchart LR
+  gen["Generator node<br/>worker core 2"]
+  tx["TX interface<br/>enp2s0f0np0 · E830VDA2 port 0"]
+  rx["RX interface<br/>enp2s0f1np1 · E830VDA2 port 1"]
+  parser["FastParserNode"]
+  inspect["Inspector node<br/>worker core 3<br/>measures packet latency"]
+
+  gen -->|"UDP · 16 Mpps"| tx
+  tx -->|"DAC"| rx
+  rx --> parser --> inspect
+```
+
+The histogram below shows the latency distribution across a 500 million packet
+sample. Each bucket spans 10 microseconds, and the logarithmic vertical axis
+makes the exponentially decreasing low-frequency tail visible alongside the concentration in the
+lower-latency buckets. **There is zero packet loss and no long tail.**
+
+![Latency distribution across 500 million packets](Latency%202026-10-12%2014-43-06.png)
+
 
 ## 🏗️ Architecture
 Wabrix works by bypassing the standard Linux networking stack using a modern, kernel-native approach:

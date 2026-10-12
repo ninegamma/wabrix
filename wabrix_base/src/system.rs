@@ -341,22 +341,44 @@ pub fn check_irqbalance_status() {
     }
 }
 
-pub fn check_cpu_governor(worker_core: usize) {
+/// Set a CPU's frequency governor to performance, then confirm the active governor.
+pub fn check_cpu_governor(cpu: usize) {
     let governor_path = format!(
         "/sys/devices/system/cpu/cpu{}/cpufreq/scaling_governor",
-        worker_core
+        cpu
     );
-    if let Ok(governor) = fs::read_to_string(&governor_path) {
-        let governor = governor.trim();
-        if governor != "performance" {
-            warn!(
-                "⚠️  LATENCY WARNING: Core {} is set to '{}' mode.",
-                worker_core, governor
-            );
-            warn!("   Run 'cpupower frequency-set -g performance' for zero-drop stability.");
-        } else {
-            info!("✓ Core {} is in performance mode.", worker_core);
+
+    match fs::read_to_string(&governor_path) {
+        Ok(governor) if governor.trim() == "performance" => {
+            info!("✓ Core {} is in performance mode.", cpu);
         }
+        Ok(governor) => {
+            let governor = governor.trim();
+            match fs::write(&governor_path, "performance") {
+                Ok(()) => match fs::read_to_string(&governor_path) {
+                    Ok(current) if current.trim() == "performance" => {
+                        info!("✓ Set core {} to performance mode.", cpu);
+                    }
+                    Ok(current) => warn!(
+                        "⚠️  LATENCY WARNING: Core {} remains in '{}' mode after requesting performance mode.",
+                        cpu,
+                        current.trim()
+                    ),
+                    Err(error) => warn!(
+                        "⚠️  Could not verify the governor for core {} after requesting performance mode: {}",
+                        cpu, error
+                    ),
+                },
+                Err(error) => warn!(
+                    "⚠️  LATENCY WARNING: Core {} is set to '{}' mode and could not be changed to performance: {}",
+                    cpu, governor, error
+                ),
+            }
+        }
+        Err(error) => warn!(
+            "⚠️  Could not read the CPU governor for core {} at {}: {}",
+            cpu, governor_path, error
+        ),
     }
 }
 
@@ -1268,8 +1290,12 @@ pub fn check_system(
         }
     }
 
-    // Check CPU governor for all worker cores
-    for &core in worker_cores {
+    // Set the governor on every CPU referenced by workers or IRQ assignments.
+    let mut configured_cores = worker_cores.to_vec();
+    configured_cores.extend(irq_assignments.iter().map(|(_, core)| *core));
+    configured_cores.sort_unstable();
+    configured_cores.dedup();
+    for core in configured_cores {
         check_cpu_governor(core);
     }
 

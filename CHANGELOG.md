@@ -1,10 +1,10 @@
 # Changelog
 
-## [0.5.0] - 2026-10-05
+## [0.5.0] - 2026-10-11
 
 This release replaces positional and in-band plugin telemetry with named
 out-of-band metrics and extends telemetry to support multiple histograms per
-node.
+node. Also, massive performance improvements have been achieved.
 
 ### Added
 
