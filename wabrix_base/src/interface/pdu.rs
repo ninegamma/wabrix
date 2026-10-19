@@ -75,9 +75,9 @@ impl Drop for Pdu {
                     // Return the memory instantly to the local stash.
                     trace!(
                         "Drop for Pdu: Returning frame {} to local stash",
-                        self.global_frame_idx()
+                        self.frame_token()
                     );
-                    registry.release_local(self.global_frame_idx());
+                    registry.release_local(self.frame_token());
                     return;
                 }
             }
@@ -97,12 +97,12 @@ impl Drop for Pdu {
                 // If on a different core, this is a cross-core SPSC send.
                 // We ignore SendError (e.g., if the channel is full or disconnected on shutdown).
                 if bus.bus_senders[self.owner_id() as usize]
-                    .push(self.global_frame_idx())
+                    .push(self.frame_token())
                     .is_err()
                 {
                     log::error!(
                         "🔥 CRITICAL: return queue full, frame {} leaked!",
-                        self.global_frame_idx()
+                        self.frame_token()
                     );
                 }
             }
@@ -114,8 +114,8 @@ impl fmt::Display for Pdu {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "(Frame: {}, data_len= {}), headers=\n{}",
-            self.global_frame_idx(),
+            "(Frame token: {}, data_len= {}), headers=\n{}",
+            self.frame_token(),
             self.data_len(),
             self.headers(),
         )
@@ -128,7 +128,7 @@ impl Pdu {
     #[inline(always)]
     pub fn new(
         desc: FrameDesc,
-        global_frame_idx: u32,
+        frame_token: u32,
         owner_id: u8,
         system_bus: *const SystemBus,
         frame_size_log2: u8,
@@ -137,7 +137,7 @@ impl Pdu {
             desc.addr(),
             desc.length(),
             desc.options(),
-            global_frame_idx,
+            frame_token,
             frame_size_log2,
             owner_id,
         );
@@ -193,11 +193,11 @@ impl Pdu {
         // .copied() turns it into Option<Option<usize>>
         // .flatten() turns it into Option<usize>
         let umem_group_id =
-            resolve_frame_token(self.global_frame_idx(), &bus.partition_directory)?.umem_group_id;
+            resolve_frame_token(self.frame_token(), &bus.partition_directory)?.umem_group_id;
         bus.umem_addr.get(umem_group_id).copied().flatten()
     }
 
-    /// Returns the UMEM group owning this frame's partition token.
+    /// Returns the UMEM group owning this frame token.
     #[inline(always)]
     pub fn umem_id(&self) -> Option<u8> {
         if self.system_bus.is_null() {
@@ -207,7 +207,7 @@ impl Pdu {
         // SAFETY: the SystemBus pointer is installed when the PDU is created and
         // remains valid for the PDU's lifetime.
         let bus = unsafe { &*self.system_bus };
-        resolve_frame_token(self.global_frame_idx(), &bus.partition_directory)
+        resolve_frame_token(self.frame_token(), &bus.partition_directory)
             .and_then(|resolved| u8::try_from(resolved.umem_group_id).ok())
     }
 
@@ -234,7 +234,7 @@ impl Pdu {
 
     /// Creates a lightweight copy of the Pdu.
     ///
-    /// increments the reference count in the SystemBus for this frame_idx.
+    /// increments the reference count in the SystemBus for this frame token.
     /// The actual packet data in UMEM is NOT copied.
     pub fn shallow_copy(&self) -> Self {
         unsafe {
@@ -242,12 +242,12 @@ impl Pdu {
             if !self.system_bus.is_null() {
                 let bus = &*self.system_bus;
                 if bus.bus_senders[self.owner_id() as usize]
-                    .push(CMD_BIT | self.global_frame_idx())
+                    .push(CMD_BIT | self.frame_token())
                     .is_err()
                 {
                     log::error!(
                         "🔥 CRITICAL: return queue full, retain for frame {} dropped!",
-                        self.global_frame_idx()
+                        self.frame_token()
                     );
                 }
             }
@@ -453,7 +453,7 @@ mod tests {
                 desc_addr: HEADROOM,
                 desc_len: INITIAL_PAYLOAD_LEN as u32,
                 desc_options: 0u32,
-                frame_idx: 0u32,
+                frame_token: 0u32,
                 frame_size_log2: 11,
                 owner_id: 0u8,
                 flags: 0u8,
@@ -546,7 +546,7 @@ mod tests {
         // We pass a null pointer for SystemBus as we won't trigger bus operations
         let mut pdu = Pdu::new(
             desc,
-            0,                 // frame_idx
+            0,                 // frame_token
             0,                 // owner_id
             core::ptr::null(), // system_bus
             frame_size_log2,

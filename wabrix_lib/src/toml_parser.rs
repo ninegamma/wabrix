@@ -829,15 +829,6 @@ impl WabricksConfig {
                 ));
             }
 
-            // Validate partition count is a power of 2
-            if !umem_cfg.partitions.is_power_of_two() {
-                return Err(anyhow!(
-                    "UMEM {}: partitions must be a power of 2, got {}",
-                    umem_cfg.id,
-                    umem_cfg.partitions
-                ));
-            }
-
             // Validate that all frames are evenly divisible into partitions
             if umem_cfg.frame_count % umem_cfg.partitions != 0 {
                 return Err(anyhow!(
@@ -1630,8 +1621,8 @@ impl WabricksConfig {
         // --- STEP 2: Create Runtime UMEM Configs ---
 
         let mut runtime_umems: Vec<Option<Arc<RuntimeUmemConfig>>> = vec![None; MAX_UMEM];
-        // Assuming global frame indices are sequential across UMEM groups based on definition order
-        let mut current_global_frame_idx = 0;
+        // Absolute frame positions are sequential across UMEM groups by definition order.
+        let mut current_absolute_frame_idx = 0;
 
         for umem_cfg in &self.wabrix.umem {
             let frame_size_log2 = umem_cfg.frame_size.trailing_zeros() as u8;
@@ -1643,12 +1634,12 @@ impl WabricksConfig {
                 head_room: umem_cfg.head_room,
                 fq_size: umem_cfg.fq_size,
                 cq_size: umem_cfg.cq_size,
-                group_start_frame_idx: current_global_frame_idx,
+                group_start_frame_idx: current_absolute_frame_idx,
                 partitions: umem_cfg.partitions,
             });
 
             runtime_umems[umem_cfg.id] = Some(rc);
-            current_global_frame_idx += umem_cfg.frame_count;
+            current_absolute_frame_idx += umem_cfg.frame_count;
         }
 
         // --- STEP 3: Create XdpSocketConfigs ---
@@ -2668,14 +2659,14 @@ mod tests {
     }
 
     #[test]
-    fn test_umem_partitions_not_power_of_two() {
+    fn test_umem_partitions_not_power_of_two_valid() {
         let toml_str = r#"
             [wabrix]
             ifaces = [
                 { name = "lo", rxd = 2048, txd = 2048 }
             ]
             umem = [
-                { id = 0, frame_size = 2048, frame_count = 16384, fq_size = 4096, cq_size = 4096, head_room = 128, partitions = 3 }
+                { id = 0, frame_size = 2048, frame_count = 18432, fq_size = 4096, cq_size = 4096, head_room = 128, partitions = 3 }
             ]
             xsk = [
                 { iface = "lo", queues = [0], umem = 0, rxq_size = 1024, txq_size = 1024, zerocopy = true }
@@ -2686,12 +2677,7 @@ mod tests {
         "#;
 
         let config: WabricksConfig = toml::from_str(toml_str).unwrap();
-        let result = config.validate();
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("partitions must be a power of 2"));
+        assert!(config.validate().is_ok());
     }
 
     #[test]

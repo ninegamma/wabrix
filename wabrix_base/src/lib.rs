@@ -9,7 +9,7 @@ pub mod node_instance_id;
 pub mod system;
 pub mod telemetry;
 
-use crate::frame_registry::{decode_global_frame, encode_global_frame, MAX_PARTITIONS, MAX_UMEM};
+use crate::frame_registry::{decode_frame_token, encode_frame_token, MAX_PARTITIONS, MAX_UMEM};
 use crate::interface::batch::Batch;
 use core::fmt::Display;
 use crossbeam_queue::ArrayQueue;
@@ -28,7 +28,7 @@ pub struct RuntimeUmemConfig {
     pub head_room: u32,
     pub fq_size: u32,
     pub cq_size: u32,
-    ///the offset of the global frame index for this group
+    ///the offset of the absolute frame index for this group
     pub group_start_frame_idx: u32,
     /// Number of partitions this UMEM is divided into
     pub partitions: u32,
@@ -51,21 +51,35 @@ pub struct UmemPartition {
     pub partition_id: usize,
     pub worker_id: usize,     // Worker thread that owns this partition
     pub umem_group_id: usize, // Memory domain (UMEM group)
-    pub start_idx: u32, // Absolute global frame index (used by system_builder for layout math)
+    pub start_idx: u32,       // Absolute frame index (used by system_builder for layout math)
     // end_idx is non-inclusive: [start_idx, end_idx)
-    pub end_idx: u32, // Absolute global frame index
+    pub end_idx: u32, // Absolute frame index
     /// UMEM-relative start: local_start = start_idx - group_start_frame_idx
     pub local_start: u32,
     /// UMEM-relative end (non-inclusive): local_end = end_idx - group_start_frame_idx
     pub local_end: u32,
 }
 
+/// Direct lookup from a logical, equal-sized UMEM partition to its frame-token partition.
+#[derive(Debug, Clone, Default)]
+pub struct UmemPartitionMap {
+    partition_size: u32,
+    partition_ids: Vec<Option<u8>>,
+}
+
+/// Token and owner resolved from a UMEM group and local frame index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedLocalFrame {
+    pub frame_token: u32,
+    pub worker_id: usize,
+}
+
 impl UmemPartition {
-    /// Check ownership against an **encoded** global frame index
+    /// Check ownership against a frame token
     /// (format: partition ID plus partition-relative offset).
     #[inline]
-    pub fn owns_encoded(&self, encoded_frame_idx: u32) -> bool {
-        let (partition_id, offset) = decode_global_frame(encoded_frame_idx);
+    pub fn owns_frame_token(&self, frame_token: u32) -> bool {
+        let (partition_id, offset) = decode_frame_token(frame_token);
         partition_id == self.partition_id
             && offset < self.local_end.saturating_sub(self.local_start)
     }
@@ -74,17 +88,18 @@ impl UmemPartition {
 /// Per-worker lockless return queue: packed u32 commands.
 /// Bit 31 = command (0 = Release, 1 = Retain); bits 30-23 = partition ID;
 /// bits 22-0 = partition-relative offset.
-/// See frame_registry::{CMD_BIT, is_retain, extract_global_idx} for helpers.
+/// See frame_registry::{CMD_BIT, is_retain, extract_frame_token} for helpers.
 #[derive(Clone)]
 #[repr(align(64))]
 pub struct SystemBus {
     /// One ArrayQueue<u32> per worker. Senders push packed u32 commands;
     /// the owning worker pops them in process_returns().
     pub bus_senders: Vec<Arc<ArrayQueue<u32>>>,
-    /// Directly indexed partition metadata for frame-token resolution.
+    /// partition metadata for frame-token resolution indexed by partition_id.
     pub partition_directory: Vec<Option<UmemPartition>>,
-    /// Direct local-frame-to-token lookup used when RX descriptors carry only an address.
-    pub frame_tokens: Vec<Vec<Option<u32>>>,
+    /// Per-logical-partition token IDs used for constant-time frame-token resolution.
+    /// This stores one entry per configured UMEM group
+    pub frame_partition_maps: Vec<UmemPartitionMap>,
     pub umem_addr: [Option<usize>; MAX_UMEM],
 }
 
@@ -115,28 +130,83 @@ impl SystemBus {
         directory
     }
 
-    pub fn frame_tokens(
+    pub fn frame_partition_maps(
         partitions: &[UmemPartition],
         frame_counts: &[u32],
-    ) -> Vec<Vec<Option<u32>>> {
-        let mut tokens = frame_counts
+        partition_counts: &[u32],
+    ) -> Vec<UmemPartitionMap> {
+        let mut maps: Vec<UmemPartitionMap> = frame_counts
             .iter()
-            .map(|&count| vec![None; count as usize])
-            .collect::<Vec<_>>();
+            .enumerate()
+            .map(|(group_id, &frame_count)| {
+                let partition_count = partition_counts.get(group_id).copied().unwrap_or(0);
+                if partition_count == 0 || frame_count % partition_count != 0 {
+                    return UmemPartitionMap::default();
+                }
+
+                UmemPartitionMap {
+                    partition_size: frame_count / partition_count,
+                    partition_ids: vec![None; partition_count as usize],
+                }
+            })
+            .collect();
+
         for partition in partitions {
-            let Some(group_tokens) = tokens.get_mut(partition.umem_group_id) else {
+            let Some(map) = maps.get_mut(partition.umem_group_id) else {
                 continue;
             };
-            for local_idx in partition.local_start..partition.local_end {
-                if let Some(slot) = group_tokens.get_mut(local_idx as usize) {
-                    *slot = Some(encode_global_frame(
-                        partition.partition_id,
-                        local_idx - partition.local_start,
-                    ));
-                }
+            if map.partition_size == 0 {
+                continue;
+            }
+
+            let frame_count = frame_counts[partition.umem_group_id];
+            let local_start = partition.local_start.min(frame_count);
+            let local_end = partition.local_end.min(frame_count);
+            if local_start >= local_end {
+                continue;
+            }
+
+            assert!(
+                partition.partition_id < MAX_PARTITIONS,
+                "partition ID exceeds token capacity"
+            );
+
+            let first_slot = (local_start / map.partition_size) as usize;
+            let end_slot = local_end.div_ceil(map.partition_size) as usize;
+            for slot in first_slot..end_slot.min(map.partition_ids.len()) {
+                assert!(
+                    map.partition_ids[slot].is_none(),
+                    "logical UMEM partition is assigned to multiple frame-token partitions"
+                );
+                map.partition_ids[slot] = Some(partition.partition_id as u8);
             }
         }
-        tokens
+
+        maps
+    }
+
+    /// Resolves a UMEM-local frame index to its frame token and owning worker.
+    #[inline]
+    pub fn resolve_local_frame_idx(
+        &self,
+        umem_group_id: usize,
+        local_idx: u32,
+    ) -> Option<ResolvedLocalFrame> {
+        let map = self.frame_partition_maps.get(umem_group_id)?;
+        if map.partition_size == 0 {
+            return None;
+        }
+        let slot = (local_idx / map.partition_size) as usize;
+        let partition_id = *map.partition_ids.get(slot)?.as_ref()? as usize;
+        let partition = self.partition_directory.get(partition_id)?.as_ref()?;
+        if local_idx < partition.local_start || local_idx >= partition.local_end {
+            return None;
+        }
+
+        Some(ResolvedLocalFrame {
+            frame_token: encode_frame_token(partition_id, local_idx - partition.local_start),
+            worker_id: partition.worker_id,
+        })
     }
 }
 

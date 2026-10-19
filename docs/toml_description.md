@@ -72,13 +72,15 @@ Default: one entry with `id=0`, `frame_size=2048`, `frame_count=65536`, `fq_size
 |-------|------|----------|-------------|
 | `id` | integer | **yes** | Unique UMEM identifier. Must be 0–255. |
 | `frame_size` | integer | **yes** | Size in bytes of each frame. Must be a power of 2 and > 0. |
-| `frame_count` | integer | **yes** | Total number of frames in the UMEM. Must be > 0 and evenly divisible by `partitions`. |
+| `frame_count` | integer | **yes** | Total number of frames in the UMEM. Must be > 0 and evenly divisible by `partitions`. The UMEM byte size (`frame_count × frame_size`) must be a multiple of the system's huge-page size; reserve enough huge pages for the UMEM. |
 | `fq_size` | integer | **yes** | Fill queue ring size. Must be > 0. |
 | `cq_size` | integer | **yes** | Completion queue ring size. Must be > 0. |
 | `head_room` | integer | **yes** | Reserved bytes at the start of each frame for metadata headers. Must be < `frame_size`. |
-| `partitions` | integer | no | Number of memory partitions (one per worker). Default `1`. Must be a power of 2 and ≥ 1. |
+| `partitions` | integer | no | Number of memory partitions (one per worker). Default `1`. Must be ≥ 1. |
 
 **Sizing guidance:** `frame_count` must cover hardware-locked frames (`fq_size + rxq_size + txq_size` per socket) plus the frames needed by the application.
+
+UMEM memory is mapped with huge pages. For example, with 2 MiB huge pages and a `frame_size` of 2048 bytes, `frame_count` must be a multiple of 1024. If `partitions = 3`, it must satisfy both constraints, so use a multiple of 3072 (for example, `301056`). The host must also have enough huge pages reserved for the UMEM.
 
 **Example:**
 ```toml
@@ -404,10 +406,10 @@ workers = [1]
 |------|--------|
 | UMEM `id` | 0–255 |
 | `frame_size` | Power of 2, > 0 |
-| `partitions` | Power of 2, ≥ 1 |
+| `partitions` | ≥ 1 |
 | `rxq_size` / `txq_size` | Power of 2, > 0 |
 | `head_room` | < `frame_size` |
-| Frame count | `frame_count` % `partitions` == 0 |
+| Frame count | `frame_count` % `partitions` == 0, and `frame_count × frame_size` must be a multiple of the system huge-page size; reserve enough huge pages |
 | Worker `core` | < total logical CPUs on the system |
 | Node `queues` length | Must equal pipeline `workers` length |
 | `pps` format | Integer, decimal, `k`/`m`/`g` suffix, or `"max"` |

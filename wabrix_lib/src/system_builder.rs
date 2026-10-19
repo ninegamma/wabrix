@@ -214,16 +214,24 @@ impl SystemBuilder {
             }
         }
 
+        let frame_counts: Vec<u32> = self
+            .runtime_umems
+            .iter()
+            .map(|config| config.as_ref().map_or(0, |config| config.frame_count))
+            .collect();
+        let partition_counts: Vec<u32> = self
+            .runtime_umems
+            .iter()
+            .map(|config| config.as_ref().map_or(0, |config| config.partitions))
+            .collect();
+
         let system_bus = Arc::new(SystemBus {
             bus_senders: bus_senders.clone(),
             partition_directory: SystemBus::partition_directory(&all_partitions),
-            frame_tokens: SystemBus::frame_tokens(
+            frame_partition_maps: SystemBus::frame_partition_maps(
                 &all_partitions,
-                &self
-                    .runtime_umems
-                    .iter()
-                    .map(|config| config.as_ref().map_or(0, |config| config.frame_count))
-                    .collect::<Vec<_>>(),
+                &frame_counts,
+                &partition_counts,
             ),
             umem_addr,
         });
@@ -278,18 +286,18 @@ impl SystemBuilder {
                     if let Some(registry) =
                         wabrix_system.frame_registries[config.worker_id].as_mut()
                     {
-                        let mut global_frames = vec![0u32; umem_conf.fq_size as usize];
-                        let allocated = registry.allocate_batch_into(group_id, &mut global_frames);
+                        let mut frame_tokens = vec![0u32; umem_conf.fq_size as usize];
+                        let allocated = registry.allocate_batch_into(group_id, &mut frame_tokens);
 
-                        for &frame in &global_frames[..allocated] {
+                        for &frame_token in &frame_tokens[..allocated] {
                             if let Some(resolved) =
-                                resolve_frame_token(frame, &system_bus.partition_directory)
+                                resolve_frame_token(frame_token, &system_bus.partition_directory)
                             {
                                 initial_addrs.push(umem_descs[resolved.local_idx as usize].addr());
                             } else {
                                 warn!(
                                     "Skipping invalid initial fill token {} for UMEM {}",
-                                    frame, group_id
+                                    frame_token, group_id
                                 );
                             }
                         }
@@ -568,7 +576,7 @@ impl crate::pipeline::XSocketRxTxProvider for XSocketRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wabrix_base::frame_registry::decode_global_frame;
+    use wabrix_base::frame_registry::decode_frame_token;
 
     // Helper to create test SystemBus and configs
     fn create_test_bus_and_configs() -> (Arc<SystemBus>, Vec<Option<Arc<RuntimeUmemConfig>>>) {
@@ -576,7 +584,7 @@ mod tests {
         let bus = Arc::new(SystemBus {
             bus_senders: vec![queue],
             partition_directory: vec![None; MAX_PARTITIONS],
-            frame_tokens: vec![Vec::new(); MAX_UMEM],
+            frame_partition_maps: vec![Default::default(); MAX_UMEM],
             umem_addr: [None; MAX_UMEM],
         });
 
@@ -596,8 +604,66 @@ mod tests {
         (bus, configs)
     }
 
-    fn configure_test_bus(bus: &mut Arc<SystemBus>, partitions: &[UmemPartition]) {
-        Arc::get_mut(bus).unwrap().partition_directory = SystemBus::partition_directory(partitions);
+    fn configure_test_bus(
+        bus: &mut Arc<SystemBus>,
+        partitions: &[UmemPartition],
+        configs: &[Option<Arc<RuntimeUmemConfig>>],
+    ) {
+        let frame_counts: Vec<u32> = configs
+            .iter()
+            .map(|config| config.as_ref().map_or(0, |config| config.frame_count))
+            .collect();
+        let partition_counts: Vec<u32> = configs
+            .iter()
+            .map(|config| config.as_ref().map_or(0, |config| config.partitions))
+            .collect();
+
+        let system_bus = Arc::get_mut(bus).unwrap();
+        system_bus.partition_directory = SystemBus::partition_directory(partitions);
+        system_bus.frame_partition_maps =
+            SystemBus::frame_partition_maps(partitions, &frame_counts, &partition_counts);
+    }
+
+    #[test]
+    fn test_direct_partition_slot_frame_token_lookup() {
+        let (mut bus, configs) = create_test_bus_and_configs();
+
+        let partition0 = UmemPartition {
+            partition_id: 0,
+            worker_id: 0,
+            umem_group_id: 0,
+            start_idx: 0,
+            end_idx: 512,
+            local_start: 0,
+            local_end: 512,
+        };
+        let partition1 = UmemPartition {
+            partition_id: 1,
+            worker_id: 1,
+            umem_group_id: 0,
+            start_idx: 512,
+            end_idx: 1024,
+            local_start: 512,
+            local_end: 1024,
+        };
+
+        configure_test_bus(&mut bus, &[partition0, partition1], &configs);
+
+        let frame0 = bus.resolve_local_frame_idx(0, 511).unwrap();
+        assert_eq!(
+            decode_frame_token(frame0.frame_token),
+            (partition0.partition_id, 511)
+        );
+        assert_eq!(frame0.worker_id, partition0.worker_id);
+
+        let frame1 = bus.resolve_local_frame_idx(0, 512).unwrap();
+        assert_eq!(
+            decode_frame_token(frame1.frame_token),
+            (partition1.partition_id, 0)
+        );
+        assert_eq!(frame1.worker_id, partition1.worker_id);
+
+        assert!(bus.resolve_local_frame_idx(0, 1024).is_none());
     }
 
     /// Test basic frame indexing with a single UMEM and single partition
@@ -617,7 +683,7 @@ mod tests {
             local_end: 100,
         };
 
-        configure_test_bus(&mut bus, &[partition]);
+        configure_test_bus(&mut bus, &[partition], &configs);
 
         let mut registry = FrameRegistry::new(0, vec![(0, partition)], queue, bus, configs);
 
@@ -628,7 +694,7 @@ mod tests {
         assert_eq!(frames.len(), 100);
         for &f in &frames {
             assert_eq!(
-                decode_global_frame(f).0,
+                decode_frame_token(f).0,
                 0,
                 "frame {f:#010x} must belong to UMEM 0"
             );
@@ -687,7 +753,7 @@ mod tests {
             partitions: 1,
         }));
 
-        configure_test_bus(&mut bus, &[partition0, partition1]);
+        configure_test_bus(&mut bus, &[partition0, partition1], &configs);
 
         let mut registry = FrameRegistry::new(
             0,
@@ -704,7 +770,7 @@ mod tests {
         assert_eq!(frames0.len(), 4096);
         for &f in &frames0 {
             assert_eq!(
-                decode_global_frame(f).0,
+                decode_frame_token(f).0,
                 0,
                 "frame {f:#010x} must belong to UMEM 0"
             );
@@ -715,7 +781,7 @@ mod tests {
         assert_eq!(frames1.len(), 2048);
         for &f in &frames1 {
             assert_eq!(
-                decode_global_frame(f).0,
+                decode_frame_token(f).0,
                 1,
                 "frame {f:#010x} must belong to UMEM 1"
             );
@@ -762,7 +828,7 @@ mod tests {
             partitions: 1,
         }));
 
-        configure_test_bus(&mut bus, &[partition0, partition1]);
+        configure_test_bus(&mut bus, &[partition0, partition1], &configs);
 
         let mut registry = FrameRegistry::new(
             0,
@@ -777,7 +843,7 @@ mod tests {
         assert_eq!(frames.len(), 10);
         for &f in &frames {
             assert_eq!(
-                decode_global_frame(f).0,
+                decode_frame_token(f).0,
                 0,
                 "frame {f:#010x} must be from UMEM 0"
             );
@@ -788,7 +854,7 @@ mod tests {
         assert_eq!(frames.len(), 5);
         for &f in &frames {
             assert_eq!(
-                decode_global_frame(f).0,
+                decode_frame_token(f).0,
                 1,
                 "frame {f:#010x} must be from UMEM 1"
             );
@@ -813,7 +879,7 @@ mod tests {
             local_end: 100,
         };
 
-        configure_test_bus(&mut bus, &[partition]);
+        configure_test_bus(&mut bus, &[partition], &configs);
 
         let mut registry =
             FrameRegistry::new(0, vec![(0, partition)], queue, bus.clone(), configs.clone());
@@ -829,8 +895,8 @@ mod tests {
         registry.release_local(frames[0]);
         assert_eq!(registry.total_free_frames(), 91);
 
-        for &frame_idx in &frames[1..] {
-            registry.release_local(frame_idx);
+        for &frame_token in &frames[1..] {
+            registry.release_local(frame_token);
         }
         assert_eq!(registry.total_free_frames(), 100);
     }
@@ -852,7 +918,7 @@ mod tests {
             local_end: 1024,
         };
 
-        configure_test_bus(&mut bus, &[merged_partition]);
+        configure_test_bus(&mut bus, &[merged_partition], &configs);
 
         let mut registry = FrameRegistry::new(
             0,
@@ -868,7 +934,7 @@ mod tests {
         let frames = registry.allocate_batch(0, 1024);
         assert_eq!(frames.len(), 1024);
         for &f in &frames {
-            assert_eq!(decode_global_frame(f).0, 0);
+            assert_eq!(decode_frame_token(f).0, 0);
         }
     }
 
@@ -888,7 +954,7 @@ mod tests {
             local_end: 10,
         };
 
-        configure_test_bus(&mut bus, &[partition]);
+        configure_test_bus(&mut bus, &[partition], &configs);
 
         let mut registry =
             FrameRegistry::new(0, vec![(0, partition)], queue, bus.clone(), configs.clone());
@@ -918,22 +984,24 @@ mod tests {
             local_end: 1024,
         };
 
-        configure_test_bus(&mut bus, &[partition]);
+        configure_test_bus(&mut bus, &[partition], &configs);
 
         let mut registry =
             FrameRegistry::new(1, vec![(0, partition)], queue, bus.clone(), configs.clone());
 
         assert_eq!(registry.total_free_frames(), 512);
 
-        // All allocated frames must decode to umem_id=0 and local_idx in [512, 1024)
+        // Frame tokens carry partition-relative offsets; resolve them to verify
+        // their UMEM-local indices are in [512, 1024).
         let frames = registry.allocate_batch(0, 512);
         assert_eq!(frames.len(), 512);
-        for &f in &frames {
-            let (uid, lidx) = decode_global_frame(f);
-            assert_eq!(uid, 0, "frame {f:#010x} must be from UMEM 0");
+        for &frame_token in &frames {
+            let resolved = resolve_frame_token(frame_token, &bus.partition_directory).unwrap();
+            assert_eq!(resolved.umem_group_id, 0);
             assert!(
-                (512..1024).contains(&lidx),
-                "local_idx {lidx} must be in [512, 1024)"
+                (512..1024).contains(&resolved.local_idx),
+                "local_idx {} must be in [512, 1024)",
+                resolved.local_idx
             );
         }
     }

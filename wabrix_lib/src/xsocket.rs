@@ -828,12 +828,12 @@ impl XSocketRx {
             // Return any frames that weren't produced back to the registry
             // CRITICAL FIX: Only release un-pushed frames up to `actual_batch`
             if produced < actual_batch {
-                for &frame_idx in &self.scratch_frames[produced..actual_batch] {
+                for &frame_token in &self.scratch_frames[produced..actual_batch] {
                     trace!(
-                        "replenish_fill_queue: Returning frame {} to local stash",
-                        frame_idx
+                        "replenish_fill_queue: Returning frame token {} to local stash",
+                        frame_token
                     );
-                    frame_registry.release_local(frame_idx);
+                    frame_registry.release_local(frame_token);
                 }
             }
             log::trace!(
@@ -924,20 +924,6 @@ impl XSocketRx {
     }
 }
 
-impl XSocketRx {
-    #[inline(always)]
-    fn determine_owner(&self, frame_idx: u32) -> usize {
-        if let Some(resolved) = resolve_frame_token(frame_idx, &self.bus.partition_directory) {
-            return resolved.worker_id;
-        }
-        log::warn!(
-            "determine_owner: invalid frame token={}, defaulting to worker 0",
-            frame_idx
-        );
-        0
-    }
-}
-
 // Implement BatchRx for XSocketRx
 impl BatchRx for XSocketRx {
     fn receive_into_batch(&mut self, batch: &mut Batch, max_count: usize) -> anyhow::Result<usize> {
@@ -962,14 +948,18 @@ impl BatchRx for XSocketRx {
         // 1. Process returns from TX side (via SystemBus)
         // This reclaims frames that TX completed
         // THROTTLED RECLAIM
-        // Cross-thread communication is expensive. Only check for returned frames
-        // every 32 loops, OR if we are getting dangerously low on free frames.
-        if self.empty_spins.is_multiple_of(32) || frame_registry.total_free_frames() < 8192 {
-            if frame_registry.total_free_frames() < 8192 {
-                log::warn!(
-                    "total_free_frames is too low: {}",
-                    frame_registry.total_free_frames()
-                );
+        // Cross-thread communication is expensive. Drain periodically by receive
+        // call count, which continues advancing while packets are arriving, or
+        // immediately when the worker is dangerously low on free frames.
+        let total_free_frames = frame_registry.total_free_frames();
+        let low_free_frames = total_free_frames < 8192;
+        if self.receive_calls.is_multiple_of(256) || low_free_frames {
+            if low_free_frames
+                && self
+                    .receive_calls
+                    .is_multiple_of(RX_DIAGNOSTIC_LOG_INTERVAL)
+            {
+                log::warn!("total_free_frames is too low: {}", total_free_frames);
             }
             frame_registry.process_returns();
         }
@@ -1325,15 +1315,9 @@ impl BatchRx for XSocketRx {
             // BITWISE SHIFT INSTEAD OF DIVISION
             // Replaces ~20 cycle division with a 1 cycle shift
             let local_idx = (desc.addr() as u32) >> frame_size_log2; // local_idx is wrt. current Umem
-            let Some(global_idx) = self
-                .bus
-                .frame_tokens
-                .get(group_id)
-                .and_then(|tokens| tokens.get(local_idx as usize))
-                .and_then(|token| *token)
-            else {
+            let Some(resolved_frame) = self.bus.resolve_local_frame_idx(group_id, local_idx) else {
                 log::warn!(
-                    "receive_into_batch: no partition token for UMEM {}, local frame {}",
+                    "receive_into_batch: no frame token for UMEM {}, local frame {}",
                     group_id,
                     local_idx
                 );
@@ -1343,9 +1327,15 @@ impl BatchRx for XSocketRx {
             // this frame. The initial Fill Queue may contain frames supplied
             // by another worker, and frames returned through the shared bus
             // retain their original partition ownership.
-            let frame_owner = self.determine_owner(global_idx) as u8;
+            let frame_owner = resolved_frame.worker_id as u8;
 
-            let mut pdu = Pdu::new(*desc, global_idx, frame_owner, bus_ptr, frame_size_log2);
+            let mut pdu = Pdu::new(
+                *desc,
+                resolved_frame.frame_token,
+                frame_owner,
+                bus_ptr,
+                frame_size_log2,
+            );
 
             // XDP writes the hardware RX timestamp into the UMEM headroom
             // immediately before packet data. A zero value means the driver
@@ -1731,29 +1721,26 @@ impl XSocketTx {
                 // 1. Calculate the local index relative to this specific UMEM
                 let local_idx = addr >> frame_size_log2;
 
-                // 2. Recover the partition token from the UMEM-local completion address.
-                let Some(global_idx) = self
+                // 2. Recover the frame token from the UMEM-local completion address.
+                let Some(resolved_frame) = self
                     .bus
-                    .frame_tokens
-                    .get(self.config.umem_config.group_id)
-                    .and_then(|tokens| tokens.get(local_idx as usize))
-                    .and_then(|token| *token)
+                    .resolve_local_frame_idx(self.config.umem_config.group_id, local_idx)
                 else {
                     log::warn!(
-                        "drain_completion_queue: no partition token for UMEM {}, local frame {}",
+                        "drain_completion_queue: no frame token for UMEM {}, local frame {}",
                         self.config.umem_config.group_id,
                         local_idx
                     );
                     continue;
                 };
                 trace!(
-                    "drain_completion_queue: Worker {}: Releasing frame_idx={} (local_idx={}, umem_group_id={})",
+                    "drain_completion_queue: Worker {}: Releasing frame_token={} (local_idx={}, umem_group_id={})",
                     self.worker_id,
-                    global_idx,
+                    resolved_frame.frame_token,
                     local_idx,
                     self.config.umem_config.group_id
                 );
-                self.release_frame(global_idx);
+                self.release_frame(resolved_frame.frame_token);
             }
         } else {
             if self.total_sent_packets > self.total_consumed {
@@ -1771,13 +1758,13 @@ impl XSocketTx {
         Ok(consumed)
     }
 
-    fn release_frame(&mut self, frame_idx: u32) {
-        let owner = self.determine_owner(frame_idx);
+    fn release_frame(&mut self, frame_token: u32) {
+        let owner = self.determine_owner(frame_token);
         /*
         log::trace!(
-            "Worker {}: Releasing frame_idx={}, determined owner={}, my worker_id={}",
+            "Worker {}: Releasing frame_token={}, determined owner={}, my worker_id={}",
             self.worker_id,
-            frame_idx,
+            frame_token,
             owner,
             self.worker_id
         );
@@ -1788,11 +1775,11 @@ impl XSocketTx {
                 let registry_ptr = wabrix_base::frame_registry::get_worker_frame_registry();
                 if !registry_ptr.is_null() {
                     trace!(
-                        "Worker {}: Released frame {} to local registry (fast path)",
+                        "Worker {}: Released frame token {} to local registry (fast path)",
                         self.worker_id,
-                        frame_idx
+                        frame_token
                     );
-                    (*registry_ptr).release_local(frame_idx);
+                    (*registry_ptr).release_local(frame_token);
                     return;
                 } else {
                     log::warn!("Worker {}: Frame registry ptr is null!", self.worker_id);
@@ -1802,26 +1789,26 @@ impl XSocketTx {
 
         // SLOW PATH: Only use the cross-thread bus for frames belonging to OTHER workers
         log::trace!(
-            "Worker {}: Sending frame {} to owner {} via bus (slow path)",
+            "Worker {}: Sending frame token {} to owner {} via bus (slow path)",
             self.worker_id,
-            frame_idx,
+            frame_token,
             owner
         );
-        if self.bus.bus_senders[owner].push(frame_idx).is_err() {
+        if self.bus.bus_senders[owner].push(frame_token).is_err() {
             log::error!(
-                "🔥 CRITICAL: return queue full, frame {} leaked!",
-                frame_idx
+                "🔥 CRITICAL: return queue full, frame token {} leaked!",
+                frame_token
             );
         }
     }
 
-    fn determine_owner(&self, frame_idx: u32) -> usize {
-        if let Some(resolved) = resolve_frame_token(frame_idx, &self.bus.partition_directory) {
+    fn determine_owner(&self, frame_token: u32) -> usize {
+        if let Some(resolved) = resolve_frame_token(frame_token, &self.bus.partition_directory) {
             return resolved.worker_id;
         }
         log::warn!(
             "determine_owner: invalid frame token={}, defaulting to worker 0",
-            frame_idx
+            frame_token
         );
         0
     }

@@ -66,21 +66,21 @@ pub fn is_retain(cmd: u32) -> bool {
     (cmd & CMD_BIT) != 0
 }
 
-/// Strips the command bit to recover the plain global frame index.
+/// Strips the command bit to recover the frame token.
 #[inline(always)]
-pub fn extract_global_idx(cmd: u32) -> u32 {
+pub fn extract_frame_token(cmd: u32) -> u32 {
     cmd & !CMD_BIT
 }
 
 /// Maximum number of distinct UMEM groups supported by fixed UMEM-group-indexed tables.
-/// This is independent of the partition-token bit layout.
+/// This is independent of the frame-token bit layout.
 pub const MAX_UMEM: usize = 128;
 
-/// Packs a partition ID and partition-relative frame offset into a 32-bit token.
+/// Packs a partition ID and partition-relative frame offset into a frame token.
 /// Bits 30-23 = partition ID, bits 22-0 = offset within that partition.
 /// Bit 31 is reserved for the return-queue command bit and is always 0 here.
 #[inline(always)]
-pub fn encode_global_frame(partition_id: usize, offset: u32) -> u32 {
+pub fn encode_frame_token(partition_id: usize, offset: u32) -> u32 {
     debug_assert!(
         partition_id < MAX_PARTITIONS,
         "partition ID exceeds 8 bits!"
@@ -96,14 +96,14 @@ pub fn encode_global_frame(partition_id: usize, offset: u32) -> u32 {
 /// Unpacks a frame token into (partition ID, partition-relative offset).
 /// Masks off bit 31 (the command bit) so this is safe to call on packed queue values too.
 #[inline(always)]
-pub fn decode_global_frame(global_idx: u32) -> (usize, u32) {
-    let partition_id = ((global_idx & !CMD_BIT) >> PARTITION_OFFSET_BITS) as usize;
-    let offset = global_idx & PARTITION_OFFSET_MASK;
+pub fn decode_frame_token(frame_token: u32) -> (usize, u32) {
+    let partition_id = ((frame_token & !CMD_BIT) >> PARTITION_OFFSET_BITS) as usize;
+    let offset = frame_token & PARTITION_OFFSET_MASK;
 
     (partition_id, offset)
 }
 
-/// Resolved metadata for a valid partition token.
+/// Resolved metadata for a valid frame token.
 /// local_idx maps directly to: frame_addr = local_idx << frame_size_log2
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedFrameToken {
@@ -113,13 +113,13 @@ pub struct ResolvedFrameToken {
     pub local_idx: u32,
 }
 
-/// Resolves a token through the indexed partition directory without scanning ranges.
+/// Resolves a frame token through the indexed partition directory without scanning ranges.
 #[inline(always)]
 pub fn resolve_frame_token(
-    token: u32,
+    frame_token: u32,
     directory: &[Option<UmemPartition>],
 ) -> Option<ResolvedFrameToken> {
-    let (partition_id, offset) = decode_global_frame(token);
+    let (partition_id, offset) = decode_frame_token(frame_token);
     let entry = directory.get(partition_id)?.as_ref()?;
     let partition_len = entry.local_end.checked_sub(entry.local_start)?;
     if offset >= partition_len {
@@ -135,7 +135,7 @@ pub fn resolve_frame_token(
 }
 
 /// Per-UMEM partition data within a worker's registry.
-/// `free_stash` holds partition tokens (encode_global_frame format).
+/// `free_stash` holds frame tokens (`encode_frame_token` format).
 /// `refcounts` is indexed by local_idx - `refcount_start`.
 pub struct PartitionData {
     /// First UMEM-relative frame represented by `refcounts`.
@@ -143,7 +143,7 @@ pub struct PartitionData {
     /// One counter per frame owned by this partition. Keeping this partition-local avoids
     /// allocating a counter for every frame in the UMEM when a worker owns only a subrange.
     refcounts: Vec<u16>,
-    /// Encoded global frame indices available for allocation.
+    /// Frame tokens available for allocation.
     free_stash: Vec<u32>,
 }
 
@@ -209,7 +209,7 @@ impl FrameRegistry {
             // Pre-encode every frame using the stable partition ID and a local offset.
             let free_stash: Vec<u32> = (local_start..local_end)
                 .map(|local_idx| {
-                    encode_global_frame(partition.partition_id, local_idx - local_start)
+                    encode_frame_token(partition.partition_id, local_idx - local_start)
                 })
                 .collect();
 
@@ -245,16 +245,16 @@ impl FrameRegistry {
 
         while processed_count < MAX_PROCESS_PER_TICK {
             if let Some(packed_cmd) = self.return_queue.pop() {
-                let global_idx = extract_global_idx(packed_cmd);
+                let frame_token = extract_frame_token(packed_cmd);
 
                 if is_retain(packed_cmd) {
                     let Some(resolved) =
-                        resolve_frame_token(global_idx, &self.bus.partition_directory)
+                        resolve_frame_token(frame_token, &self.bus.partition_directory)
                     else {
                         log::error!(
-                            "Worker {}: invalid retain token {}",
+                            "Worker {}: invalid frame token {} for retain",
                             self.worker_id,
-                            global_idx
+                            frame_token
                         );
                         processed_count += 1;
                         continue;
@@ -283,7 +283,7 @@ impl FrameRegistry {
                 } else {
                     // Note: Removed the inner loop `trace!` macro to save cycles.
                     // String interpolation inside a hot loop is dangerous even if disabled.
-                    self.release_local(global_idx);
+                    self.release_local(frame_token);
                 }
 
                 processed_count += 1;
@@ -312,14 +312,14 @@ impl FrameRegistry {
     /// Releases a frame back to the worker's frame registry.
     ///
     /// # Parameters
-    /// * `global_idx` - Partition token resolved through the system directory.
+    /// * `frame_token` - Frame token resolved through the system directory.
     #[inline]
-    pub fn release_local(&mut self, global_idx: u32) {
-        let Some(resolved) = resolve_frame_token(global_idx, &self.bus.partition_directory) else {
+    pub fn release_local(&mut self, frame_token: u32) {
+        let Some(resolved) = resolve_frame_token(frame_token, &self.bus.partition_directory) else {
             log::error!(
-                "Worker {}: invalid release token {}",
+                "Worker {}: invalid frame token {} for release",
                 self.worker_id,
-                global_idx
+                frame_token
             );
             return;
         };
@@ -354,7 +354,7 @@ impl FrameRegistry {
 
                 *refcount -= 1;
                 if *refcount == 0 {
-                    partition_data.free_stash.push(global_idx);
+                    partition_data.free_stash.push(frame_token);
                 }
             }
         } else {
@@ -390,9 +390,10 @@ impl FrameRegistry {
             dst[..to_take].copy_from_slice(&stash[start_idx..]);
 
             // Mark all allocated frames as actively owned (refcount = 1).
-            for &frame_idx in &dst[..to_take] {
-                let Some(local_idx) = resolve_frame_token(frame_idx, &self.bus.partition_directory)
-                    .map(|resolved| resolved.local_idx)
+            for &frame_token in &dst[..to_take] {
+                let Some(local_idx) =
+                    resolve_frame_token(frame_token, &self.bus.partition_directory)
+                        .map(|resolved| resolved.local_idx)
                 else {
                     continue;
                 };
@@ -418,21 +419,22 @@ impl FrameRegistry {
     }
 
     /// Allocates up to `count` frames from the specific UMEM partition.
-    /// Returns a vector of encoded global indices.
+    /// Returns a vector of frame tokens.
     pub fn allocate_batch(&mut self, umem_id: usize, count: usize) -> Vec<u32> {
         if let Some(registry) = self.registry_map[umem_id].as_mut() {
-            let mut frames = Vec::with_capacity(count);
+            let mut frame_tokens = Vec::with_capacity(count);
             let stash = &mut registry.free_stash;
 
             let available = stash.len();
             let to_take = std::cmp::min(available, count);
 
             for _ in 0..to_take {
-                let frame_idx = stash.pop().unwrap();
-                frames.push(frame_idx);
+                let frame_token = stash.pop().unwrap();
+                frame_tokens.push(frame_token);
 
-                let Some(local_idx) = resolve_frame_token(frame_idx, &self.bus.partition_directory)
-                    .map(|resolved| resolved.local_idx)
+                let Some(local_idx) =
+                    resolve_frame_token(frame_token, &self.bus.partition_directory)
+                        .map(|resolved| resolved.local_idx)
                 else {
                     continue;
                 };
@@ -440,7 +442,7 @@ impl FrameRegistry {
                 registry.refcounts[refcount_idx as usize] = 1;
             }
 
-            if frames.is_empty() {
+            if frame_tokens.is_empty() {
                 log::trace!(
                     "Worker {}: Starvation! No frames available in UMEM {}",
                     self.worker_id,
@@ -448,7 +450,7 @@ impl FrameRegistry {
                 );
             }
 
-            frames
+            frame_tokens
         } else {
             log::error!(
                 "Worker {} tried to alloc from unassigned UMEM {}",
@@ -491,8 +493,8 @@ impl FrameRegistry {
             return Vec::new();
         };
 
-        let frame_indices = self.allocate_batch(umem_id, count);
-        if frame_indices.is_empty() {
+        let frame_tokens = self.allocate_batch(umem_id, count);
+        if frame_tokens.is_empty() {
             return Vec::new();
         }
 
@@ -513,11 +515,11 @@ impl FrameRegistry {
         let frame_size_log2 = umem_config.frame_size_log2;
         let headroom = umem_config.head_room as u64;
 
-        let mut pdus = Vec::with_capacity(frame_indices.len());
+        let mut pdus = Vec::with_capacity(frame_tokens.len());
 
-        for &frame_idx in &frame_indices {
+        for &frame_token in &frame_tokens {
             // local_idx is UMEM-relative: frame_addr = local_idx << frame_size_log2
-            let Some(local_idx) = resolve_frame_token(frame_idx, &self.bus.partition_directory)
+            let Some(local_idx) = resolve_frame_token(frame_token, &self.bus.partition_directory)
                 .map(|resolved| resolved.local_idx)
             else {
                 continue;
@@ -527,7 +529,7 @@ impl FrameRegistry {
 
             let pdu = Pdu::new(
                 desc,
-                frame_idx,
+                frame_token,
                 self.worker_id as u8,
                 system_bus,
                 frame_size_log2,
@@ -582,10 +584,10 @@ impl FrameRegistry {
         #[repr(align(64))]
         struct AlignedBatch([u32; MAX_BATCH_SIZE]);
         let mut aligned_buffer = AlignedBatch([0u32; MAX_BATCH_SIZE]);
-        let global_frame_indices = &mut aligned_buffer.0;
+        let frame_tokens = &mut aligned_buffer.0;
 
         let req_len = std::cmp::min(dst.len(), MAX_BATCH_SIZE);
-        let allocated = self.allocate_batch_into(umem_id, &mut global_frame_indices[..req_len]);
+        let allocated = self.allocate_batch_into(umem_id, &mut frame_tokens[..req_len]);
 
         if allocated == 0 {
             return 0;
@@ -594,11 +596,10 @@ impl FrameRegistry {
         let system_bus = &*self.bus as *const SystemBus;
 
         let dst_slice = &mut dst[..allocated];
-        let src_slice = &global_frame_indices[..allocated];
+        let src_slice = &frame_tokens[..allocated];
 
-        for (dst_slot, &global_frame_idx) in dst_slice.iter_mut().zip(src_slice.iter()) {
-            let Some(resolved) =
-                resolve_frame_token(global_frame_idx, &self.bus.partition_directory)
+        for (dst_slot, &frame_token) in dst_slice.iter_mut().zip(src_slice.iter()) {
+            let Some(resolved) = resolve_frame_token(frame_token, &self.bus.partition_directory)
             else {
                 continue;
             };
@@ -608,7 +609,7 @@ impl FrameRegistry {
 
             dst_slot.write(Pdu::new(
                 desc,
-                global_frame_idx,
+                frame_token,
                 self.worker_id as u8,
                 system_bus,
                 frame_size_log2,
@@ -623,9 +624,9 @@ impl FrameRegistry {
         for partition_data in self.registry_map.iter().flatten() {
             // Iterate over all pre-encoded frames in the free stash
             // Use volatile writes to prevent the compiler from optimizing the loop away
-            for &encoded_frame in &partition_data.free_stash {
+            for &frame_token in &partition_data.free_stash {
                 let Some(resolved) =
-                    resolve_frame_token(encoded_frame, &self.bus.partition_directory)
+                    resolve_frame_token(frame_token, &self.bus.partition_directory)
                 else {
                     continue;
                 };
@@ -669,10 +670,13 @@ mod tests {
     #[test]
     fn frame_token_round_trips_boundaries_and_command_bit() {
         for (partition_id, offset) in [(0, 0), (MAX_PARTITIONS - 1, MAX_PARTITION_FRAMES - 1)] {
-            let token = encode_global_frame(partition_id, offset);
-            assert_eq!(decode_global_frame(token), (partition_id, offset));
-            assert_eq!(decode_global_frame(token | CMD_BIT), (partition_id, offset));
-            assert_eq!(extract_global_idx(token | CMD_BIT), token);
+            let frame_token = encode_frame_token(partition_id, offset);
+            assert_eq!(decode_frame_token(frame_token), (partition_id, offset));
+            assert_eq!(
+                decode_frame_token(frame_token | CMD_BIT),
+                (partition_id, offset)
+            );
+            assert_eq!(extract_frame_token(frame_token | CMD_BIT), frame_token);
         }
     }
 
@@ -692,7 +696,7 @@ mod tests {
         ];
 
         assert_eq!(
-            resolve_frame_token(encode_global_frame(1, 0), &directory),
+            resolve_frame_token(encode_frame_token(1, 0), &directory),
             Some(ResolvedFrameToken {
                 partition_id: 1,
                 worker_id: 4,
@@ -700,7 +704,7 @@ mod tests {
                 local_idx: 10,
             })
         );
-        assert!(resolve_frame_token(encode_global_frame(1, 4), &directory).is_none());
-        assert!(resolve_frame_token(encode_global_frame(2, 0), &directory).is_none());
+        assert!(resolve_frame_token(encode_frame_token(1, 4), &directory).is_none());
+        assert!(resolve_frame_token(encode_frame_token(2, 0), &directory).is_none());
     }
 }

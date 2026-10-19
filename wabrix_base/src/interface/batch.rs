@@ -362,9 +362,9 @@ impl Batch {
                     if registry.worker_id == pdu.owner_id() as usize {
                         trace!(
                             "bulk_drop: Returning frame {} to local stash",
-                            pdu.w.global_frame_idx()
+                            pdu.w.frame_token()
                         );
-                        registry.release_local(pdu.w.global_frame_idx());
+                        registry.release_local(pdu.w.frame_token());
                     } else {
                         // Slow path: Individual cross-thread release
                         // This still uses the drop logic for consistency

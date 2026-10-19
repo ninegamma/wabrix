@@ -278,7 +278,7 @@ fn receive_into_batch(&mut self, batch: &mut Batch) -> Result<usize> {
 
     // 4. Create PDUs from frames
     for desc in &descs[..rcvd] {
-        let pdu = Pdu::new(desc, global_idx, ...);
+        let pdu = Pdu::new(desc, frame_token, ...);
         batch.push(pdu);
     }
     Ok(rcvd)
@@ -303,12 +303,12 @@ fn receive_into_batch(&mut self, batch: &mut Batch) -> Result<usize> {
 
 **Critical Design Decision:**
 ```rust
-fn release_frame(&mut self, frame_idx: u32) {
+fn release_frame(&mut self, frame_token: u32) {
     // TX NEVER accesses registry directly
     // Always route through SystemBus to ensure the owning worker receives them.
-    // Release command: bit 31 = 0 (Release), lower 31 bits = global frame index.
-    let owner_worker_id = self.determine_owner(frame_idx);
-    let _ = self.bus.bus_senders[owner_worker_id].push(frame_idx);
+    // Release command: bit 31 = 0 (Release), lower 31 bits = frame token.
+    let owner_worker_id = self.determine_owner(frame_token);
+    let _ = self.bus.bus_senders[owner_worker_id].push(frame_token);
 }
 ```
 
@@ -448,9 +448,9 @@ workers = [0, 1]
 
 Both pipelines can coexist because they access different rings of the same sockets.
 
-# Understanding `group_start_frame_idx`: Global vs. Local Indexing
+# Understanding UMEM-local indices and frame tokens
 
-This chapter explains the logic behind `group_start_frame_idx` and how it creates a unified "System-Wide" address space for frames, even when the underlying hardware uses separate memory regions.
+This chapter distinguishes UMEM-local frame indices, absolute layout positions, and frame tokens. `group_start_frame_idx` is used to calculate absolute layout positions while partitions are built. A frame token is the identifier used by PDUs and SystemBus.
 
 ## 1. The Problem: Duplicate Indices (Address Collision)
 
@@ -459,45 +459,23 @@ In the raw hardware view, every separate UMEM (Unified Memory) region starts cou
 * **Group 0 (eth0 Memory):** Contains physical frames `0, 1, 2 ... 4095`.
 * **Group 1 (eth1 Memory):** Contains physical frames `0, 1, 2 ... 4095`.
 
-This creates a serious ambiguity for the **SystemBus** (the mechanism that allows cores to exchange packets). If Core A sends a message to Core B saying *"Return Frame #50"*, Core B has no way of knowing if that refers to the "Frame #50" residing in `eth0`'s memory or `eth1`'s memory.
+The same local index can refer to a frame in either UMEM group. SystemBus messages therefore carry a frame token, which identifies a partition and an offset within that partition; the partition directory resolves it to the owning worker and UMEM group.
 
-## 2. The Solution: The "Global Index" (Application View)
+## 2. Absolute layout positions and frame tokens
 
-To resolve this, the application layer treats the entire system as one giant, continuous logical array of frames, abstracting away the physical boundaries.
+During partition construction, the system can assign each UMEM group a range in one absolute frame layout. The `group_start_frame_idx` is the base offset for converting between that layout position and a UMEM-local index. Runtime frame ownership uses frame tokens instead of these absolute positions.
 
-The `group_start_frame_idx` is the **Base Offset** that shifts a specific group's local indices into this unique global range.
+For example, Group 1 may have absolute layout positions `4096..8192`, while its UMEM-local frame indices remain `0..4096`. A frame token for a frame in that group carries the partition ID and partition-relative offset, not the absolute layout position.
 
-### Visual Example
-* **Group 0 Base:** `0`
-    * Local: `0` $\rightarrow$ Global: `0`
-    * Local: `4095` $\rightarrow$ Global: `4095`
-* **Group 1 Base:** `4096`
-    * Local: `0` $\rightarrow$ Global: `4096`
-    * Local: `4095` $\rightarrow$ Global: `8191`
+## 3. Address translation
 
-## 3. The Translation Logic
-
-The `XSocket` acts as the translator between these two worlds. It converts indices on-the-fly depending on who it is talking to.
+The socket translates between frame tokens and UMEM-local addresses at the kernel boundary.
 
 ### Direction A: Talking to the Kernel (TX / Fill Rings)
-When communicating with the NIC driver or Kernel, you must use the **Local Index** relative to that specific physical UMEM.
-
-**Formula:**
-$$\text{Local Index} = \text{Global Index} - \text{group\_start\_frame\_idx}$$
-
-* **Scenario:** You want to transmit using Global Frame #4100 (which lives in Group 1).
-* **Math:** `4100 - 4096 = 4`.
-* **Action:** You write Descriptor Index **4** into the TX Ring.
+Resolve the frame token through the partition directory to get its UMEM group and local frame index. Calculate the descriptor address from that local index and the configured headroom.
 
 ### Direction B: Talking to the Application (Registry / Bus)
-When receiving completed frames from the Kernel, you convert them back to the **Global Index** so your Registry knows exactly which unique frame was returned.
-
-**Formula:**
-$$\text{Global Index} = \text{Local Index} + \text{group\_start\_frame\_idx}$$
-
-* **Scenario:** The Kernel returns completed Descriptor **4** from Group 1.
-* **Math:** `4 + 4096 = 4100`.
-* **Action:** You tell the Registry *"Frame #4100 is now free"*.
+Use the UMEM group and local frame index from the completed descriptor to find its partition range and recover the frame token. The token is returned through SystemBus or the owning worker's registry.
 
 ## 4. Detailed Address Calculation: UMEM, XSK, and the Three Address Spaces
 
@@ -505,11 +483,10 @@ Understanding the complete addressing scheme requires distinguishing between **t
 
 ### 4.1 The Three Address Spaces
 
-1. **Global Frame Index** (Application/System Bus)
-   - Used by the application logic and SystemBus for frame lifecycle management
-   - Unique across ALL UMEM groups in the entire system
-   - Range: `0` to `(total_frames_in_all_groups - 1)`
-   - Purpose: Prevents ambiguity when different workers exchange frames
+1. **Frame Token** (Application/SystemBus)
+   - Used by PDUs, the application logic, and SystemBus for frame lifecycle management
+   - Encodes a partition ID and a partition-relative offset
+   - Purpose: Identifies a frame across workers and UMEM groups
 
 2. **Local Frame Index** (UMEM-relative)
    - Used internally for address calculations within a specific UMEM
@@ -532,12 +509,14 @@ Understanding the complete addressing scheme requires distinguishing between **t
 #### TX Path (Application → Kernel):
 
 ```rust
-// 1. Application allocates frame using GLOBAL index
-let global_idx = 4100;  // This frame is in Group 1
+// 1. The registry allocates a frame token for a partition in Group 1.
+let frame_token = encode_frame_token(partition_id, partition_offset);
 
-// 2. Convert to LOCAL index for UMEM address calculation
-let local_idx = global_idx - group_start_frame_idx;
-// local_idx = 4100 - 4096 = 4
+// 2. Resolve the token to the UMEM-local frame index.
+let local_idx = resolve_frame_token(frame_token, &partition_directory)
+    .expect("valid frame token")
+    .local_idx;
+// For this example, local_idx = 4.
 
 // 3. Calculate frame descriptor address for XSK
 let frame_size_log2 = 11;  // 2048 = 2^11
@@ -560,39 +539,48 @@ let frame_addr = frame_desc.addr();  // e.g., 8448
 let local_idx = (frame_addr >> frame_size_log2);
 // local_idx = 8448 >> 11 = 4 (headroom is ignored in this calculation)
 
-// 3. Convert LOCAL index to GLOBAL index for application
-let global_idx = local_idx + group_start_frame_idx;
-// global_idx = 4 + 4096 = 4100
+// 3. Resolve the UMEM-local index back to its frame token.
+let frame_token = bus.resolve_local_frame_idx(group_id, local_idx)
+    .expect("frame belongs to a configured partition")
+    .frame_token;
 
-// 4. Create PDU with GLOBAL index for system bus
-let pdu = Pdu::new(frame_desc, global_idx, worker_id, ...);
+// 4. Create the PDU with its frame token for SystemBus operations.
+let pdu = Pdu::new(frame_desc, frame_token, worker_id, ...);
 ```
 
 ### 4.3 Key Implementation Points
 
 #### In `system_builder.rs` (Frame Allocation):
 ```rust
-// When allocating frames for PDUs, always use GLOBAL indices
-let global_frame_idx = registry.allocate_frame(umem_id);
+// The registry returns a frame token for each allocated frame.
+let frame_token = registry.allocate_frame(umem_id);
 
 // For UMEM address calculation, convert to local:
-let local_idx = global_frame_idx - group_start_frame_idx;
+let local_idx = resolve_frame_token(frame_token, &partition_directory)
+    .expect("valid frame token")
+    .local_idx;
 let frame_addr = (local_idx << frame_size_log2) + headroom;
 
-// But store GLOBAL index in the PDU!
-let pdu = Pdu::new(desc, global_frame_idx, worker_id, ...);
+// Store the frame token in the PDU.
+let pdu = Pdu::new(desc, frame_token, worker_id, ...);
 ```
 
 #### In `xsocket.rs` (TX/RX):
 ```rust
-// TX: Convert global → local → address
-let local_idx = global_idx - self.config.umem_config.group_start_frame_idx;
+// TX: Resolve frame token → local index → address
+let local_idx = resolve_frame_token(frame_token, &self.bus.partition_directory)
+    .expect("valid frame token")
+    .local_idx;
 let frame_addr = (local_idx << frame_size_log2) + headroom;
 tx_ring.push(FrameDesc::new(frame_addr));
 
-// RX: Convert address → local → global
+// RX: Convert address → local index → frame token
 let local_idx = (desc.addr() >> frame_size_log2);
-let global_idx = local_idx + self.config.umem_config.group_start_frame_idx;
+let frame_token = self
+    .bus
+    .resolve_local_frame_idx(group_id, local_idx)
+    .unwrap()
+    .frame_token;
 ```
 
 ### 4.4 Why Partitioning Does NOT Change `group_start_frame_idx`
@@ -606,7 +594,7 @@ updated_umem_config.group_start_frame_idx = partition_data.partition.start_idx;
 ```
 
 This breaks address calculations because:
-- Global frame `4100` in partition 1 (frames 4096-8191) would calculate:
+- Absolute frame position `4100` in partition 1 (positions 4096-8191) would calculate:
   - `local_idx = 4100 - 4100 = 0` ❌ Points to wrong frame!
   - `frame_addr = 0 << 11 = 0` ❌ Points to first frame of UMEM, not frame 4!
 
@@ -629,12 +617,13 @@ The partition boundaries control frame **ownership** (which worker can allocate 
 
 | Address Type | Scope | Used By | Range Example (Group 1) | Purpose |
 |-------------|-------|---------|-------------------------|---------|
-| **Global Index** | System-wide | Application, SystemBus, FrameRegistry | 4096 - 8191 | Unique frame identification |
+| **Frame token** | System-wide | Application, SystemBus, FrameRegistry | Partition ID + offset | Unique frame identification |
 | **Local Index** | UMEM-group | Internal calculations | 0 - 4095 | Index into UMEM frame array |
 | **Descriptor Address** | XSK/Kernel | AF_XDP rings | 0 - 8,386,560 | Byte offset in UMEM region |
 
 **Conversion Rules:**
-- `local_idx = global_idx - group_start_frame_idx`
-- `global_idx = local_idx + group_start_frame_idx`
+- `frame_token = encode_frame_token(partition_id, partition_offset)`
+- `local_idx = resolve_frame_token(frame_token, partition_directory).local_idx`
+- `frame_token = resolve_local_frame_idx(umem_group_id, local_idx).frame_token`
 - `descriptor_addr = (local_idx << frame_size_log2) + headroom`
 - `local_idx = descriptor_addr >> frame_size_log2` (headroom is within frame bounds)
