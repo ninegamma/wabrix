@@ -4,7 +4,7 @@ use log::trace;
 use std::ops::Add;
 use xsk_core::FrameDesc;
 
-use crate::frame_registry::CMD_BIT;
+use crate::frame_registry::{resolve_frame_token, CMD_BIT};
 use crate::SystemBus;
 use wabrix_api::exports::WPdu;
 
@@ -192,10 +192,23 @@ impl Pdu {
         // .get() returns Option<&Option<usize>>
         // .copied() turns it into Option<Option<usize>>
         // .flatten() turns it into Option<usize>
-        bus.umem_addr
-            .get(self.umem_id() as usize)
-            .copied()
-            .flatten()
+        let umem_group_id =
+            resolve_frame_token(self.global_frame_idx(), &bus.partition_directory)?.umem_group_id;
+        bus.umem_addr.get(umem_group_id).copied().flatten()
+    }
+
+    /// Returns the UMEM group owning this frame's partition token.
+    #[inline(always)]
+    pub fn umem_id(&self) -> Option<u8> {
+        if self.system_bus.is_null() {
+            return None;
+        }
+
+        // SAFETY: the SystemBus pointer is installed when the PDU is created and
+        // remains valid for the PDU's lifetime.
+        let bus = unsafe { &*self.system_bus };
+        resolve_frame_token(self.global_frame_idx(), &bus.partition_directory)
+            .and_then(|resolved| u8::try_from(resolved.umem_group_id).ok())
     }
 
     /// returns pointer to the first byte of the frame this Pdu represents

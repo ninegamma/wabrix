@@ -64,7 +64,7 @@ dst_mac = "44:49:88:06:63:39"
 # Hot Data: Diffed during reconcile_config().
 # Changes here trigger a ControlEvent dispatch to `on-control-event()`.
 [pipelines.nodes.hot_node_data]
-syn_rate = "100"
+generation_rate = "100"
 syn_limit = "1k"
 close_timeout = "5000"
 

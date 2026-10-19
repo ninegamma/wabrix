@@ -73,7 +73,7 @@ src_ip = "10.10.10.222"
 [pipelines.nodes.hot_node_data]
 syn_limit = "30M"
 close_timeout = "100"
-syn_rate = "700k"
+generation_rate = "700k"
 
 [[pipelines.nodes]]
 id = "nd_parser_veth"

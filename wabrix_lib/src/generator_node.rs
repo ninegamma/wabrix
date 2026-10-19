@@ -401,13 +401,13 @@ impl Node for GeneratorNode {
         // If we are Idle or Finished (run complete, waiting for GUI stop), pass the empty batch forward.
         if self.state == GenState::Idle || self.state == GenState::Finished {
             batch.clear();
-            return Directive::Next(self.next_node.clone());
+            return Directive::Next((&self.next_node).into());
         }
 
         // Failsafe for CLI mode
         if self.finished {
             batch.clear();
-            return Directive::Next(self.next_node.clone());
+            return Directive::Next((&self.next_node).into());
         }
 
         let now = unsafe { _rdtsc() };
@@ -426,7 +426,7 @@ impl Node for GeneratorNode {
             );
             self.reset_to_idle();
             batch.clear();
-            return Directive::Next(self.next_node.clone());
+            return Directive::Next((&self.next_node).into());
         }
 
         // Force the very first batch of a run to fire instantly
@@ -438,7 +438,7 @@ impl Node for GeneratorNode {
                 && (now - self.start_time) >= self.start_delay)
             {
                 batch.clear();
-                return Directive::Next(self.next_node.clone());
+                return Directive::Next((&self.next_node).into());
             }
         }
 
@@ -470,7 +470,7 @@ impl Node for GeneratorNode {
         if frames_to_generate == 0 {
             self.reset_to_idle();
             batch.clear();
-            return Directive::Next(self.next_node.clone());
+            return Directive::Next((&self.next_node).into());
         }
 
         let allocated = frame_registry.allocate_pdus_into(
@@ -482,7 +482,7 @@ impl Node for GeneratorNode {
             // We are temporarily out of frames (RX socket is hoarding, or TX ring is full).
             // Pass an empty batch forward to force BatchTxNode to poll the Completion Queue!
             batch.clear();
-            return Directive::Next(self.next_node.clone());
+            return Directive::Next((&self.next_node).into());
         }
 
         let mut generated = 0;
@@ -609,7 +609,7 @@ impl Node for GeneratorNode {
             let end_cycles = unsafe { _rdtsc() };
             self.total_cycles += end_cycles - start_cycles;
 
-            Directive::Next(self.next_node.clone())
+            Directive::Next((&self.next_node).into())
         } else {
             Directive::Stop
         }

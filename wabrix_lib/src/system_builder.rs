@@ -15,7 +15,9 @@ use crate::toml_parser::{PartitionRequest, WorkerBuilderConfig};
 use crate::xscrubber_skel::XscrubberSkel;
 use crate::xsocket::{XSocket, XSocketRx, XSocketTx, XdpSocketConfig};
 use crate::{BatchRx, BatchTx};
-use wabrix_base::frame_registry::{FrameRegistry, MAX_UMEM};
+use wabrix_base::frame_registry::{
+    resolve_frame_token, FrameRegistry, MAX_PARTITIONS, MAX_PARTITION_FRAMES, MAX_UMEM,
+};
 use wabrix_base::system::PlatformData;
 use wabrix_base::telemetry::TelemetryRegistry;
 use wabrix_base::{ControlEvent, RuntimeUmemConfig, SystemBus, UmemPartition};
@@ -88,6 +90,7 @@ impl SystemBuilder {
 
         // Track next available partition index for each UMEM. Indexed by umem_id (0..MAX_UMEM).
         let mut umem_partition_counters: Vec<usize> = vec![0; MAX_UMEM];
+        let mut next_partition_id = 0usize;
 
         // Process workers in order of their IDs for deterministic allocation
         let sorted_worker_ids: Vec<usize> = (0..num_workers)
@@ -124,14 +127,32 @@ impl SystemBuilder {
                 let start_idx = usable_start + (first_partition_idx as u32 * partition_size);
                 let end_idx = start_idx + (partition_req.count as u32 * partition_size);
 
+                if next_partition_id >= MAX_PARTITIONS {
+                    return Err("partition count exceeds the 8-bit frame-token capacity".into());
+                }
+                let local_start = start_idx - umem_conf.group_start_frame_idx;
+                let local_end = end_idx - umem_conf.group_start_frame_idx;
+                let partition_len = local_end
+                    .checked_sub(local_start)
+                    .ok_or_else(|| format!("Worker {}: partition range is inverted", worker_id))?;
+                if partition_len > MAX_PARTITION_FRAMES {
+                    return Err(format!(
+                        "Worker {}: partition has {} frames, maximum is {}",
+                        worker_id, partition_len, MAX_PARTITION_FRAMES
+                    )
+                    .into());
+                }
+
                 let partition = UmemPartition {
+                    partition_id: next_partition_id,
                     worker_id: *worker_id,
                     umem_group_id,
                     start_idx,
                     end_idx,
-                    local_start: start_idx - umem_conf.group_start_frame_idx,
-                    local_end: end_idx - umem_conf.group_start_frame_idx,
+                    local_start,
+                    local_end,
                 };
+                next_partition_id += 1;
 
                 worker_parts.push((umem_group_id, partition));
 
@@ -152,7 +173,7 @@ impl SystemBuilder {
             worker_partitions[*worker_id] = worker_parts;
         }
 
-        // Collect all partitions into a flat Vec for determine_owner lookups
+        // Collect all partitions and build the direct frame-token directory.
         let all_partitions: Vec<UmemPartition> = worker_partitions
             .iter()
             .flat_map(|parts| parts.iter().map(|(_umem_id, p)| *p))
@@ -195,7 +216,15 @@ impl SystemBuilder {
 
         let system_bus = Arc::new(SystemBus {
             bus_senders: bus_senders.clone(),
-            umem_partitions: all_partitions,
+            partition_directory: SystemBus::partition_directory(&all_partitions),
+            frame_tokens: SystemBus::frame_tokens(
+                &all_partitions,
+                &self
+                    .runtime_umems
+                    .iter()
+                    .map(|config| config.as_ref().map_or(0, |config| config.frame_count))
+                    .collect::<Vec<_>>(),
+            ),
             umem_addr,
         });
 
@@ -253,9 +282,16 @@ impl SystemBuilder {
                         let allocated = registry.allocate_batch_into(group_id, &mut global_frames);
 
                         for &frame in &global_frames[..allocated] {
-                            let (_umem_id, local_idx) =
-                                wabrix_base::frame_registry::decode_global_frame(frame);
-                            initial_addrs.push(umem_descs[local_idx as usize].addr());
+                            if let Some(resolved) =
+                                resolve_frame_token(frame, &system_bus.partition_directory)
+                            {
+                                initial_addrs.push(umem_descs[resolved.local_idx as usize].addr());
+                            } else {
+                                warn!(
+                                    "Skipping invalid initial fill token {} for UMEM {}",
+                                    frame, group_id
+                                );
+                            }
                         }
                     }
                 }
@@ -539,7 +575,8 @@ mod tests {
         let queue = Arc::new(ArrayQueue::new(64));
         let bus = Arc::new(SystemBus {
             bus_senders: vec![queue],
-            umem_partitions: vec![],
+            partition_directory: vec![None; MAX_PARTITIONS],
+            frame_tokens: vec![Vec::new(); MAX_UMEM],
             umem_addr: [None; MAX_UMEM],
         });
 
@@ -559,14 +596,19 @@ mod tests {
         (bus, configs)
     }
 
+    fn configure_test_bus(bus: &mut Arc<SystemBus>, partitions: &[UmemPartition]) {
+        Arc::get_mut(bus).unwrap().partition_directory = SystemBus::partition_directory(partitions);
+    }
+
     /// Test basic frame indexing with a single UMEM and single partition
     #[test]
     fn test_single_umem_single_partition() {
         let queue = Arc::new(ArrayQueue::new(64));
-        let (bus, configs) = create_test_bus_and_configs();
+        let (mut bus, configs) = create_test_bus_and_configs();
 
         // UMEM 0, group_start=0 → local range == absolute range
         let partition = UmemPartition {
+            partition_id: 0,
             worker_id: 0,
             umem_group_id: 0,
             start_idx: 0,
@@ -574,6 +616,8 @@ mod tests {
             local_start: 0,
             local_end: 100,
         };
+
+        configure_test_bus(&mut bus, &[partition]);
 
         let mut registry = FrameRegistry::new(0, vec![(0, partition)], queue, bus, configs);
 
@@ -598,6 +642,7 @@ mod tests {
 
         // UMEM 0: 4096 frames, group_start=0
         let partition0 = UmemPartition {
+            partition_id: 0,
             worker_id: 0,
             umem_group_id: 0,
             start_idx: 0,
@@ -608,6 +653,7 @@ mod tests {
 
         // UMEM 1: 2048 frames, group_start=4096 → local range [0, 2048)
         let partition1 = UmemPartition {
+            partition_id: 1,
             worker_id: 0,
             umem_group_id: 1,
             start_idx: 4096,
@@ -616,7 +662,7 @@ mod tests {
             local_end: 2048,
         };
 
-        let (bus, mut configs) = create_test_bus_and_configs();
+        let (mut bus, mut configs) = create_test_bus_and_configs();
         // Override UMEM 0 to have 4096 frames to match partition0
         configs[0] = Some(Arc::new(RuntimeUmemConfig {
             group_id: 0,
@@ -640,6 +686,8 @@ mod tests {
             group_start_frame_idx: 4096,
             partitions: 1,
         }));
+
+        configure_test_bus(&mut bus, &[partition0, partition1]);
 
         let mut registry = FrameRegistry::new(
             0,
@@ -681,6 +729,7 @@ mod tests {
 
         // UMEM 0: 100 frames, group_start=0
         let partition0 = UmemPartition {
+            partition_id: 0,
             worker_id: 0,
             umem_group_id: 0,
             start_idx: 0,
@@ -691,6 +740,7 @@ mod tests {
 
         // UMEM 1: 100 frames, group_start=100 → local range [0, 100)
         let partition1 = UmemPartition {
+            partition_id: 1,
             worker_id: 0,
             umem_group_id: 1,
             start_idx: 100,
@@ -699,7 +749,7 @@ mod tests {
             local_end: 100,
         };
 
-        let (bus, mut configs) = create_test_bus_and_configs();
+        let (mut bus, mut configs) = create_test_bus_and_configs();
         configs[1] = Some(Arc::new(RuntimeUmemConfig {
             group_id: 1,
             frame_size: 2048,
@@ -711,6 +761,8 @@ mod tests {
             group_start_frame_idx: 100,
             partitions: 1,
         }));
+
+        configure_test_bus(&mut bus, &[partition0, partition1]);
 
         let mut registry = FrameRegistry::new(
             0,
@@ -749,9 +801,10 @@ mod tests {
     #[test]
     fn test_frame_release_and_refcount() {
         let queue = Arc::new(ArrayQueue::new(64));
-        let (bus, configs) = create_test_bus_and_configs();
+        let (mut bus, configs) = create_test_bus_and_configs();
 
         let partition = UmemPartition {
+            partition_id: 0,
             worker_id: 0,
             umem_group_id: 0,
             start_idx: 0,
@@ -759,6 +812,8 @@ mod tests {
             local_start: 0,
             local_end: 100,
         };
+
+        configure_test_bus(&mut bus, &[partition]);
 
         let mut registry =
             FrameRegistry::new(0, vec![(0, partition)], queue, bus.clone(), configs.clone());
@@ -784,10 +839,11 @@ mod tests {
     #[test]
     fn test_merged_partitions() {
         let queue = Arc::new(ArrayQueue::new(64));
-        let (bus, configs) = create_test_bus_and_configs();
+        let (mut bus, configs) = create_test_bus_and_configs();
 
         // 4 consecutive partitions merged into one — UMEM 0, group_start=0
         let merged_partition = UmemPartition {
+            partition_id: 0,
             worker_id: 0,
             umem_group_id: 0,
             start_idx: 0,
@@ -795,6 +851,8 @@ mod tests {
             local_start: 0,
             local_end: 1024,
         };
+
+        configure_test_bus(&mut bus, &[merged_partition]);
 
         let mut registry = FrameRegistry::new(
             0,
@@ -818,9 +876,10 @@ mod tests {
     #[test]
     fn test_allocation_exhaustion() {
         let queue = Arc::new(ArrayQueue::new(64));
-        let (bus, configs) = create_test_bus_and_configs();
+        let (mut bus, configs) = create_test_bus_and_configs();
 
         let partition = UmemPartition {
+            partition_id: 0,
             worker_id: 0,
             umem_group_id: 0,
             start_idx: 0,
@@ -828,6 +887,8 @@ mod tests {
             local_start: 0,
             local_end: 10,
         };
+
+        configure_test_bus(&mut bus, &[partition]);
 
         let mut registry =
             FrameRegistry::new(0, vec![(0, partition)], queue, bus.clone(), configs.clone());
@@ -844,10 +905,11 @@ mod tests {
     #[test]
     fn test_non_zero_start_indices() {
         let queue = Arc::new(ArrayQueue::new(64));
-        let (bus, configs) = create_test_bus_and_configs();
+        let (mut bus, configs) = create_test_bus_and_configs();
 
         // UMEM 0, group_start=0 → local_start=512, local_end=1024
         let partition = UmemPartition {
+            partition_id: 0,
             worker_id: 1,
             umem_group_id: 0,
             start_idx: 512,
@@ -855,6 +917,8 @@ mod tests {
             local_start: 512,
             local_end: 1024,
         };
+
+        configure_test_bus(&mut bus, &[partition]);
 
         let mut registry =
             FrameRegistry::new(1, vec![(0, partition)], queue, bus.clone(), configs.clone());

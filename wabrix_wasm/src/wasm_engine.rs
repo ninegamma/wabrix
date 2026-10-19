@@ -3,7 +3,6 @@ use core::mem::size_of;
 use std::collections::HashMap;
 use std::mem::MaybeUninit;
 use std::sync::atomic::Ordering;
-use wabrix_api::helpers::parse_suffixed_number;
 use wabrix_api::tcp_common::EngineTimerPlan;
 use wabrix_api::{
     BatchMetadata, MAX_BATCH_SIZE, TIMER_KIND_NONE, TIMER_KIND_SYN, TIMER_KIND_TIMEOUT,
@@ -21,6 +20,7 @@ struct HostBatch {
     actions: [u32; MAX_BATCH_SIZE],
 }
 const _: () = assert!(size_of::<HostBatch>() == size_of::<BatchMetadata>());
+use crate::timer_diagnostics::TimerDiagnostics;
 use wabrix_base::frame_registry::get_worker_frame_registry;
 use wabrix_base::interface::batch::Batch;
 use wabrix_base::interface::Pdu;
@@ -40,12 +40,6 @@ use self::exports::wabrix::plugins::packet_engine::TelemetryMetric;
 
 pub struct WasmEngine {
     id: NodeId,
-    #[cfg(feature = "runtime-diagnostics")]
-    pipeline_name: String,
-    #[cfg(feature = "runtime-diagnostics")]
-    worker_id: usize,
-    #[cfg(feature = "runtime-diagnostics")]
-    worker_index: usize,
     /// Wasmtime state: Store holds the UMEM handle via MyHostState
     store: Store<MyHostState>,
     /// The generated bindings struct (named after the 'world' in CamelCase)
@@ -63,27 +57,12 @@ pub struct WasmEngine {
     umem_offset: u32,
     /// Wasm-linear-memory offset of this instance's private mailbox.
     mailbox_offset: u32,
-    /// The Umem this node is bound to. Every incoming PDU must carry this id.
+    /// The UMEM group this node uses for timer-frame allocation.
     umem_id: u8,
     /// Set permanently true after WASM returns a malformed response.
     /// All further WASM calls are skipped to prevent SIGSEGV from bad UMEM writes.
     poisoned: bool,
-    /// Timer-path diagnostics. These are cumulative and emitted periodically.
-    timer_requested_frames: u64,
-    timer_allocated_frames: u64,
-    timer_routed_frames: u64,
-    timer_retained_frames: u64,
-    timer_allocation_shortfalls: u64,
-    timer_batch_mismatches: u64,
-    mailbox_conservation_failures: u64,
-    timer_route_counts: Vec<u64>,
-    /// Route carrying timer-generated TCP transmissions
-    timer_syn_route_index: usize,
-    tsc_frequency: u64,
-    last_timer_diagnostics_tsc: Option<u64>,
-    last_timer_diagnostics_timer_packet_count: u64,
-    timer_diagnostics_enabled: bool,
-    timer_diagnostics_active: bool,
+    timer_diagnostics: TimerDiagnostics,
 }
 
 impl WasmEngine {
@@ -102,19 +81,20 @@ impl WasmEngine {
         platform_data: &PlatformData,
         mailbox_offset: u32,
     ) -> Result<Self, String> {
-        #[cfg(not(feature = "runtime-diagnostics"))]
-        let _ = (&pipeline_name, worker_id, worker_index);
-
-        let timer_diagnostics_enabled = node_data
-            .get("syn_rate")
-            .and_then(|rate| parse_suffixed_number(rate).ok())
-            .is_some_and(|rate| rate > 0);
+        let timer_diagnostics = TimerDiagnostics::new(
+            &node_data,
+            &routing_table,
+            platform_data.tsc_frequency,
+            pipeline_name,
+            worker_id,
+            worker_index,
+        );
 
         // 1. Fetch the Component from the Manager's DashMap cache
         // This takes nanoseconds if already loaded, avoiding disk I/O.
         let component = manager
             .get_component(wasm_file_path)
-            .expect("Failed to load Wasm component");
+            .map_err(|e| format!("Failed to load Wasm component '{}': {}", wasm_file_path, e))?;
 
         // 2. Build an instance-specific handle with a private linear mapping
         //    and an alias of the complete shared UMEM.
@@ -147,7 +127,12 @@ impl WasmEngine {
         //    the partition handle we pre-loaded in step 3.
         //    We use the Manager's shared Linker, which already has WASI registered.
         let bindings = EnginePlugin::instantiate(&mut store, &component, manager.linker())
-            .expect("Failed to instantiate Wasm component");
+            .map_err(|e| {
+                format!(
+                    "Failed to instantiate Wasm component '{}': {}",
+                    wasm_file_path, e
+                )
+            })?;
 
         if !node_data.is_empty() {
             let data: Vec<(String, String)> = node_data.into_iter().collect();
@@ -178,20 +163,8 @@ impl WasmEngine {
             }
         }
 
-        let route_count = routing_table.len();
-        let timer_syn_route_index = routing_table
-            .iter()
-            .position(|route| route.id == "shared_tx_sink")
-            .unwrap_or(0);
-
         Ok(Self {
             id,
-            #[cfg(feature = "runtime-diagnostics")]
-            pipeline_name,
-            #[cfg(feature = "runtime-diagnostics")]
-            worker_id,
-            #[cfg(feature = "runtime-diagnostics")]
-            worker_index,
             store,
             bindings,
             routing_table,
@@ -203,20 +176,7 @@ impl WasmEngine {
             mailbox_offset,
             umem_id,
             poisoned: false,
-            timer_requested_frames: 0,
-            timer_allocated_frames: 0,
-            timer_routed_frames: 0,
-            timer_retained_frames: 0,
-            timer_allocation_shortfalls: 0,
-            timer_batch_mismatches: 0,
-            mailbox_conservation_failures: 0,
-            timer_route_counts: vec![0; route_count],
-            timer_syn_route_index,
-            tsc_frequency: platform_data.tsc_frequency,
-            last_timer_diagnostics_tsc: None,
-            last_timer_diagnostics_timer_packet_count: 0,
-            timer_diagnostics_enabled,
-            timer_diagnostics_active: false,
+            timer_diagnostics,
         })
     }
 
@@ -405,8 +365,7 @@ impl WasmEngine {
         let routed_frames: usize = outputs.iter().map(Batch::len).sum();
         let retained_frames = batch.len();
         if routed_frames.saturating_add(retained_frames) != len || pdu_index != len {
-            self.mailbox_conservation_failures =
-                self.mailbox_conservation_failures.saturating_add(1);
+            self.timer_diagnostics.record_mailbox_conservation_failure();
             log::error!(
                 "NODE {}: mailbox conservation failure: input={}, actions_read={}, routed={}, retained={}; rejecting batch",
                 self.id,
@@ -416,16 +375,12 @@ impl WasmEngine {
                 retained_frames
             );
             batch.clear();
+            self.poisoned = true;
             return Directive::Stop;
         }
 
-        if self.timer_diagnostics_active {
-            self.timer_routed_frames += routed_frames as u64;
-            self.timer_retained_frames += retained_frames as u64;
-            for (route_idx, output_batch) in outputs.iter().enumerate() {
-                self.timer_route_counts[route_idx] += output_batch.len() as u64;
-            }
-        }
+        self.timer_diagnostics
+            .record_routing(routed_frames, retained_frames, &outputs);
 
         // ==========================================
         // 5. DISPATCH DIRECTIVES
@@ -433,7 +388,7 @@ impl WasmEngine {
         let mut split_branches = Vec::with_capacity(num_routes);
         for (i, output_batch) in outputs.into_iter().enumerate() {
             if !output_batch.is_empty() {
-                split_branches.push((self.routing_table[i].clone(), output_batch));
+                split_branches.push(((&self.routing_table[i]).into(), output_batch));
             }
         }
 
@@ -463,7 +418,7 @@ impl Node for WasmEngine {
         let start_cycles = unsafe { std::arch::x86_64::_rdtsc() };
 
         debug_assert!(
-            batch.iter().all(|pdu| pdu.w.umem_id() == self.umem_id),
+            batch.iter().all(|pdu| pdu.umem_id() == Some(self.umem_id)),
             "NODE {}: PDU from wrong Umem arrived",
             self.id
         );
@@ -505,7 +460,12 @@ impl Node for WasmEngine {
         #[cfg(feature = "profiling")]
         let start_cycles = unsafe { std::arch::x86_64::_rdtsc() };
 
-        // Evaluate the core logic into a single variable using a block expression
+        // Timer polling is deliberately separated from `process`: the plugin may need to
+        // retransmit packets or emit new SYN traffic even when no ingress packet arrived.
+        // The returned plan contains counts, not packet descriptors; the host remains
+        // responsible for obtaining valid UMEM frames and returning them through routing.
+        // Evaluate the complete timer transaction into one directive so diagnostics and
+        // profiling are applied consistently to both the idle and packet-producing paths.
         let directive = {
             let timer_plan = match self
                 .bindings
@@ -525,6 +485,9 @@ impl Node for WasmEngine {
             let n_requested_frames = requested_plan.requested_frames();
 
             if n_requested_frames == 0 {
+                // An empty plan still represents a useful poll: the plugin's counters may
+                // have changed since the previous call. Drain the explicit telemetry request
+                // here because there is no packet batch below whose normal path can do it.
                 // Service force_sync_flag even when idle so final WASM state is
                 // captured in host AtomicU64 counters at run end.
                 let control_plane_wants_sync = self
@@ -549,12 +512,14 @@ impl Node for WasmEngine {
                 }
                 Directive::Stop
             } else {
-                // 1. Allocate exact memory from the shared FrameRegistry
+                // Allocate the exact number of frames requested by the plugin from the
+                // shared registry. A short allocation is allowed: the resulting batch is
+                // reduced to the frames that actually exist rather than using invalid slots.
                 let registry = unsafe { &mut *get_worker_frame_registry() };
                 let mut scratch: [MaybeUninit<Pdu>; MAX_BATCH_SIZE] =
                     core::array::from_fn(|_| MaybeUninit::uninit());
                 if n_requested_frames > MAX_BATCH_SIZE as u32 {
-                    self.timer_batch_mismatches = self.timer_batch_mismatches.saturating_add(1);
+                    self.timer_diagnostics.record_batch_mismatch();
                     log::error!(
                         "NODE {}: timer requested {} frames, exceeding MAX_BATCH_SIZE {}; rejecting request",
                         self.id,
@@ -564,24 +529,26 @@ impl Node for WasmEngine {
                     return Directive::Stop;
                 }
                 let frames_to_allocate = n_requested_frames as usize;
-                self.timer_requested_frames += requested_plan.requested_frames() as u64;
+                self.timer_diagnostics
+                    .record_requested(requested_plan.requested_frames());
 
                 let allocated = registry
                     .allocate_pdus_into(self.umem_id as usize, &mut scratch[..frames_to_allocate]);
                 let allocated_plan = requested_plan.with_allocated(allocated as u32);
-                self.timer_allocated_frames += allocated as u64;
+                self.timer_diagnostics.record_allocated(allocated);
                 if allocated < frames_to_allocate {
-                    self.timer_allocation_shortfalls += 1;
+                    self.timer_diagnostics.record_allocation_shortfall();
                 }
 
                 if allocated == 0 {
                     log::warn!("NODE {}: Timer starved of UMEM frames!", self.id);
                     Directive::Stop
                 } else {
-                    // 2. Load and initialize the freshly allocated PDUs into the Batch
+                    // Move the allocated descriptors into the batch and initialize a
+                    // minimal Ethernet/IPv4-looking header. The timer kind is metadata for
+                    // the plugin: SYN frames are placed first so timeout work cannot consume
+                    // frames reserved for SYN generation when allocation is short.
                     batch.clear();
-                    // SYN frames are placed first so an UMEM shortfall cannot
-                    // consume the SYN reservation with timeout work.
                     let allocated_syn_frames = (allocated_plan.allocated_frames as usize)
                         .min(packet_frames_requested as usize);
                     let allocated_timeout_frames = (allocated_plan.allocated_frames as usize)
@@ -609,8 +576,7 @@ impl Node for WasmEngine {
                         };
                         pdu.w.set_timer_kind(timer_kind);
                         if batch.push(pdu).is_err() {
-                            self.timer_batch_mismatches =
-                                self.timer_batch_mismatches.saturating_add(1);
+                            self.timer_diagnostics.record_batch_mismatch();
                             log::error!(
                                 "NODE {}: timer batch overflow while inserting {} allocated frames",
                                 self.id,
@@ -622,7 +588,7 @@ impl Node for WasmEngine {
                     }
 
                     if batch.len() != allocated {
-                        self.timer_batch_mismatches = self.timer_batch_mismatches.saturating_add(1);
+                        self.timer_diagnostics.record_batch_mismatch();
                         log::error!(
                             "NODE {}: timer batch length mismatch: allocated={}, batch_len={}",
                             self.id,
@@ -635,75 +601,18 @@ impl Node for WasmEngine {
 
                     self.processed_packets += allocated as u64;
 
-                    // 3. Hand off to WASM execution (evaluates to Directive)
-                    self.timer_diagnostics_active = true;
+                    // Reuse the ordinary mailbox execution path. This copies the timer
+                    // descriptors into the plugin mailbox, lets Wasm choose actions/routes,
+                    // copies mutations back, and transfers ownership to downstream batches.
+                    self.timer_diagnostics.begin_timer_batch();
                     let directive = self.execute_wasm_and_route(batch);
-                    self.timer_diagnostics_active = false;
+                    self.timer_diagnostics.end_timer_batch();
                     directive
                 }
             }
         }; // <-- The block ends here, yielding the final Directive
 
-        let should_log_timer_diagnostics = self.timer_diagnostics_enabled
-            && (self.last_timer_diagnostics_tsc.is_none()
-                || current_tsc
-                    .saturating_sub(self.last_timer_diagnostics_tsc.unwrap_or(current_tsc))
-                    >= 30 * self.tsc_frequency);
-
-        if should_log_timer_diagnostics {
-            // Report elapsed time from the worker's run start, rather than
-            // wall-clock epoch. Three decimal places after milliseconds
-            // provide microsecond resolution: 1234.567 ms.
-            let run_start_tsc = wabrix_base::frame_registry::get_tsc_start();
-            let elapsed_tsc_from_start = current_tsc.saturating_sub(run_start_tsc);
-            let elapsed_micros = if self.tsc_frequency > 0 {
-                (elapsed_tsc_from_start as u128 * 1_000_000) / self.tsc_frequency as u128
-            } else {
-                0
-            };
-            let timestamp_ms = elapsed_micros / 1_000;
-            let timestamp_ms_fraction = elapsed_micros % 1_000;
-
-            let routed_timer_packets = self
-                .timer_route_counts
-                .get(self.timer_syn_route_index)
-                .copied()
-                .unwrap_or(0);
-            let (timer_route_rate_per_second, elapsed_tsc) =
-                if let Some(previous_tsc) = self.last_timer_diagnostics_tsc {
-                    let elapsed_tsc = current_tsc.saturating_sub(previous_tsc);
-                    let elapsed_timer_packets = routed_timer_packets
-                        .saturating_sub(self.last_timer_diagnostics_timer_packet_count);
-                    if elapsed_tsc > 0 && self.tsc_frequency > 0 {
-                        (
-                            elapsed_timer_packets as f64 * self.tsc_frequency as f64
-                                / elapsed_tsc as f64,
-                            elapsed_tsc,
-                        )
-                    } else {
-                        (0.0, elapsed_tsc)
-                    }
-                } else {
-                    (0.0, 0)
-                };
-            let elapsed_ms = if self.tsc_frequency > 0 {
-                elapsed_tsc as f64 * 1_000.0 / self.tsc_frequency as f64
-            } else {
-                0.0
-            };
-            self.last_timer_diagnostics_tsc = Some(current_tsc);
-            self.last_timer_diagnostics_timer_packet_count = routed_timer_packets;
-
-            log::debug!(
-                "NODE {}: timer diagnostics: timestamp_ms={}.{:03}, routed_timer_packets={}, timer_route_rate_per_sec={:.3}, elapsed_ms={:.3}",
-                self.id,
-                timestamp_ms,
-                timestamp_ms_fraction,
-                routed_timer_packets,
-                timer_route_rate_per_second,
-                elapsed_ms,
-            );
-        }
+        self.timer_diagnostics.report_if_due(&self.id, current_tsc);
 
         #[cfg(feature = "profiling")]
         {
@@ -750,25 +659,6 @@ impl Node for WasmEngine {
 
 impl Drop for WasmEngine {
     fn drop(&mut self) {
-        if self.timer_diagnostics_enabled {
-            #[cfg(feature = "runtime-diagnostics")]
-            log::info!(
-                "NODE {}: final timer runtime counters: pipeline='{}', worker_id={}, worker_index={}, requested={}, allocated={}, unallocated={}, routed={}, retained={}, allocation_shortfalls={}, batch_mismatches={}, mailbox_conservation_failures={}, route_counts={:?}",
-                self.id,
-                self.pipeline_name,
-                self.worker_id,
-                self.worker_index,
-                self.timer_requested_frames,
-                self.timer_allocated_frames,
-                self.timer_requested_frames
-                    .saturating_sub(self.timer_allocated_frames),
-                self.timer_routed_frames,
-                self.timer_retained_frames,
-                self.timer_allocation_shortfalls,
-                self.timer_batch_mismatches,
-                self.mailbox_conservation_failures,
-                self.timer_route_counts,
-            );
-        }
+        self.timer_diagnostics.report_final(&self.id);
     }
 }

@@ -556,7 +556,7 @@ use rustix::io::Errno;
 use separator::Separatable;
 use wabrix_api::MAX_BATCH_SIZE;
 use wabrix_base::frame_registry::{
-    decode_global_frame, encode_global_frame, get_tsc_frequency, get_worker_frame_registry,
+    get_tsc_frequency, get_worker_frame_registry, resolve_frame_token,
 };
 use wabrix_base::system::{rdtsc_us, try_get_tsc_frequency};
 use wabrix_base::{RuntimeUmemConfig, SystemBus};
@@ -786,7 +786,12 @@ impl XSocketRx {
         let headroom = self.config.umem_config.head_room as u64;
 
         for i in 0..actual_batch {
-            let (_umem_id, local_idx) = decode_global_frame(self.scratch_frames[i]);
+            let Some(local_idx) =
+                resolve_frame_token(self.scratch_frames[i], &self.bus.partition_directory)
+                    .map(|resolved| resolved.local_idx)
+            else {
+                continue;
+            };
             // Use a 1-cycle bitwise shift instead of multiplication
             let addr = ((local_idx as u64) << frame_size_log2) + headroom;
             // Write directly to our persistent struct buffer
@@ -920,14 +925,13 @@ impl XSocketRx {
 }
 
 impl XSocketRx {
+    #[inline(always)]
     fn determine_owner(&self, frame_idx: u32) -> usize {
-        for partition in &self.bus.umem_partitions {
-            if partition.owns_encoded(frame_idx) {
-                return partition.worker_id;
-            }
+        if let Some(resolved) = resolve_frame_token(frame_idx, &self.bus.partition_directory) {
+            return resolved.worker_id;
         }
         log::warn!(
-            "determine_owner: no partition owns frame_idx={}, defaulting to worker 0",
+            "determine_owner: invalid frame token={}, defaulting to worker 0",
             frame_idx
         );
         0
@@ -1321,7 +1325,20 @@ impl BatchRx for XSocketRx {
             // BITWISE SHIFT INSTEAD OF DIVISION
             // Replaces ~20 cycle division with a 1 cycle shift
             let local_idx = (desc.addr() as u32) >> frame_size_log2; // local_idx is wrt. current Umem
-            let global_idx = encode_global_frame(group_id, local_idx);
+            let Some(global_idx) = self
+                .bus
+                .frame_tokens
+                .get(group_id)
+                .and_then(|tokens| tokens.get(local_idx as usize))
+                .and_then(|token| *token)
+            else {
+                log::warn!(
+                    "receive_into_batch: no partition token for UMEM {}, local frame {}",
+                    group_id,
+                    local_idx
+                );
+                continue;
+            };
             // The worker owning the RX ring is not necessarily the owner of
             // this frame. The initial Fill Queue may contain frames supplied
             // by another worker, and frames returned through the shared bus
@@ -1714,8 +1731,21 @@ impl XSocketTx {
                 // 1. Calculate the local index relative to this specific UMEM
                 let local_idx = addr >> frame_size_log2;
 
-                // 2. Encode to the global frame index (umem_id << 24 | local_idx)
-                let global_idx = encode_global_frame(self.config.umem_config.group_id, local_idx);
+                // 2. Recover the partition token from the UMEM-local completion address.
+                let Some(global_idx) = self
+                    .bus
+                    .frame_tokens
+                    .get(self.config.umem_config.group_id)
+                    .and_then(|tokens| tokens.get(local_idx as usize))
+                    .and_then(|token| *token)
+                else {
+                    log::warn!(
+                        "drain_completion_queue: no partition token for UMEM {}, local frame {}",
+                        self.config.umem_config.group_id,
+                        local_idx
+                    );
+                    continue;
+                };
                 trace!(
                     "drain_completion_queue: Worker {}: Releasing frame_idx={} (local_idx={}, umem_group_id={})",
                     self.worker_id,
@@ -1786,14 +1816,11 @@ impl XSocketTx {
     }
 
     fn determine_owner(&self, frame_idx: u32) -> usize {
-        for partition in &self.bus.umem_partitions {
-            if partition.owns_encoded(frame_idx) {
-                return partition.worker_id;
-            }
+        if let Some(resolved) = resolve_frame_token(frame_idx, &self.bus.partition_directory) {
+            return resolved.worker_id;
         }
-        // Fallback: should never happen with a correctly configured system
         log::warn!(
-            "determine_owner: no partition owns frame_idx={}, defaulting to worker 0",
+            "determine_owner: invalid frame token={}, defaulting to worker 0",
             frame_idx
         );
         0

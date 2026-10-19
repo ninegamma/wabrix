@@ -1,3 +1,4 @@
+mod timer_diagnostics;
 pub mod wasm_engine;
 pub mod wasm_manager;
 

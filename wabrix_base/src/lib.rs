@@ -9,7 +9,7 @@ pub mod node_instance_id;
 pub mod system;
 pub mod telemetry;
 
-use crate::frame_registry::MAX_UMEM;
+use crate::frame_registry::{decode_global_frame, encode_global_frame, MAX_PARTITIONS, MAX_UMEM};
 use crate::interface::batch::Batch;
 use core::fmt::Display;
 use crossbeam_queue::ArrayQueue;
@@ -47,6 +47,8 @@ impl Drop for RuntimeUmemConfig {
 #[derive(Debug, Clone, Copy)]
 #[repr(align(64))]
 pub struct UmemPartition {
+    /// Stable index carried by every frame token in this partition.
+    pub partition_id: usize,
     pub worker_id: usize,     // Worker thread that owns this partition
     pub umem_group_id: usize, // Memory domain (UMEM group)
     pub start_idx: u32, // Absolute global frame index (used by system_builder for layout math)
@@ -60,16 +62,18 @@ pub struct UmemPartition {
 
 impl UmemPartition {
     /// Check ownership against an **encoded** global frame index
-    /// (format: `(umem_id << 24) | local_idx`).
+    /// (format: partition ID plus partition-relative offset).
     #[inline]
     pub fn owns_encoded(&self, encoded_frame_idx: u32) -> bool {
-        let (umem_id, local_idx) = crate::frame_registry::decode_global_frame(encoded_frame_idx);
-        umem_id == self.umem_group_id && local_idx >= self.local_start && local_idx < self.local_end
+        let (partition_id, offset) = decode_global_frame(encoded_frame_idx);
+        partition_id == self.partition_id
+            && offset < self.local_end.saturating_sub(self.local_start)
     }
 }
 
 /// Per-worker lockless return queue: packed u32 commands.
-/// Bit 31 = command (0 = Release, 1 = Retain); bits 30-24 = umem_id; bits 23-0 = local_idx.
+/// Bit 31 = command (0 = Release, 1 = Retain); bits 30-23 = partition ID;
+/// bits 22-0 = partition-relative offset.
 /// See frame_registry::{CMD_BIT, is_retain, extract_global_idx} for helpers.
 #[derive(Clone)]
 #[repr(align(64))]
@@ -77,10 +81,63 @@ pub struct SystemBus {
     /// One ArrayQueue<u32> per worker. Senders push packed u32 commands;
     /// the owning worker pops them in process_returns().
     pub bus_senders: Vec<Arc<ArrayQueue<u32>>>,
-    /// All UMEM partitions across all workers, used by determine_owner to map
-    /// a frame index to the worker that owns it.
-    pub umem_partitions: Vec<UmemPartition>,
+    /// Directly indexed partition metadata for frame-token resolution.
+    pub partition_directory: Vec<Option<UmemPartition>>,
+    /// Direct local-frame-to-token lookup used when RX descriptors carry only an address.
+    pub frame_tokens: Vec<Vec<Option<u32>>>,
     pub umem_addr: [Option<usize>; MAX_UMEM],
+}
+
+impl SystemBus {
+    /// Builds the fixed-index directory for the supplied stable partitions.
+    pub fn partition_directory(partitions: &[UmemPartition]) -> Vec<Option<UmemPartition>> {
+        let mut directory = vec![None; MAX_PARTITIONS];
+        for partition in partitions {
+            assert!(
+                partition.partition_id < MAX_PARTITIONS,
+                "partition ID exceeds token capacity"
+            );
+            assert!(
+                partition.local_end >= partition.local_start,
+                "partition range is inverted"
+            );
+            assert!(
+                partition.local_end - partition.local_start
+                    <= crate::frame_registry::MAX_PARTITION_FRAMES,
+                "partition exceeds token offset capacity"
+            );
+            assert!(
+                directory[partition.partition_id].is_none(),
+                "duplicate partition ID"
+            );
+            directory[partition.partition_id] = Some(*partition);
+        }
+        directory
+    }
+
+    pub fn frame_tokens(
+        partitions: &[UmemPartition],
+        frame_counts: &[u32],
+    ) -> Vec<Vec<Option<u32>>> {
+        let mut tokens = frame_counts
+            .iter()
+            .map(|&count| vec![None; count as usize])
+            .collect::<Vec<_>>();
+        for partition in partitions {
+            let Some(group_tokens) = tokens.get_mut(partition.umem_group_id) else {
+                continue;
+            };
+            for local_idx in partition.local_start..partition.local_end {
+                if let Some(slot) = group_tokens.get_mut(local_idx as usize) {
+                    *slot = Some(encode_global_frame(
+                        partition.partition_id,
+                        local_idx - partition.local_start,
+                    ));
+                }
+            }
+        }
+        tokens
+    }
 }
 
 /// SAFETY: Arc<ArrayQueue<u32>> is Send, so Vec<Arc<ArrayQueue<u32>>> is also Send.
@@ -89,12 +146,78 @@ unsafe impl Send for SystemBus {}
 /// Directives tell the scheduler where the batch should go next.
 pub enum Directive {
     /// Pass the entire batch to the next node in the DAG.
-    Next(NodeId),
+    Next(NodeIndex),
     /// The batch has been split (e.g., by a Router).
-    /// The Vec contains (NextNodeId, SubBatch).
-    Split(Vec<(NodeId, Batch)>),
+    /// The Vec contains (next node index, sub-batch).
+    Split(Vec<(NodeIndex, Batch)>),
     /// The batch reached a sink (TX) or was fully dropped.
     Stop,
+}
+
+/// Compact, allocation-free reference to a node used by the scheduler.
+///
+/// `NodeId` remains the owning identity used for configuration and logging;
+/// directives only need its stable numeric index to dispatch a batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct NodeIndex(pub u32);
+
+impl From<u32> for NodeIndex {
+    fn from(index: u32) -> Self {
+        Self(index)
+    }
+}
+
+impl From<NodeIndex> for usize {
+    fn from(index: NodeIndex) -> Self {
+        index.0 as usize
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NodeId {
+    pub index: u32,
+    pub id: String,
+}
+
+impl NodeId {
+    pub fn new(index: u32, id: String) -> Self {
+        Self { index, id }
+    }
+}
+
+impl From<NodeId> for NodeIndex {
+    fn from(node_id: NodeId) -> Self {
+        Self(node_id.index)
+    }
+}
+
+impl From<&NodeId> for NodeIndex {
+    fn from(node_id: &NodeId) -> Self {
+        Self(node_id.index)
+    }
+}
+
+impl From<NodeId> for usize {
+    fn from(node_id: NodeId) -> Self {
+        node_id.index as usize
+    }
+}
+
+impl From<&NodeId> for usize {
+    fn from(node_id: &NodeId) -> Self {
+        node_id.index as usize
+    }
+}
+
+impl Display for NodeId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> std::fmt::Result {
+        // 1. Build your custom string
+        let output = format!("{}: {}", self.index, self.id);
+
+        // 2. Let the formatter apply the, e.g., {:20} or {:>20} rules!
+        f.pad(&output)
+    }
 }
 
 /// Result of handling a control-plane event on a node.
@@ -147,60 +270,6 @@ pub trait Node: Send + std::any::Any {
     #[cfg(feature = "profiling")]
     fn profiling_cycles(&self) -> u64 {
         0
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct NodeId {
-    pub index: u32,
-    pub id: String,
-}
-
-impl NodeId {
-    pub fn new(index: u32, id: String) -> Self {
-        Self { index, id }
-    }
-}
-
-impl From<NodeId> for u32 {
-    fn from(node_id: NodeId) -> Self {
-        node_id.index
-    }
-}
-
-impl From<&NodeId> for u32 {
-    fn from(node_id: &NodeId) -> Self {
-        node_id.index
-    }
-}
-
-impl From<NodeId> for usize {
-    fn from(node_id: NodeId) -> Self {
-        node_id.index as usize
-    }
-}
-
-impl From<&NodeId> for usize {
-    fn from(node_id: &NodeId) -> Self {
-        node_id.index as usize
-    }
-}
-
-impl TryFrom<NodeId> for u16 {
-    type Error = std::num::TryFromIntError;
-
-    fn try_from(node_id: NodeId) -> Result<Self, Self::Error> {
-        u16::try_from(node_id.index)
-    }
-}
-
-impl Display for NodeId {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> std::fmt::Result {
-        // 1. Build your custom string
-        let output = format!("{}: {}", self.index, self.id);
-
-        // 2. Let the formatter apply the, e.g., {:20} or {:>20} rules!
-        f.pad(&output)
     }
 }
 

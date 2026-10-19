@@ -223,8 +223,8 @@ The architecture is best understood as a hierarchy of constraints:
 * **`XSocketTx`**: TX-only component of a split socket. Returns all frames via SystemBus (no direct registry access).
 * **`FrameRegistry`**: The worker's combined frame inventory. Holds `worker_id`, a `return_queue` (`Arc<ArrayQueue<u32>>`), a `bus` reference, and `registry_map: Vec<Option<PartitionData>>` indexed by UMEM group. Stored in thread-local storage — only the owning worker thread accesses it directly.
 * **`PartitionData`** *(inside `FrameRegistry.registry_map`)*: Per-UMEM allocation context for one worker. Holds `free_stash: Vec<u32>` (LIFO stack of available encoded frame indices) and `refcounts: Vec<u16>` (per-frame reference tracking).
-* **`SystemBus`**: The mechanism to satisfy the **Ownership Rule** (returning frames between workers). Holds one `Arc<ArrayQueue<u32>>` per worker (`bus_senders`), plus `umem_partitions: Vec<UmemPartition>` for ownership lookup. Commands are bit-packed into a single u32: bit 31 = command (0=Release, 1=Retain), bits 30-24 = umem_id (7 bits, max 128 UMEMs), bits 23-0 = local_idx.
-* **`UmemPartition`**: Contains `worker_id`, `umem_group_id`, `start_idx`, `end_idx` (global frame index range), plus `local_start` and `local_end` (UMEM-relative index range) to define frame ownership boundaries.
+* **`SystemBus`**: The mechanism to satisfy the **Ownership Rule** (returning frames between workers). Holds one `Arc<ArrayQueue<u32>>` per worker (`bus_senders`) and a partition-ID-indexed directory of canonical `UmemPartition` values for ownership lookup. Commands are bit-packed into a single `u32`: bit 31 = command (0=Release, 1=Retain), bits 30-23 = partition ID, and bits 22-0 = partition-relative offset.
+* **`UmemPartition`**: Contains `partition_id`, `worker_id`, `umem_group_id`, `start_idx`, `end_idx` (absolute frame range), plus `local_start` and `local_end` (UMEM-relative range) to define frame ownership boundaries and resolve partition-token offsets.
 
 ---
 
@@ -382,7 +382,7 @@ fn release_frame(&mut self, frame_idx: u32) {
 4. **SystemBus Coordination:**
    - One `Arc<ArrayQueue<u32>>` per worker; both senders and the registry share the same Arc
    - Works transparently for same-worker and cross-worker scenarios
-   - Packed u32 format: bit 31 = command, bits 30-24 = umem_id, bits 23-0 = local_idx
+   - Packed u32 format: bit 31 = command, bits 30-23 = partition ID, bits 22-0 = partition-relative offset
    - Routes based on worker_id, not core_id
 
 ### Registry Behavior

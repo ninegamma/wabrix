@@ -256,9 +256,9 @@ mod tests {
     #[test]
     fn startup_node_data_changes_require_restart() {
         let mut node_data = HashMap::new();
-        node_data.insert("syn_rate".into(), "1k".into());
+        node_data.insert("generation_rate".into(), "1k".into());
         let mut changed = node_data.clone();
-        changed.insert("syn_rate".into(), "2k".into());
+        changed.insert("generation_rate".into(), "2k".into());
 
         let result = reconcile_config(
             Arc::new(SharedSystemState::default()),
@@ -271,7 +271,7 @@ mod tests {
     #[test]
     fn supported_hot_data_change_generates_update_event() {
         let mut hot_data = HashMap::new();
-        hot_data.insert("syn_rate".into(), "2k".into());
+        hot_data.insert("generation_rate".into(), "2k".into());
         let result = reconcile_config(
             Arc::new(SharedSystemState::default()),
             &config("TcpNode", None, None),
@@ -285,7 +285,10 @@ mod tests {
         assert_eq!(events[0].opcode, StandardOpcode::UpdateConfiguration as u32);
         let payload = postcard::from_bytes::<HotWasmPayload>(&events[0].payload)
             .expect("event payload should decode");
-        assert_eq!(payload.updates.get("syn_rate"), Some(&"2k".to_string()));
+        assert_eq!(
+            payload.updates.get("generation_rate"),
+            Some(&"2k".to_string())
+        );
     }
 
     #[test]

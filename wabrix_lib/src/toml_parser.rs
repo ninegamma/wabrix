@@ -770,10 +770,10 @@ impl WabricksConfig {
         // 2. Validate UMEM configurations
         let mut umem_ids = HashSet::new();
         for umem_cfg in &section.umem {
-            // Check UMEM ID fits in 8 bits (required by encode_global_frame)
+            // UMEM group IDs index fixed-capacity runtime tables.
             if umem_cfg.id >= MAX_UMEM {
                 return Err(anyhow!(
-                    "UMEM id {} exceeds maximum of {} (must fit in 8 bits for frame encoding)",
+                    "UMEM id {} exceeds maximum supported group index {}",
                     umem_cfg.id,
                     MAX_UMEM - 1
                 ));
@@ -1957,10 +1957,10 @@ mod tests {
 
                 [node_data]
                 src_ip = "10.0.0.1"
-                syn_rate = "1000k"
+                generation_rate = "1000k"
 
                 [hot_node_data]
-                syn_rate = "2000k"
+                generation_rate = "2000k"
             "#,
         )
         .unwrap();
@@ -1972,13 +1972,13 @@ mod tests {
         assert_eq!(
             node.node_data
                 .as_ref()
-                .and_then(|data| data.get("syn_rate")),
+                .and_then(|data| data.get("generation_rate")),
             Some(&"1000k".to_string())
         );
         assert_eq!(
             node.hot_node_data
                 .as_ref()
-                .and_then(|data| data.get("syn_rate")),
+                .and_then(|data| data.get("generation_rate")),
             Some(&"2000k".to_string())
         );
     }
@@ -1992,19 +1992,19 @@ mod tests {
                 args = { batch_size = "256" }
 
                 [node_data]
-                syn_rate = "1000k"
+                generation_rate = "1000k"
                 syn_limit = "10M"
                 batch_size = "64"
 
                 [hot_node_data]
-                syn_rate = "2000k"
+                generation_rate = "2000k"
                 batch_size = "128"
             "#,
         )
         .unwrap();
 
         let startup = node.startup_node_data();
-        assert_eq!(startup.get("syn_rate"), Some(&"2000k".to_string()));
+        assert_eq!(startup.get("generation_rate"), Some(&"2000k".to_string()));
         assert_eq!(startup.get("syn_limit"), Some(&"10M".to_string()));
         assert_eq!(startup.get("batch_size"), Some(&"256".to_string()));
     }

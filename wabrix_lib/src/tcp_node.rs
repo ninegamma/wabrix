@@ -79,8 +79,8 @@ impl TcpNode {
     ) -> Result<Self, String> {
         let (config, node_name) = parse_tcp_engine_config(config_data, tsc_frequency)?;
 
-        log::debug!("TcpNode '{}': config — syn_rate={:?}, syn_limit={:?}, src_ip={:?}, dst_ip={:?}, close_timeout_ms={:?}, tsc_freq={}",
-            id.id, config.syn_rate, config.syn_limit, config.src_ip, config.dst_ip,
+        log::debug!("TcpNode '{}': config — generation_rate={:?}, syn_limit={:?}, src_ip={:?}, dst_ip={:?}, close_timeout_ms={:?}, tsc_freq={}",
+            id.id, config.generation_rate, config.syn_limit, config.src_ip, config.dst_ip,
             config.close_timeout_millis, tsc_frequency);
         let num_routes = routing_table.len();
         Ok(Self {
@@ -325,7 +325,7 @@ impl Node for TcpNode {
                 // Swap the populated batch out with a fresh (uninit, no-heap)
                 // empty one so ownership can move into the Directive.
                 let branch = replace(&mut self.output_batches[i], Batch::new());
-                split_branches.push((self.routing_table[i].clone(), branch));
+                split_branches.push(((&self.routing_table[i]).into(), branch));
             }
         }
 
@@ -385,8 +385,8 @@ impl Node for TcpNode {
         let timeout_count = self.timeout_queue.len().min(2 * MAX_BATCH_SIZE / 3);
 
         let syn_count = {
-            let syn_rate = self.config.syn_rate.unwrap_or(0);
-            if syn_rate > 0 && self.syn_gen.activated {
+            let generation_rate = self.config.generation_rate.unwrap_or(0);
+            if generation_rate > 0 && self.syn_gen.activated {
                 let allowed = match self.config.syn_limit {
                     Some(max) => self.syn_gen.packets_sent < max || max == 0,
                     None => true,
@@ -395,14 +395,14 @@ impl Node for TcpNode {
                     if self.syn_gen.last_tsc == 0 {
                         // First tick after activation: log once, then latch the
                         // timestamp so this branch (and the log) never repeats.
-                        // Guarding on `syn_rate > 0` keeps a syn_rate=0 responder
+                        // Guarding on `generation_rate > 0` keeps a generation_rate=0 responder
                         // (e.g. the TCP server node) from spamming this line every
                         // poll_timers tick, which floods stdout and starves the
                         // async telemetry tasks.
                         log::info!(
-                            "TcpNode '{}': SYN generator activated — syn_rate={}, src_ip={:?}, dst_ip={:?}",
+                            "TcpNode '{}': SYN generator activated — generation_rate={}, src_ip={:?}, dst_ip={:?}",
                             self.id.id,
-                            syn_rate,
+                            generation_rate,
                             self.config.src_ip,
                             self.config.dst_ip
                         );
@@ -413,7 +413,7 @@ impl Node for TcpNode {
                     self.syn_gen.cycle_accumulator = self
                         .syn_gen
                         .cycle_accumulator
-                        .saturating_add(delta.saturating_mul(syn_rate));
+                        .saturating_add(delta.saturating_mul(generation_rate));
                     let mut n = (self.syn_gen.cycle_accumulator / tsc_freq) as u32;
                     if let Some(max) = self.config.syn_limit {
                         let remaining = max.saturating_sub(self.syn_gen.packets_sent);
@@ -606,7 +606,7 @@ impl Node for TcpNode {
             self.timer_retained_frames += allocated_plan
                 .allocated_frames
                 .saturating_sub(generated as u32) as u64;
-            Directive::Next(self.routing_table[allocated_plan.route as usize].clone())
+            Directive::Next((&self.routing_table[allocated_plan.route as usize]).into())
         } else {
             self.timer_retained_frames += allocated as u64;
             Directive::Stop

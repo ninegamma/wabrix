@@ -69,10 +69,10 @@ dst_mac = "44:49:88:06:63:39"
 src_mac = "44:49:88:06:63:38"
 src_ip = "10.10.10.222"
 syn_limit = "60M"
-syn_rate = "500k"
+generation_rate = "500k"
 
 [pipelines.nodes.hot_node_data]
-syn_rate = "1100k"
+generation_rate = "1100k"
 
 [[pipelines.nodes]]
 id = "shared_tx_sink"

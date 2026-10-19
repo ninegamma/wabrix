@@ -83,7 +83,7 @@ impl Node for BatchRxNode {
                     }
 
                     // 3. We have work to do -> Push to the pipeline
-                    Directive::Next(self.next_node.clone())
+                    Directive::Next((&self.next_node).into())
                 } else {
                     #[cfg(feature = "profiling")]
                     {
@@ -481,7 +481,7 @@ impl Node for FastParserNode {
             self.total_cycles += end_cycles - start_cycles;
         }
 
-        Directive::Next(self.next_node.clone())
+        Directive::Next((&self.next_node).into())
     }
 
     #[inline]
