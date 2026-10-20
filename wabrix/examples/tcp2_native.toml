@@ -1,9 +1,9 @@
 [wabrix]
 ifaces= [
     { name = "enp2s0f0np0", rxd = 8096, txd = 8096, irq_core = 6 },
-    { name = "veth_xbricks", rxd = 1024, txd = 1024, type = "veth", namespace = "ns-xbricks", peer = "tap-veth-0", mac_if = "enp2s0f0np0", ipnet = "10.10.10.222/24", checksum_offload = false },
+    { name = "veth_wabrix", rxd = 1024, txd = 1024, type = "veth", namespace = "ns-wabrix", peer = "tap-veth-0", mac_if = "enp2s0f0np0", ipnet = "10.10.10.222/24", checksum_offload = false },
     { name = "enp2s0f1np1", rxd = 8096, txd = 8096, irq_core = 8 },
-    { name = "veth_xbricks_1", rxd = 1024, txd = 1024, type = "veth", namespace = "ns-xbricks_1", peer = "tap-veth-1", mac_if = "enp2s0f1np1", ipnet = "10.10.10.31/24", checksum_offload = false },
+    { name = "veth_wabrix_1", rxd = 1024, txd = 1024, type = "veth", namespace = "ns-wabrix_1", peer = "tap-veth-1", mac_if = "enp2s0f1np1", ipnet = "10.10.10.31/24", checksum_offload = false },
 ]
 umem= [
     { id = 0, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 2 },
@@ -12,9 +12,9 @@ umem= [
 ]
 xsk= [
     { iface = "enp2s0f0np0", queues = [0], umem = 0, rxq_size = 16384, txq_size = 16384, zerocopy = true, xdp_mode = "auto" },
-    { iface = "veth_xbricks", queues = [0], umem = 2, rxq_size = 4096, txq_size = 4096, zerocopy = false, xdp_mode = "auto" },
+    { iface = "veth_wabrix", queues = [0], umem = 2, rxq_size = 4096, txq_size = 4096, zerocopy = false, xdp_mode = "auto" },
     { iface = "enp2s0f1np1", queues = [0], umem = 1, rxq_size = 16384, txq_size = 16384, zerocopy = true, xdp_mode = "auto" },
-    { iface = "veth_xbricks_1", queues = [0], umem = 2, rxq_size = 4096, txq_size = 4096, zerocopy = false, xdp_mode = "auto" },
+    { iface = "veth_wabrix_1", queues = [0], umem = 2, rxq_size = 4096, txq_size = 4096, zerocopy = false, xdp_mode = "auto" },
 ]
 workers= [
     { id = 0, core = 7, partitions = [{ umem = 0, count = 1 }, { umem = 2, count = 1 }] },
@@ -43,7 +43,7 @@ id = "nd_veth_source"
 type = "BatchRxNode"
 routes = ["shared_tx_sink"]
 queues = [0]
-args= { interface = "veth_xbricks" }
+args= { interface = "veth_wabrix" }
 hot_args= {}
 
 [[pipelines.nodes]]
@@ -87,7 +87,7 @@ id = "veth_sink"
 type = "BatchTxNode"
 routes = []
 queues = [0]
-args= { interface = "veth_xbricks" }
+args= { interface = "veth_wabrix" }
 hot_args= {}
 
 [[pipelines.nodes]]
@@ -118,7 +118,7 @@ id = "nd_veth_source"
 type = "BatchRxNode"
 routes = ["shared_tx_sink"]
 queues = [0]
-args= { interface = "veth_xbricks_1" }
+args= { interface = "veth_wabrix_1" }
 hot_args= {}
 
 [[pipelines.nodes]]
@@ -155,7 +155,7 @@ id = "veth_sink"
 type = "BatchTxNode"
 routes = []
 queues = [0]
-args= { interface = "veth_xbricks_1" }
+args= { interface = "veth_wabrix_1" }
 hot_args= {}
 
 [[pipelines.nodes]]
@@ -189,7 +189,7 @@ y = 167.5251
 x = 533.41425
 y = -189.75995
 
-[layout.iface_veth_xbricks_1]
+[layout.iface_veth_wabrix_1]
 x = 863.224
 y = -467.39935
 
@@ -277,6 +277,6 @@ y = 582.3451
 x = 51.870453
 y = 816.3551
 
-[layout.iface_veth_xbricks]
+[layout.iface_veth_wabrix]
 x = -49.03052
 y = -474.1756

@@ -164,6 +164,8 @@ pub struct FrameRegistry {
     pub worker_id: usize,
     /// Indexed by umem_id (0..MAX_UMEM). None = this worker has no partition in that UMEM.
     pub registry_map: Vec<Option<PartitionData>>,
+    /// UMEM groups with a registry entry, used to avoid scanning empty slots in hot-path totals.
+    active_umem_ids: Vec<usize>,
     /// Lockless return queue: other threads push packed u32 commands; this worker pops them.
     /// Packed format: bit 31 = command, bits 30-23 = partition ID, bits 22-0 = offset.
     return_queue: Arc<ArrayQueue<u32>>,
@@ -225,9 +227,17 @@ impl FrameRegistry {
             });
         }
 
+        // Build this once so total_free_frames() only visits groups assigned to this worker.
+        let active_umem_ids = registry_map
+            .iter()
+            .enumerate()
+            .filter_map(|(umem_id, partition)| partition.as_ref().map(|_| umem_id))
+            .collect();
+
         Self {
             worker_id,
             registry_map,
+            active_umem_ids,
             return_queue,
             bus,
             umem_configs,
@@ -391,16 +401,13 @@ impl FrameRegistry {
 
             // Mark all allocated frames as actively owned (refcount = 1).
             for &frame_token in &dst[..to_take] {
-                let Some(local_idx) =
-                    resolve_frame_token(frame_token, &self.bus.partition_directory)
-                        .map(|resolved| resolved.local_idx)
-                else {
-                    continue;
-                };
-                let refcount_idx = local_idx - registry.refcount_start;
+                // Tokens in this registry's free stash encode offsets from `refcount_start`,
+                // so the token offset is already the compact refcount-array index.
+                let (_, refcount_idx) = decode_frame_token(frame_token);
                 unsafe {
-                    // SAFETY: every frame copied from this partition's free_stash is within
-                    // [refcount_start, refcount_start + refcounts.len()).
+                    // SAFETY: `dst` was copied from this partition's free_stash, whose tokens
+                    // are encoded from [refcount_start, refcount_start + refcounts.len()).
+                    // Thus each decoded token offset is a valid refcount index.
                     *registry.refcounts.get_unchecked_mut(refcount_idx as usize) = 1;
                 }
             }
@@ -463,10 +470,13 @@ impl FrameRegistry {
 
     /// Get total number of free frames across all UMEM partitions
     pub fn total_free_frames(&self) -> usize {
-        self.registry_map
+        self.active_umem_ids
             .iter()
-            .filter_map(|e| e.as_ref())
-            .map(|p| p.free_stash.len())
+            .map(|&umem_id| {
+                self.registry_map[umem_id]
+                    .as_ref()
+                    .map_or(0, |partition| partition.free_stash.len())
+            })
             .sum()
     }
 

@@ -206,7 +206,7 @@ impl SystemBuilder {
             initialized_umems[group_id] = Some((shared_umem, umem_descs));
         }
         let mut umem_addr = [None; MAX_UMEM];
-        // Store all UMEM handles in XBricksSystem and propagate to each worker's registry.
+        // Store all UMEM handles in WabrixSystem and propagate to each worker's registry.
         for (group_id, entry) in initialized_umems.iter().enumerate() {
             if let Some((umem, _)) = entry {
                 wabrix_system.umems[group_id] = Some(umem.clone());

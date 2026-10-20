@@ -1,7 +1,7 @@
 [wabrix]
 ifaces= [
     { name = "enp2s0f0np0", rxd = 8096, txd = 2048, irq_core = 8 },
-    { name = "veth_xbricks", rxd = 1024, txd = 1024, type = "veth", peer = "veth-br", master = "kvm-br", checksum_offload = false },
+    { name = "veth_wabrix", rxd = 1024, txd = 1024, type = "veth", peer = "veth-br", master = "kvm-br", checksum_offload = false },
     { name = "enp2s0f1np1", rxd = 8096, txd = 8096 },
 ]
 umem= [
@@ -10,7 +10,7 @@ umem= [
 ]
 xsk= [
     { iface = "enp2s0f0np0", queues = [0, 1], umem = 0, rxq_size = 16384, txq_size = 4096, zerocopy = true, xdp_mode = "auto" },
-    { iface = "veth_xbricks", queues = [0, 1], umem = 1, rxq_size = 4096, txq_size = 4096, zerocopy = false, xdp_mode = "auto" },
+    { iface = "veth_wabrix", queues = [0, 1], umem = 1, rxq_size = 4096, txq_size = 4096, zerocopy = false, xdp_mode = "auto" },
     { iface = "enp2s0f1np1", queues = [0, 1], umem = 0, rxq_size = 8192, txq_size = 8192, zerocopy = true, xdp_mode = "auto" },
 ]
 workers= [
@@ -47,7 +47,7 @@ id = "nd_veth_sink"
 type = "BatchTxNode"
 routes = []
 queues = [0, 1]
-args= { interface = "veth_xbricks" }
+args= { interface = "veth_wabrix" }
 
 [pipelines.nodes.hot_args]
 
@@ -71,7 +71,7 @@ id = "nd_veth_source"
 type = "BatchRxNode"
 routes = ["nd_parser_veth"]
 queues = [0, 1]
-args= { interface = "veth_xbricks" }
+args= { interface = "veth_wabrix" }
 
 [pipelines.nodes.hot_args]
 

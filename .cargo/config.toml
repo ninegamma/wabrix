@@ -1,7 +1,7 @@
 [env]
 # this is no longer required, as we set the path explicitely,
 # however, we keep it here, just in case we need it again
-TS_RS_EXPORT_DIR = { value = "xbricks-ui/src/types", relative = true }
+TS_RS_EXPORT_DIR = { value = "wabrix-ui/src/types", relative = true }
 
 [build]
 # Optimization: Since we are doing AF_XDP, force native CPU instructions

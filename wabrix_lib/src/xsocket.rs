@@ -824,18 +824,19 @@ impl XSocketRx {
         #[cfg(feature = "profiling")]
         let t5 = unsafe { std::arch::x86_64::_rdtsc() };
 
-        if produced > 0 {
-            // Return any frames that weren't produced back to the registry
-            // CRITICAL FIX: Only release un-pushed frames up to `actual_batch`
-            if produced < actual_batch {
-                for &frame_token in &self.scratch_frames[produced..actual_batch] {
-                    trace!(
-                        "replenish_fill_queue: Returning frame token {} to local stash",
-                        frame_token
-                    );
-                    frame_registry.release_local(frame_token);
-                }
+        // Return every frame that was allocated but not submitted. This also
+        // restores the whole batch when the Fill Queue produces zero frames.
+        if produced < actual_batch {
+            for &frame_token in &self.scratch_frames[produced..actual_batch] {
+                trace!(
+                    "replenish_fill_queue: Returning frame token {} to local stash",
+                    frame_token
+                );
+                frame_registry.release_local(frame_token);
             }
+        }
+
+        if produced > 0 {
             log::trace!(
                 "Worker {}: Replenished {} frames to {} queue {} Fill Ring, free frames remaining: {}",
                 self.worker_id,
@@ -1312,8 +1313,6 @@ impl BatchRx for XSocketRx {
         // This guarantees zero bounds-checking overhead
         let received_descriptors = &self.scratch_descriptors_recv_batch[..rcvd];
         for desc in received_descriptors {
-            // BITWISE SHIFT INSTEAD OF DIVISION
-            // Replaces ~20 cycle division with a 1 cycle shift
             let local_idx = (desc.addr() as u32) >> frame_size_log2; // local_idx is wrt. current Umem
             let Some(resolved_frame) = self.bus.resolve_local_frame_idx(group_id, local_idx) else {
                 log::warn!(

@@ -1,65 +1,48 @@
-Here is a concise architectural overview of the XBricks system, reflecting the highly-optimized, lock-free design we have established.
+# Wabrix Architecture Overview
 
----
+Wabrix is a run-to-completion (RTC) userspace networking engine built on AF_XDP, with optional WebAssembly plugins. Its configuration, control plane, and data plane have distinct responsibilities. For frame ownership, socket rings, and addressing details, see [Data Model and Architecture](../docs/architecture.md).
 
-# XBricks Architecture Overview
+## 1. Configuration
 
-XBricks is a high-performance, run-to-completion (RTC) userspace networking engine built on `AF_XDP` and WebAssembly. It enforces a strict separation between **Build-Time Blueprints** (Configuration), the **Control Plane** (API/Routing), and the **Data Plane** (Lock-free packet processing).
+* **`WabricksConfig`:** The root configuration contains a typed `wabrix` section, `pipelines`, and optional GUI `layout` data. The `[wabrix]` section defines `ifaces`, `umem`, `xsk`, and `workers`; pipelines use `[[pipelines]]`. Node argument and data maps use string values.
+* **Validation:** Checks UMEM/ring resource requirements, partition divisibility, and queue/worker assignments before system construction.
+* **Translation:** Expands the configuration into runtime worker, socket, and pipeline definitions. It creates each `NodeInstanceId` from its worker ID, pipeline name, node name, and node type.
 
----
+## 2. Initialization (`SystemBuilder`)
 
-## 1. The Configuration Layer (The Blueprint)
-
-The configuration layer acts as the static definition of the system state, bridging the TOML files, the React GUI, and the initialization engine.
-
-* **`WabricksConfig`:** The root struct representing the user's intended topology (`[umem]`, `[xsk]`, `[workers]`, `[[pipelines]]`). It holds parameters as loosely-typed strings (`HashMap<String, String>`).
-* **Validation Phase:** Ensures mathematical consistency before touching hardware (e.g., verifying UMEM sizes against FQ/CQ/RX/TX rings, validating queue-to-worker assignments, and resolving UMEM partition requests).
-* **Translation:** Transforms the `WabricksConfig` into a `SystemBuilder` configuration, mapping logical interfaces and queues to specific CPU cores and worker IDs.
-
-## 2. Initialization Phase (`SystemBuilder`)
-
-The `SystemBuilder` interacts with the Linux kernel and `xsk-core` to allocate physical memory and bind hardware queues.
-
-* **UMEM Management:** Allocates memory regions and logically slices them into `UmemPartition`s. If Wasm plugins are used, it reserves a chunk of frames at the start of the UMEM specifically for Wasm memory sharing.
-* **`XSocketRegistry`:** Creates and registers AF_XDP sockets. It immediately splits them into independent `XSocketRx` and `XSocketTx` halves so they can be securely transferred to different nodes in a pipeline.
-* **`FrameRegistry`:** Gives each worker thread a localized, lock-free allocator for its assigned UMEM partitions.
-* **`SystemBus`:** A set of crossbeam channels allowing worker threads to safely return `AF_XDP` frames to their original UMEM partitions when packets cross thread boundaries.
+* **UMEM groups and partitions:** Allocates shared packet-buffer memory as UMEM groups. A UMEM partition is a contiguous range of frames assigned to one worker. A worker can own partitions in multiple UMEM groups.
+* **Wasm memory:** When enabled, Wasm linear memory includes an alias of UMEM and a private mailbox region. The mailbox does not reserve frames at the start of UMEM; all UMEM frames remain available to worker partitions.
+* **`XSocketRegistry`:** Registers AF_XDP sockets and splits each into `XSocketRx` and `XSocketTx` halves for independent node binding.
+* **`FrameRegistry`:** Provides a worker-local allocator for its owned partitions, accessed through thread-local storage without a registry mutex.
+* **`SystemBus`:** Provides one bounded, lock-free `crossbeam_queue::ArrayQueue<u32>` per worker for frame retain/release commands, plus a partition directory for ownership and address resolution. It does not transport packet batches.
 
 ## 3. Pipeline Construction (`PipelineFactory`)
 
-Translates the static blueprints into the executable runtime structures.
+* **Node instantiation:** Builds executable nodes such as `BatchRxNode`, `WasmEngine`, and `PacketGenerator` from node configurations.
+* **Identity:** Preserves the `NodeInstanceId` created during configuration expansion. Control addressing uses `worker/pipeline/node/type` patterns.
+* **DAG resolution:** Resolves configured routes into integer indices for packet routing.
 
-* **Node Instantiation:** Iterates over the `NodeConfig` definitions and creates the actual executable logic (`Box<dyn Node>`), such as `BatchRxNode`, `WasmEngine`, or `PacketGenerator`.
-* **Rich Identity Generation (`NodeInstanceId`):** Assigns a globally unique, structural identity to every node: `{worker_id}/{pipeline_name}/{node_name}/{node_type}`.
-* **DAG Resolution:** Translates string-based routes into fast, integer-based indices for zero-cost routing during the packet loop.
+## 4. Data Plane (`PipelineRunner`)
 
-## 4. The Data Plane (`PipelineRunner`)
+* **Run-to-completion:** A worker runs its pipelines with configured CPU affinity. Source nodes produce packet batches, which the runner routes through the DAG. Nodes process or drop packets in those batches.
+* **Frame lifecycle:** Free stashes and PDUs carry frame tokens (partition ID plus partition-relative offset). AF_XDP rings carry UMEM-relative byte addresses. Same-owner drops and TX completions normally return directly through the local registry; foreign-owner returns use SystemBus.
+* **Synchronization:** The registry is worker-local and frame-return queues are lock-free, but socket ring handles use mutex wrappers. The entire packet path is not lock-free.
+* **Control dispatch:** The runner polls its control queue at control/timer polling boundaries and dispatches events to matching nodes. Node identities and control metadata remain available at runtime.
 
-This is the ultra-fast, lock-free engine pinned to a specific CPU core.
+## 5. Control Plane
 
-* **Run-To-Completion Loop:** The runner pulls a `Batch` of packets from source nodes and pushes the batch through the DAG. Nodes mutate the batch in place (e.g., advancing offsets or dropping packets).
-* **"Runner as Router" Pattern:** The Runner owns the Tokio `broadcast::Receiver` for control events. Individual nodes do *not* poll channels.
-* **Execution Isolation:** The `Box<dyn Node>` array contains only the fast-path logic. All strings, names, and blueprints are stripped out of the core packet-processing path.
+* **`SharedSystemState`:** Holds per-pipeline `Arc<ArcSwap<HotPipelineConfig>>` state for atomic publication of hot configuration.
+* **Hot updates:** Reconciliation publishes updated `hot_args` and pipeline lifecycle state through `ArcSwap`. Runners check configuration at their polling boundary. Structural/static configuration changes require a restart.
+* **Control events:** Events are fanned out to separate bounded `crossbeam_channel` queues for each runner. The runner matches `address_pattern` against node identities and invokes `handle_control_event()` on matching nodes. Patterns such as `w0/*/rx_node` allow omitted trailing segments as wildcards.
+* **Node data:** Hot node-data updates for `TcpNode` and `WasmEngine` are serialized into control events; they are distinct from the atomic hot-configuration publication.
 
-## 5. The Control Plane (Hot Updates & Routing)
+## 6. Telemetry
 
-The nervous system that allows the Axum GUI to modify the data plane at 40M+ pps without acquiring locks.
+* **`TelemetryRegistry`:** Populated during construction and shared through `Arc`. Metrics use atomic counters and flags.
+* **Background polling:** A Tokio task reads metrics, requests node synchronization when needed, aggregates statistics, and publishes telemetry through a Tokio broadcast channel for frontend delivery. Telemetry broadcasting is separate from control-event queues.
 
-* **`SharedSystemState` (RCU):** The global state held by the Axum API. It contains `Arc<ArcSwap<HotPipelineConfig>>` for every pipeline.
-* **Hot Updates:** When a parameter changes (e.g., PPS limit), the API parses the weakly-typed string into a strongly-typed `NodeDynamicState`. It atomically swaps the RCU pointer. The `PipelineRunner` reads this pointer on the next batch boundary, applying the change with zero lock contention.
-* **Event Broadcasting:** The API wraps `ControlEvent`s (like Wasm GUI payloads) in an `Arc` and pushes them to a global Tokio broadcast channel.
-* **Wildcard Addressing:** The `PipelineRunner` evaluates the event's `address_pattern` against its array of `NodeInstanceId`s. It supports powerful wildcards (e.g., `w0/*/rx_node`) and explicitly invokes `node.handle_control_event()` only on matched nodes.
+## 7. Hardware Receive Flow
 
-## 6. Telemetry & Observability
-
-* **`TelemetryRegistry`:** A centralized, thread-safe registry created during the `SystemBuilder` phase.
-* **Metrics Gathering:** WASM engines register atomic counters or localized metrics maps here.
-* **Background Polling:** A dedicated Tokio background task periodically scrapes this registry and pushes formatted JSON statistics to the frontend via WebSockets, ensuring the fast path never wastes cycles formatting strings.
-
----
-
-### Hardware Load-Sharing Flow (Summary)
-
-1. **Inbound Traffic:** Filtered/Distributed by NIC hardware via **Symmetric RSS** or **Flow Director (FDIR)** to specific hardware queues.
-2. **AF_XDP BPF Map:** Maps the hardware queue to an XDP socket file descriptor.
-3. **`BatchRxNode`:** Wakes up on its pinned core, pulls from the socket, and pushes the batch into the `PipelineRunner` DAG.
+1. NIC queue selection depends on the hardware and configuration, including RSS or Flow Director where available.
+2. The XDP program redirects selected packets through an XSK map to an AF_XDP socket.
+3. A `BatchRxNode` polls its socket (with optional NAPI busy polling) on its worker and supplies batches to the pipeline DAG.

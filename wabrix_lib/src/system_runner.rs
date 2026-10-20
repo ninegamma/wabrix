@@ -28,7 +28,7 @@ pub struct WabrixSystem {
 
 impl WabrixSystem {
     /// returns handles of all spawned worker threads, telemetry logger thread, and dst port stats
-    /// consumes itself (XBricksSystem)
+    /// consumes itself (WabrixSystem)
     #[allow(clippy::type_complexity)]
     pub fn spawn_workers(
         mut self,

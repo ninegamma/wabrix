@@ -1,6 +1,3 @@
 [submodule "ipblower"]
 	path = ipblower
 	url = ./ipblower
-[submodule "xbricks"]
-	path = xbricks
-	url = ./xbricks

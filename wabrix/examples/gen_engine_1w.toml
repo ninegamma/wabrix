@@ -5,8 +5,8 @@ ifaces= [
     #{ name = "enp2s0f1np1", rxd = 8096, txd = 8096, irq_core = 5 } ,
 ]
 umem= [
-    { id = 0, frame_size = 2048, frame_count = 301056, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 3 },
-    { id = 1, frame_size = 2048, frame_count = 524288, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 1 },
+    { id = 0, frame_size = 2048, frame_count = 301056, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 1 },
+    { id = 1, frame_size = 2048, frame_count = 301056, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 1 },
 ]
 
 # Optional XSK fields:
