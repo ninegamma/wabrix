@@ -350,21 +350,30 @@ impl Batch {
             return;
         }
 
+        // SAFETY: Live batch entries are initialized PDUs. Their SystemBus pointers are
+        // installed by the host and remain valid; `try_umem_addr` handles null defaults.
         unsafe {
             let registry_ptr = get_worker_frame_registry();
             if !registry_ptr.is_null() {
                 let registry = &mut *registry_ptr;
 
-                // Group by owner_id for efficient cross-thread returns if needed
+                // Group by worker_id for efficient cross-thread returns if needed
                 // But for now, let's assume local release as it's the 99% case
                 for i in 0..self.count {
                     let pdu = &*self.packets[i].as_ptr();
-                    if registry.worker_id == pdu.owner_id() as usize {
-                        trace!(
-                            "bulk_drop: Returning frame {} to local stash",
-                            pdu.w.frame_token()
-                        );
-                        registry.release_local(pdu.w.frame_token());
+                    if registry.worker_id == pdu.worker_id() as usize {
+                        if pdu.try_umem_addr().is_some() {
+                            let frame_token = pdu.to_frame_token();
+                            trace!("bulk_drop: Returning frame {} to local stash", frame_token);
+                            registry.release_local(frame_token);
+                        } else {
+                            log::error!(
+                                "bulk_drop: invalid UMEM frame group={}, index={}",
+                                pdu.umem_group_id(),
+                                pdu.frame_index()
+                            );
+                            ptr::drop_in_place(self.packets[i].as_mut_ptr());
+                        }
                     } else {
                         // Slow path: Individual cross-thread release
                         // This still uses the drop logic for consistency

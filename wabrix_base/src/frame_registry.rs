@@ -8,6 +8,69 @@ use std::sync::Arc;
 use wabrix_api::MAX_BATCH_SIZE;
 use xsk_core::Umem;
 
+/// Identifies a frame by its UMEM group and UMEM-local frame index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(C)]
+pub struct FrameToken {
+    // The high bit of umem_id is reserved for the queue-only retain command.
+    umem_id: u32,
+    frame_index: u32,
+}
+
+const RETAIN_COMMAND_BIT: u32 = 1 << 31;
+
+impl FrameToken {
+    #[inline(always)]
+    pub fn new(umem_id: u32, frame_index: u32) -> Self {
+        assert!(
+            umem_id < MAX_UMEM as u32,
+            "UMEM ID uses reserved command bits"
+        );
+        Self {
+            umem_id: umem_id & !RETAIN_COMMAND_BIT,
+            frame_index,
+        }
+    }
+
+    #[inline(always)]
+    pub fn umem_id(self) -> u32 {
+        self.umem_id & !RETAIN_COMMAND_BIT
+    }
+
+    #[inline(always)]
+    pub fn frame_index(self) -> u32 {
+        self.frame_index
+    }
+
+    #[inline(always)]
+    pub(crate) fn with_retain_command(mut self) -> Self {
+        self.umem_id |= RETAIN_COMMAND_BIT;
+        self
+    }
+
+    #[inline(always)]
+    pub(crate) fn is_retain_command(self) -> bool {
+        self.umem_id & RETAIN_COMMAND_BIT != 0
+    }
+
+    #[inline(always)]
+    pub(crate) fn without_command(mut self) -> Self {
+        self.umem_id &= !RETAIN_COMMAND_BIT;
+        self
+    }
+}
+
+impl core::fmt::Display for FrameToken {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            formatter,
+            "umem {} frame {}",
+            self.umem_id(),
+            self.frame_index()
+        )
+    }
+}
+
 // Thread-local storage for the worker's frame registry pointer
 // This allows XSocketRx/Tx to access the worker's registry without storing it in each socket
 thread_local! {
@@ -43,99 +106,18 @@ pub fn get_worker_frame_registry() -> *mut FrameRegistry {
     WORKER_FRAME_REGISTRY.with(|r| r.get())
 }
 
-/// Number of bits reserved for the partition-relative frame offset.
-pub const PARTITION_OFFSET_BITS: u32 = 23;
-/// Number of addressable partition identities in a frame token.
+/// Number of addressable frame-registry partitions.
 pub const MAX_PARTITIONS: usize = 1 << 8;
-/// Maximum number of frames in one partition.
-pub const MAX_PARTITION_FRAMES: u32 = 1 << PARTITION_OFFSET_BITS;
-const PARTITION_OFFSET_MASK: u32 = MAX_PARTITION_FRAMES - 1;
 
 /// Capacity of each worker's return queue.
 /// Must be large enough to absorb cross-worker frame returns without dropping.
 pub const RETURN_QUEUE_CAPACITY: usize = 65536;
 
-/// Command bit packed into the high bit of a return-queue u32.
-/// 0 = Release (decrement refcount, free if zero), 1 = Retain (increment refcount).
-/// Bits 30-23 = partition ID (8 bits), bits 22-0 = partition-relative offset.
-pub const CMD_BIT: u32 = 0x8000_0000;
-
-/// Returns true if the packed command is a Retain.
-#[inline(always)]
-pub fn is_retain(cmd: u32) -> bool {
-    (cmd & CMD_BIT) != 0
-}
-
-/// Strips the command bit to recover the frame token.
-#[inline(always)]
-pub fn extract_frame_token(cmd: u32) -> u32 {
-    cmd & !CMD_BIT
-}
-
 /// Maximum number of distinct UMEM groups supported by fixed UMEM-group-indexed tables.
-/// This is independent of the frame-token bit layout.
 pub const MAX_UMEM: usize = 128;
 
-/// Packs a partition ID and partition-relative frame offset into a frame token.
-/// Bits 30-23 = partition ID, bits 22-0 = offset within that partition.
-/// Bit 31 is reserved for the return-queue command bit and is always 0 here.
-#[inline(always)]
-pub fn encode_frame_token(partition_id: usize, offset: u32) -> u32 {
-    debug_assert!(
-        partition_id < MAX_PARTITIONS,
-        "partition ID exceeds 8 bits!"
-    );
-    debug_assert!(
-        offset < MAX_PARTITION_FRAMES,
-        "partition offset exceeds 23 bits!"
-    );
-
-    ((partition_id as u32) << PARTITION_OFFSET_BITS) | (offset & PARTITION_OFFSET_MASK)
-}
-
-/// Unpacks a frame token into (partition ID, partition-relative offset).
-/// Masks off bit 31 (the command bit) so this is safe to call on packed queue values too.
-#[inline(always)]
-pub fn decode_frame_token(frame_token: u32) -> (usize, u32) {
-    let partition_id = ((frame_token & !CMD_BIT) >> PARTITION_OFFSET_BITS) as usize;
-    let offset = frame_token & PARTITION_OFFSET_MASK;
-
-    (partition_id, offset)
-}
-
-/// Resolved metadata for a valid frame token.
-/// local_idx maps directly to: frame_addr = local_idx << frame_size_log2
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ResolvedFrameToken {
-    pub partition_id: usize,
-    pub worker_id: usize,
-    pub umem_group_id: usize,
-    pub local_idx: u32,
-}
-
-/// Resolves a frame token through the indexed partition directory without scanning ranges.
-#[inline(always)]
-pub fn resolve_frame_token(
-    frame_token: u32,
-    directory: &[Option<UmemPartition>],
-) -> Option<ResolvedFrameToken> {
-    let (partition_id, offset) = decode_frame_token(frame_token);
-    let entry = directory.get(partition_id)?.as_ref()?;
-    let partition_len = entry.local_end.checked_sub(entry.local_start)?;
-    if offset >= partition_len {
-        return None;
-    }
-
-    Some(ResolvedFrameToken {
-        partition_id,
-        worker_id: entry.worker_id,
-        umem_group_id: entry.umem_group_id,
-        local_idx: entry.local_start + offset,
-    })
-}
-
 /// Per-UMEM partition data within a worker's registry.
-/// `free_stash` holds frame tokens (`encode_frame_token` format).
+/// `free_stash` holds UMEM group and UMEM-local frame-index pairs.
 /// `refcounts` is indexed by local_idx - `refcount_start`.
 pub struct PartitionData {
     /// First UMEM-relative frame represented by `refcounts`.
@@ -144,7 +126,7 @@ pub struct PartitionData {
     /// allocating a counter for every frame in the UMEM when a worker owns only a subrange.
     refcounts: Vec<u16>,
     /// Frame tokens available for allocation.
-    free_stash: Vec<u32>,
+    free_stash: Vec<FrameToken>,
 }
 
 impl PartitionData {
@@ -166,9 +148,8 @@ pub struct FrameRegistry {
     pub registry_map: Vec<Option<PartitionData>>,
     /// UMEM groups with a registry entry, used to avoid scanning empty slots in hot-path totals.
     active_umem_ids: Vec<usize>,
-    /// Lockless return queue: other threads push packed u32 commands; this worker pops them.
-    /// Packed format: bit 31 = command, bits 30-23 = partition ID, bits 22-0 = offset.
-    return_queue: Arc<ArrayQueue<u32>>,
+    /// Lockless return queue; the high bit of `umem_id` marks retain commands.
+    return_queue: Arc<ArrayQueue<FrameToken>>,
     /// System bus for frame lifecycle management
     pub bus: Arc<SystemBus>,
     /// Indexed by umem_id (0..MAX_UMEM).
@@ -183,7 +164,7 @@ impl FrameRegistry {
     pub fn new(
         worker_id: usize,
         partitions: Vec<(usize, UmemPartition)>,
-        return_queue: Arc<ArrayQueue<u32>>,
+        return_queue: Arc<ArrayQueue<FrameToken>>,
         bus: Arc<SystemBus>,
         umem_configs: Vec<Option<Arc<RuntimeUmemConfig>>>,
     ) -> Self {
@@ -208,11 +189,8 @@ impl FrameRegistry {
             let local_end = partition.end_idx - group_start;
             let partition_size = (local_end - local_start) as usize;
 
-            // Pre-encode every frame using the stable partition ID and a local offset.
-            let free_stash: Vec<u32> = (local_start..local_end)
-                .map(|local_idx| {
-                    encode_frame_token(partition.partition_id, local_idx - local_start)
-                })
+            let free_stash: Vec<FrameToken> = (local_start..local_end)
+                .map(|frame_index| FrameToken::new(umem_group_id as u32, frame_index))
                 .collect();
 
             debug!(
@@ -254,48 +232,14 @@ impl FrameRegistry {
         const MAX_PROCESS_PER_TICK: usize = 512;
 
         while processed_count < MAX_PROCESS_PER_TICK {
-            if let Some(packed_cmd) = self.return_queue.pop() {
-                let frame_token = extract_frame_token(packed_cmd);
-
-                if is_retain(packed_cmd) {
-                    let Some(resolved) =
-                        resolve_frame_token(frame_token, &self.bus.partition_directory)
-                    else {
-                        log::error!(
-                            "Worker {}: invalid frame token {} for retain",
-                            self.worker_id,
-                            frame_token
-                        );
-                        processed_count += 1;
-                        continue;
-                    };
-                    let umem_id = resolved.umem_group_id;
-                    let local_idx = resolved.local_idx;
-
-                    if let Some(partition_data) =
-                        self.registry_map.get_mut(umem_id).and_then(|p| p.as_mut())
-                    {
-                        if let Some(refcount_idx) = partition_data.refcount_index(local_idx) {
-                            unsafe {
-                                // SAFETY: refcount_index verifies that the index belongs to
-                                // this partition and is within the compact refcounts vector.
-                                *partition_data.refcounts.get_unchecked_mut(refcount_idx) += 1;
-                            }
-                        } else {
-                            log::error!(
-                                "Worker {}: retain for frame local_idx={} outside UMEM {} partition",
-                                self.worker_id,
-                                local_idx,
-                                umem_id
-                            );
-                        }
-                    }
+            if let Some(queued_token) = self.return_queue.pop() {
+                let is_retain = queued_token.is_retain_command();
+                let frame_token = queued_token.without_command();
+                if is_retain {
+                    self.retain_local(frame_token);
                 } else {
-                    // Note: Removed the inner loop `trace!` macro to save cycles.
-                    // String interpolation inside a hot loop is dangerous even if disabled.
                     self.release_local(frame_token);
                 }
-
                 processed_count += 1;
             } else {
                 // 🚨 CRITICAL: The queue is empty. Break the loop! 🚨
@@ -319,30 +263,43 @@ impl FrameRegistry {
         }
     }
 
-    /// Releases a frame back to the worker's frame registry.
-    ///
-    /// # Parameters
-    /// * `frame_token` - Frame token resolved through the system directory.
-    #[inline]
-    pub fn release_local(&mut self, frame_token: u32) {
-        let Some(resolved) = resolve_frame_token(frame_token, &self.bus.partition_directory) else {
+    fn retain_local(&mut self, frame_token: FrameToken) {
+        let umem_id = frame_token.umem_id() as usize;
+        let Some(partition_data) = self.registry_map.get_mut(umem_id).and_then(Option::as_mut)
+        else {
             log::error!(
-                "Worker {}: invalid frame token {} for release",
+                "Worker {}: retain for unassigned UMEM group {}",
+                self.worker_id,
+                umem_id
+            );
+            return;
+        };
+        let Some(refcount_idx) = partition_data.refcount_index(frame_token.frame_index()) else {
+            log::error!(
+                "Worker {}: retain for frame {:?} outside its partition",
                 self.worker_id,
                 frame_token
             );
             return;
         };
-        let umem_id = resolved.umem_group_id;
-        let local_idx = resolved.local_idx;
+        // SAFETY: refcount_index verifies the frame belongs to this partition.
+        unsafe { *partition_data.refcounts.get_unchecked_mut(refcount_idx) += 1 };
+    }
 
+    /// Releases a frame back to the worker's frame registry.
+    ///
+    /// # Parameters
+    /// * `frame_token` - UMEM group and UMEM-local frame index.
+    #[inline]
+    pub fn release_local(&mut self, frame_token: FrameToken) {
+        let umem_id = frame_token.umem_id() as usize;
         // 2. Direct Vec index — O(1) with no hash computation
-        if let Some(partition_data) = self.registry_map[umem_id].as_mut() {
-            let Some(idx) = partition_data.refcount_index(local_idx) else {
+        if let Some(partition_data) = self.registry_map.get_mut(umem_id).and_then(Option::as_mut) {
+            let Some(idx) = partition_data.refcount_index(frame_token.frame_index()) else {
                 log::error!(
                     "Worker {}: frame local_idx={} is outside UMEM {} partition",
                     self.worker_id,
-                    local_idx,
+                    frame_token.frame_index(),
                     umem_id
                 );
                 return;
@@ -356,7 +313,7 @@ impl FrameRegistry {
                 if *refcount == 0 {
                     log::error!(
                         "🔥 CRITICAL: Prevented Double-Free of frame local_idx={} in UMEM {}!",
-                        idx,
+                        frame_token.frame_index(),
                         umem_id
                     );
                     return;
@@ -377,10 +334,10 @@ impl FrameRegistry {
     }
 
     /// Allocates up to `dst.len()` frames from the specific UMEM partition.
-    /// Writes encoded global indices directly into the provided slice.
+    /// Writes frame token directly into the provided slice.
     /// Returns the number of frames successfully allocated.
-    pub fn allocate_batch_into(&mut self, umem_id: usize, dst: &mut [u32]) -> usize {
-        if let Some(registry) = self.registry_map[umem_id].as_mut() {
+    pub fn allocate_batch_into(&mut self, umem_id: usize, dst: &mut [FrameToken]) -> usize {
+        if let Some(registry) = self.registry_map.get_mut(umem_id).and_then(Option::as_mut) {
             let stash = &mut registry.free_stash;
 
             let available = stash.len();
@@ -401,14 +358,10 @@ impl FrameRegistry {
 
             // Mark all allocated frames as actively owned (refcount = 1).
             for &frame_token in &dst[..to_take] {
-                // Tokens in this registry's free stash encode offsets from `refcount_start`,
-                // so the token offset is already the compact refcount-array index.
-                let (_, refcount_idx) = decode_frame_token(frame_token);
+                let refcount_idx = (frame_token.frame_index() - registry.refcount_start) as usize;
                 unsafe {
-                    // SAFETY: `dst` was copied from this partition's free_stash, whose tokens
-                    // are encoded from [refcount_start, refcount_start + refcounts.len()).
-                    // Thus each decoded token offset is a valid refcount index.
-                    *registry.refcounts.get_unchecked_mut(refcount_idx as usize) = 1;
+                    // SAFETY: `dst` was copied from this partition's free_stash.
+                    *registry.refcounts.get_unchecked_mut(refcount_idx) = 1;
                 }
             }
 
@@ -427,8 +380,8 @@ impl FrameRegistry {
 
     /// Allocates up to `count` frames from the specific UMEM partition.
     /// Returns a vector of frame tokens.
-    pub fn allocate_batch(&mut self, umem_id: usize, count: usize) -> Vec<u32> {
-        if let Some(registry) = self.registry_map[umem_id].as_mut() {
+    pub fn allocate_batch(&mut self, umem_id: usize, count: usize) -> Vec<FrameToken> {
+        if let Some(registry) = self.registry_map.get_mut(umem_id).and_then(Option::as_mut) {
             let mut frame_tokens = Vec::with_capacity(count);
             let stash = &mut registry.free_stash;
 
@@ -439,13 +392,7 @@ impl FrameRegistry {
                 let frame_token = stash.pop().unwrap();
                 frame_tokens.push(frame_token);
 
-                let Some(local_idx) =
-                    resolve_frame_token(frame_token, &self.bus.partition_directory)
-                        .map(|resolved| resolved.local_idx)
-                else {
-                    continue;
-                };
-                let refcount_idx = local_idx - registry.refcount_start;
+                let refcount_idx = frame_token.frame_index() - registry.refcount_start;
                 registry.refcounts[refcount_idx as usize] = 1;
             }
 
@@ -480,76 +427,73 @@ impl FrameRegistry {
             .sum()
     }
 
-    /// Allocates frames and creates PDUs for them
-    ///
-    /// # Arguments
-    /// * `umem_id` - The UMEM group ID to allocate from
-    /// * `count` - Number of PDUs to create
-    ///
-    /// # Returns
-    /// A vector of PDUs ready to be filled with packet data
-    pub fn allocate_pdus(&mut self, umem_id: usize, count: usize) -> Vec<crate::interface::Pdu> {
-        use crate::interface::Pdu;
-        use xsk_core::FrameDesc;
+    /* Disabled legacy API; retained for reference while allocation uses caller-provided slots.
+        /// Allocates frames and creates PDUs for them
+        ///
+        /// # Arguments
+        /// * `umem_id` - The UMEM group ID to allocate from
+        /// * `count` - Number of PDUs to create
+        ///
+        /// # Returns
+        /// A vector of PDUs ready to be filled with packet data
+        pub fn allocate_pdus(&mut self, umem_id: usize, count: usize) -> Vec<crate::interface::Pdu> {
+            use crate::interface::Pdu;
+            use xsk_core::FrameDesc;
 
-        let umem_config = if let Some(config) = self.umem_configs[umem_id].as_ref() {
-            config.clone()
-        } else {
-            log::error!(
-                "Worker {} tried to allocate PDUs from unknown UMEM {}",
-                self.worker_id,
-                umem_id
-            );
-            return Vec::new();
-        };
-
-        let frame_tokens = self.allocate_batch(umem_id, count);
-        if frame_tokens.is_empty() {
-            return Vec::new();
-        }
-
-        let active_umem = match self.active_umems[umem_id].as_ref() {
-            Some(handle) => handle,
-            None => {
+            let umem_config = if let Some(config) = self.umem_configs[umem_id].as_ref() {
+                config.clone()
+            } else {
                 log::error!(
-                    "Worker {} lacks physical memory mapping for UMEM {}",
+                    "Worker {} tried to allocate PDUs from unknown UMEM {}",
                     self.worker_id,
                     umem_id
                 );
                 return Vec::new();
-            }
-        };
-
-        let _umem_base_ptr = active_umem.as_ptr();
-        let system_bus = &*self.bus as *const SystemBus;
-        let frame_size_log2 = umem_config.frame_size_log2;
-        let headroom = umem_config.head_room as u64;
-
-        let mut pdus = Vec::with_capacity(frame_tokens.len());
-
-        for &frame_token in &frame_tokens {
-            // local_idx is UMEM-relative: frame_addr = local_idx << frame_size_log2
-            let Some(local_idx) = resolve_frame_token(frame_token, &self.bus.partition_directory)
-                .map(|resolved| resolved.local_idx)
-            else {
-                continue;
             };
-            let frame_addr = (local_idx as u64) << frame_size_log2;
-            let desc = FrameDesc::new(frame_addr + headroom);
 
-            let pdu = Pdu::new(
-                desc,
-                frame_token,
-                self.worker_id as u8,
-                system_bus,
-                frame_size_log2,
-            );
+            let frame_tokens = self.allocate_batch(umem_id, count);
+            if frame_tokens.is_empty() {
+                return Vec::new();
+            }
 
-            pdus.push(pdu);
+            let active_umem = match self.active_umems[umem_id].as_ref() {
+                Some(handle) => handle,
+                None => {
+                    log::error!(
+                        "Worker {} lacks physical memory mapping for UMEM {}",
+                        self.worker_id,
+                        umem_id
+                    );
+                    return Vec::new();
+                }
+            };
+
+            let _umem_base_ptr = active_umem.as_ptr();
+            let system_bus = &*self.bus as *const SystemBus;
+            let frame_size_log2 = umem_config.frame_size_log2;
+            let headroom = umem_config.head_room as u64;
+
+            let mut pdus = Vec::with_capacity(frame_tokens.len());
+
+            for &frame_token in &frame_tokens {
+                let local_idx = frame_token.frame_index();
+                let frame_addr = (local_idx as u64) << frame_size_log2;
+                let desc = FrameDesc::new(frame_addr + headroom);
+
+                let pdu = Pdu::new(
+                    desc,
+                    frame_token.umem_id(),
+                    self.worker_id as u8,
+                    system_bus,
+                    frame_size_log2,
+                );
+
+                pdus.push(pdu);
+            }
+
+            pdus
         }
-
-        pdus
-    }
+    */
 
     /// Allocates up to `dst.len()` frames from the specific UMEM partition and creates PDUs.
     /// Writes the PDUs directly into the provided slice.
@@ -592,8 +536,8 @@ impl FrameRegistry {
 
         // STACK ALLOCATION: zero overhead, stays in L1 cache
         #[repr(align(64))]
-        struct AlignedBatch([u32; MAX_BATCH_SIZE]);
-        let mut aligned_buffer = AlignedBatch([0u32; MAX_BATCH_SIZE]);
+        struct AlignedBatch([FrameToken; MAX_BATCH_SIZE]);
+        let mut aligned_buffer = AlignedBatch([FrameToken::new(0, 0); MAX_BATCH_SIZE]);
         let frame_tokens = &mut aligned_buffer.0;
 
         let req_len = std::cmp::min(dst.len(), MAX_BATCH_SIZE);
@@ -609,17 +553,13 @@ impl FrameRegistry {
         let src_slice = &frame_tokens[..allocated];
 
         for (dst_slot, &frame_token) in dst_slice.iter_mut().zip(src_slice.iter()) {
-            let Some(resolved) = resolve_frame_token(frame_token, &self.bus.partition_directory)
-            else {
-                continue;
-            };
-            let local_idx = resolved.local_idx;
+            let local_idx = frame_token.frame_index();
             let frame_addr = (local_idx as u64) << frame_size_log2;
             let desc = FrameDesc::new(frame_addr + headroom);
 
             dst_slot.write(Pdu::new(
                 desc,
-                frame_token,
+                frame_token.umem_id(),
                 self.worker_id as u8,
                 system_bus,
                 frame_size_log2,
@@ -632,16 +572,11 @@ impl FrameRegistry {
     /// Pre-faults all frames in the registry to eliminate demand paging latency
     pub fn warm_up_umem_partitions(&mut self) {
         for partition_data in self.registry_map.iter().flatten() {
-            // Iterate over all pre-encoded frames in the free stash
+            // Iterate over all frames in the free stash
             // Use volatile writes to prevent the compiler from optimizing the loop away
             for &frame_token in &partition_data.free_stash {
-                let Some(resolved) =
-                    resolve_frame_token(frame_token, &self.bus.partition_directory)
-                else {
-                    continue;
-                };
-                let umem_id = resolved.umem_group_id;
-                let local_idx = resolved.local_idx;
+                let umem_id = frame_token.umem_id() as usize;
+                let local_idx = frame_token.frame_index();
 
                 let Some(umem_config) = self.umem_configs.get(umem_id).and_then(Option::as_ref)
                 else {
@@ -678,43 +613,68 @@ mod tests {
     use super::*;
 
     #[test]
-    fn frame_token_round_trips_boundaries_and_command_bit() {
-        for (partition_id, offset) in [(0, 0), (MAX_PARTITIONS - 1, MAX_PARTITION_FRAMES - 1)] {
-            let frame_token = encode_frame_token(partition_id, offset);
-            assert_eq!(decode_frame_token(frame_token), (partition_id, offset));
-            assert_eq!(
-                decode_frame_token(frame_token | CMD_BIT),
-                (partition_id, offset)
-            );
-            assert_eq!(extract_frame_token(frame_token | CMD_BIT), frame_token);
-        }
+    fn frame_token_command_bit_preserves_identity_and_size() {
+        let token = FrameToken::new(17, u32::MAX);
+        let queued_retain = token.with_retain_command();
+
+        assert_eq!(core::mem::size_of::<FrameToken>(), 8);
+        assert_eq!(token.umem_id(), 17);
+        assert!(!token.is_retain_command());
+        assert_eq!(queued_retain.umem_id(), 17);
+        assert_eq!(queued_retain.frame_index(), u32::MAX);
+        assert!(queued_retain.is_retain_command());
+        assert_eq!(queued_retain.without_command(), token);
     }
 
     #[test]
-    fn directory_resolution_checks_partition_and_offset() {
-        let directory = vec![
-            None,
-            Some(UmemPartition {
-                partition_id: 1,
-                worker_id: 4,
-                umem_group_id: 2,
-                start_idx: 10,
-                end_idx: 14,
-                local_start: 10,
-                local_end: 14,
-            }),
-        ];
-
-        assert_eq!(
-            resolve_frame_token(encode_frame_token(1, 0), &directory),
-            Some(ResolvedFrameToken {
-                partition_id: 1,
-                worker_id: 4,
-                umem_group_id: 2,
-                local_idx: 10,
-            })
+    fn queued_retain_command_updates_refcount() {
+        let partition = UmemPartition {
+            partition_id: 0,
+            worker_id: 0,
+            umem_group_id: 0,
+            start_idx: 0,
+            end_idx: 1,
+            local_start: 0,
+            local_end: 1,
+        };
+        let queue = Arc::new(ArrayQueue::new(8));
+        let config = Arc::new(RuntimeUmemConfig {
+            group_id: 0,
+            frame_size: 2048,
+            frame_size_log2: 11,
+            frame_count: 1,
+            head_room: 128,
+            fq_size: 1,
+            cq_size: 1,
+            group_start_frame_idx: 0,
+            partitions: 1,
+        });
+        let partitions = [partition];
+        let bus = Arc::new(SystemBus {
+            bus_senders: vec![queue.clone()],
+            partition_directory: SystemBus::partition_directory(&partitions),
+            frame_partition_maps: SystemBus::frame_partition_maps(&partitions, &[1], &[1]),
+            umem_addr: [None; MAX_UMEM],
+        });
+        let mut registry = FrameRegistry::new(
+            0,
+            vec![(0, partition)],
+            queue.clone(),
+            bus,
+            vec![Some(config)],
         );
-        assert!(resolve_frame_token(encode_frame_token(1, 4), &directory).is_none());
-        assert!(resolve_frame_token(encode_frame_token(2, 0), &directory).is_none());
+
+        let frame_token = registry.allocate_batch(0, 1)[0];
+        assert_eq!(registry.total_free_frames(), 0);
+
+        queue
+            .push(frame_token.with_retain_command())
+            .expect("retain command should fit in the test queue");
+        registry.process_returns();
+
+        registry.release_local(frame_token);
+        assert_eq!(registry.total_free_frames(), 0);
+        registry.release_local(frame_token);
+        assert_eq!(registry.total_free_frames(), 1);
     }
 }

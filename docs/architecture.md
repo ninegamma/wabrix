@@ -2,7 +2,7 @@
 
 **Scope:** This document describes the data model, architectural roles, and frame lifecycle of the **Wabrix** Rust workspace — specifically the `wabrix_base` crate (core types: `FrameRegistry`, `SystemBus`, `UmemPartition`, `Pdu`, `RuntimeUmemConfig`) and the `wabrix_lib` crate (socket layer: `XSocket`, `XSocketRx`, `XSocketTx`, `XSocketRegistry`, system builder). The `wabrix_wasm` crate (plugin/WASM runtime) and the `wabrix` binary (CLI entry point) are not covered in detail here.
 
-For the configuration, pipeline, control-plane, and telemetry overview, see [Wabrix Architecture Overview](../wabrix_lib/architecture_overview.md).
+For the configuration, pipeline, control-plane, and telemetry overview, see [Wabrix Architecture Overview](architecture_overview.md).
 
 **Platform context:** Linux-only, kernel-bypass packet I/O via **AF_XDP**. The application maps shared memory (UMEM) directly with the NIC driver, bypassing the kernel network stack on the fast path. All types described below assume a Linux host with XDP-capable NICs.
 
@@ -54,7 +54,7 @@ The `XSocket` acts as the **Hardware Interface**. It sits between the Linux Kern
 * **Key Components:**
     * **The Socket:** Wrapper around the file descriptor (`Fd`).
     * **The Rings:** Handles to socket-bound `RxQueue` and `TxQueue`, plus `FillQueue` and `CompQueue` associated with the UMEM/interface/queue tuple.
-    * **The Translator:** Resolves frame tokens to UMEM-local frame indices and converts them to UMEM-relative byte offsets for the rings (e.g., `500 * 2048 + 128`). These are not physical addresses.
+    * **The Translator:** Uses a frame token's UMEM group and local index to build UMEM-relative byte offsets for the rings (e.g., `500 * 2048 + 128`). These are not physical addresses.
 * **Critical Actions:**
     * **`replenish_fill_queue`:** Pushes available frames from the Registry into the Fill Ring so the NIC has a place to write incoming packets.
     * **`drain_comp_queue`:** Pulls completed TX frames from the Completion Ring and returns them to the Registry (or sends them back to their owner).
@@ -68,14 +68,14 @@ The `FrameRegistry` acts as the **Inventory Manager**. It is a container that ma
 * **Ownership:** Each worker thread has exactly one `FrameRegistry`. Multiple sockets in the same worker access this shared registry via thread-local storage.
 * **Top-level fields:**
     * **`worker_id`:** The owning worker's ID.
-    * **`return_queue`:** A lock-free `Arc<ArrayQueue<u32>>` (bounded ring buffer) where *other workers* push bit-packed u32 commands for frames they are returning or sharing. The owning worker drains this queue in `process_returns()`.
+    * **`return_queue`:** A lock-free `Arc<ArrayQueue<FrameToken>>` (bounded ring buffer) where *other workers* push frames they are returning or sharing. The owning worker drains this queue in `process_returns()`.
     * **`bus`:** Reference to the `SystemBus`, used for routing returned frames and looking up partition ownership via `bus.partition_directory`.
     * **`registry_map`:** A `Vec<Option<PartitionData>>` indexed by `umem_group_id`. Each present entry is the per-UMEM allocation context.
 * **`PartitionData` (per UMEM group, inside `registry_map`):**
-    * **`free_stash`:** A `Vec<u32>` acting as a LIFO stack. This is the "hot cache" of frame tokens ready to be used immediately.
+    * **`free_stash`:** A `Vec<FrameToken>` acting as a LIFO stack. This is the "hot cache" of frame tokens ready to be used immediately.
     * **`refcounts`:** A `Vec<u16>` tracking per-frame reference counts (for retain/release semantics).
-    * **`refcount_start`:** The partition's UMEM-local start index; `local_idx - refcount_start` indexes the compact refcount array, matching the partition-relative token offset.
-* **Canonical partition metadata** is stored in `SystemBus.partition_directory: Vec<Option<UmemPartition>>`, indexed by partition ID. `PartitionData.refcount_start` also stores the local start needed for compact refcount indexing. `SystemBus.frame_partition_maps` supports reverse lookup from UMEM-local indices.
+    * **`refcount_start`:** The partition's UMEM-local start index; `local_idx - refcount_start` indexes the compact refcount array.
+* **Canonical partition metadata** is stored in `SystemBus.partition_directory: Vec<Option<UmemPartition>>`, indexed by partition ID. `PartitionData.refcount_start` also stores the local start needed for compact refcount indexing. `SystemBus.frame_partition_maps` maps UMEM-local indices to their owning partition.
 * **Logic:**
     * When a socket needs frames (`alloc`), the Registry pops from `free_stash` in the relevant `PartitionData`.
     * `allocate_batch_into()` returns zero when its stash is empty; it does not drain returns automatically. RX calls `process_returns()` periodically (every 256 receive calls, or when total free frames fall below 8192). Each call processes at most 512 commands.
@@ -89,19 +89,19 @@ The `FrameRegistry` acts as the **Inventory Manager**. It is a container that ma
 4.  **Process:** The worker's application code polls the **RX Ring**, gets the descriptor, and processes the packet data.
 5.  **Disposal:**
     * **Path A (TX):** The frame is put onto the **TX Ring**. Once sent, the kernel publishes its address to the **Completion Ring**. `XSocketTx` recovers the frame token and returns it directly to the local registry when owned by its worker, otherwise via `SystemBus` (also used as a fallback if the local registry is unavailable).
-    * **Path B (Drop):** The PDU retains its original owner ID and frame token.
+    * **Path B (Drop):** The PDU retains its owning worker and UMEM group ID. The host derives the frame index from the descriptor address and reconstructs the registry token when releasing the frame.
         * *If Owned by This Worker:* Returns directly to this worker's registry through thread-local storage when available, with `SystemBus` as fallback.
         * *If Owned by Different Worker:* Sent via `SystemBus` to the owning worker's `return_queue`.
 
 ## 6. The Three Layers of Addressing
 
-1. **The Logical Layer (Your Application)**
+1. **The Logical Resource Layer (FrameRegistry and SystemBus)**
 
-        Unit: Frame token (u32)
+        Unit: `FrameToken { umem_id: u32, frame_index: u32 }`
 
-        Encoding: 8-bit partition ID + 23-bit partition-relative offset (lower 31 bits)
+        Encoding: UMEM group ID + UMEM-local frame index
 
-        Purpose: Resource tracking. You use this to know which buffers are free vs. busy. This is what lives in the FrameRegistry's free_stash.
+        Purpose: Resource tracking. This is what lives in the FrameRegistry's free_stash and SystemBus return queues. A PDU carries its UMEM group ID and derives its frame index from the descriptor address; the host constructs the token from that pair when needed. In return queues, the high bit of `umem_id` marks retain; clear means release.
 
 2. **The Transport Layer (The Rings)**
 
@@ -224,10 +224,10 @@ The architecture is best understood as a hierarchy of constraints:
 * **`XSocket`**: Represents a socket bound to a hardware queue. It is split into RX and TX halves for independent pipeline access.
 * **`XSocketRx`**: RX-only component of a split socket. Accesses the worker's frame registry via thread-local storage.
 * **`XSocketTx`**: TX-only component of a split socket. Returns same-owner frames directly through the TLS registry when available and routes other returns through SystemBus. It can allocate replacement frames for cross-UMEM transmission.
-* **`FrameRegistry`**: The worker's combined frame inventory. Holds `worker_id`, a `return_queue` (`Arc<ArrayQueue<u32>>`), a `bus` reference, and `registry_map: Vec<Option<PartitionData>>` indexed by UMEM group. Stored in thread-local storage — only the owning worker thread accesses it directly.
-* **`PartitionData`** *(inside `FrameRegistry.registry_map`)*: Per-UMEM allocation context for one worker. Holds `free_stash: Vec<u32>` (LIFO stack of available frame tokens), `refcounts: Vec<u16>` (per-frame reference tracking), and `refcount_start` (the UMEM-local start for compact indexing).
-* **`SystemBus`**: The mechanism to satisfy the **Ownership Rule** (returning frames between workers). Holds one `Arc<ArrayQueue<u32>>` per worker (`bus_senders`) and a partition-ID-indexed directory of canonical `UmemPartition` values for ownership lookup. Commands are bit-packed into a single `u32`: bit 31 = command (0=Release, 1=Retain), bits 30-23 = partition ID, and bits 22-0 = partition-relative offset.
-* **`UmemPartition`**: Contains `partition_id`, `worker_id`, `umem_group_id`, `start_idx`, `end_idx` (absolute frame range), plus `local_start` and `local_end` (UMEM-relative range) to define frame ownership boundaries and resolve partition-token offsets.
+* **`FrameRegistry`**: The worker's combined frame inventory. Holds `worker_id`, a `return_queue` (`Arc<ArrayQueue<FrameToken>>`), a `bus` reference, and `registry_map: Vec<Option<PartitionData>>` indexed by UMEM group. Stored in thread-local storage — only the owning worker thread accesses it directly.
+* **`PartitionData`** *(inside `FrameRegistry.registry_map`)*: Per-UMEM allocation context for one worker. Holds `free_stash: Vec<FrameToken>` (LIFO stack of available frames), `refcounts: Vec<u16>` (per-frame reference tracking), and `refcount_start` (the UMEM-local start for compact indexing).
+* **`SystemBus`**: The mechanism to satisfy the **Ownership Rule** (returning frames between workers). Holds one `Arc<ArrayQueue<FrameToken>>` per worker (`bus_senders`) and a UMEM-group-indexed directory of canonical `UmemPartition` values for ownership lookup. Queue commands use the high bit of `FrameToken.umem_id` to mark retain (clear means release); the bit is cleared before registry operations.
+* **`UmemPartition`**: Contains `partition_id`, `worker_id`, `umem_group_id`, `start_idx`, `end_idx` (absolute frame range), plus `local_start` and `local_end` (UMEM-relative range) to define frame ownership boundaries and resolve frame-token indices.
 
 ---
 
@@ -314,7 +314,7 @@ Local returns also use SystemBus as a fallback if the local registry is unavaila
 2. **Frame Circulation:**
    - Frames flow from allocation through RX, packet processing, TX, and completion, or return on drop
    - Same-owner releases normally use the local registry; foreign-owner releases use bounded lock-free queues
-   - `process_returns()` drains at most 512 packed commands per call
+   - `process_returns()` drains at most 512 tagged `FrameToken` commands per call
    - Frame availability depends on timely completion, release, and return processing. A full return queue currently logs a leaked frame; the design does not guarantee freedom from starvation
 
 3. **Independent Node Binding:**
@@ -324,9 +324,9 @@ Local returns also use SystemBus as a fallback if the local registry is unavaila
    - Enables bidirectional pipelines on same queues
 
 4. **SystemBus Coordination:**
-   - One `Arc<ArrayQueue<u32>>` per worker; both senders and the registry share the same Arc
+   - One `Arc<ArrayQueue<FrameToken>>` per worker; both senders and the registry share the same Arc
    - Works transparently for same-worker and cross-worker scenarios
-   - Packed u32 format: bit 31 = command, bits 30-23 = partition ID, bits 22-0 = partition-relative offset
+   - `FrameToken` carries the UMEM group ID and UMEM-local frame index; the queue-only command is encoded in the high bit of `umem_id` (0=Release, 1=Retain)
    - Routes based on worker_id, not core_id
 
 ### Registry Behavior
@@ -374,24 +374,17 @@ workers = [0, 1]
 
 Both pipelines can coexist because they access different rings of the same sockets.
 
-# Understanding UMEM-local indices and frame tokens
+# Frame Tokens
 
-This chapter distinguishes UMEM-local frame indices, absolute layout positions, and frame tokens. `group_start_frame_idx` is used to calculate absolute layout positions while partitions are built. A frame token is the identifier used by PDUs and SystemBus.
+`FrameToken` is a `#[repr(C)]` pair `{ umem_id: u32, frame_index: u32 }` identifying a frame by UMEM group and UMEM-local frame index. The UMEM group identifies the address space; the frame index identifies a frame inside it. A partition directory resolves the pair to the owning worker and partition metadata.
 
-## 1. The Problem: Duplicate Indices (Address Collision)
-
-In the raw hardware view, every separate UMEM region starts counting its frames at **0**.
-
-* **Group 0 (eth0 Memory):** Contains UMEM-local frames `0, 1, 2 ... 4095`.
-* **Group 1 (eth1 Memory):** Contains UMEM-local frames `0, 1, 2 ... 4095`.
-
-The same local index can refer to a frame in either UMEM group. SystemBus messages therefore carry a frame token, which identifies a partition and an offset within that partition; the partition directory resolves it to the owning worker and UMEM group.
+The token occupies 8 bytes. In SystemBus and registry return queues, the high bit of `umem_id` is set for retain and left clear for release. The receiver clears that bit before looking up the UMEM group or updating the registry. UMEM IDs are constrained to the lower bits so this tag is unambiguous.
 
 ## 2. Absolute layout positions and frame tokens
 
 During partition construction, the system can assign each UMEM group a range in one absolute frame layout. The `group_start_frame_idx` is the base offset for converting between that layout position and a UMEM-local index. Runtime frame ownership uses frame tokens instead of these absolute positions.
 
-For example, Group 1 may have absolute layout positions `4096..8192`, while its UMEM-local frame indices remain `0..4096`. A frame token for a frame in that group carries the partition ID and partition-relative offset, not the absolute layout position.
+For example, Group 1 may have absolute layout positions `4096..8192`, while its UMEM-local frame indices remain `0..4096`. A frame token for a frame in that group carries the UMEM group ID and UMEM-local frame index, not the absolute layout position.
 
 ## 3. Address translation
 
@@ -413,21 +406,24 @@ For aligned frames, derive the UMEM-local index from the descriptor address, res
 local_idx = u32(descriptor_address >> frame_size_log2)
 resolved = bus.resolve_local_frame_idx(group_id, local_idx)
 frame_token = resolved.frame_token
-owner_id = resolved.worker_id
+umem_group_id = resolved.umem_group_id
+worker_id = resolved.worker_id
 ```
+
+The WPDU stores `umem_group_id` and `worker_id`; its UMEM-local frame index is derived from `desc_addr` and `frame_size_log2`. The host constructs a `FrameToken` from the UMEM group and frame index for registry and return-queue operations.
 
 The receiving worker is not necessarily the frame owner. Headroom and packet offsets must remain within the frame for this index calculation.
 
 ## 4. Detailed Address Calculation: UMEM, XSK, and Address Spaces
 
-* **Frame token:** A system-wide lifecycle identifier encoding an 8-bit partition ID and a 23-bit partition-relative offset. Bit 31 is reserved for the SystemBus command (release or retain).
-* **UMEM-local frame index:** An index from zero to `frame_count - 1` within one UMEM group. Resolving a token gives `partition.local_start + partition_offset`.
+* **Frame token:** A system-wide lifecycle identifier containing a UMEM group ID and UMEM-local frame index. In return queues, the high bit of the UMEM ID marks retain; it is cleared before registry operations.
+* **UMEM-local frame index:** An index from zero to `frame_count - 1` within one UMEM group. It is the frame-index field of the token.
 * **Descriptor address:** A `u64` byte offset within the UMEM group, used by AF_XDP rings. RX/TX carry `FrameDesc` records; Fill/Completion carry addresses.
 * **Virtual data pointer:** The mapped UMEM base plus the packet's descriptor offset.
 
 ### Example
 
-For two UMEM groups of 4096 frames each, with frame size 2048 bytes and headroom 256, Group 1 may have `group_start_frame_idx = 4096`. Its local index 4 has absolute layout position 4100, but initial descriptor address `(4 << 11) + 256 = 8448`. The token identifies the partition containing local index 4 and its offset within that partition; it does not encode 4100.
+For two UMEM groups of 4096 frames each, with frame size 2048 bytes and headroom 256, Group 1 may have `group_start_frame_idx = 4096`. Its local index 4 has absolute layout position 4100, but initial descriptor address `(4 << 11) + 256 = 8448`. Its token is `{ umem_id: 1, frame_index: 4 }`; it does not encode 4100.
 
 ### Why Partitioning Does Not Change `group_start_frame_idx`
 
@@ -443,13 +439,14 @@ The partition boundaries control frame **ownership** (which worker can allocate 
 
 | Address Type | Scope | Used By | Range Example (Group 1) | Purpose |
 |-------------|-------|---------|-------------------------|---------|
-| **Frame token** | System-wide | Application, SystemBus, FrameRegistry | Partition ID + offset | Unique frame identification |
+| **Frame token** | System-wide | SystemBus, FrameRegistry | UMEM group ID + local frame index | Unique frame identification |
+| **UMEM group + local index** | UMEM-group | WPDU, host PDU lifecycle | Group ID + descriptor-derived index | Reconstruct a frame token and locate its UMEM |
 | **Local Index** | UMEM-group | Internal calculations | 0 - 4095 | Index into UMEM frame array |
 | **Descriptor Address** | XSK/Kernel | AF_XDP rings | 256 - 8,386,816 (initial offsets with 256-byte headroom) | Byte offset in UMEM region |
 
 **Conversion Rules:**
-- `frame_token = encode_frame_token(partition_id, partition_offset)`
-- `local_idx = resolve_frame_token(frame_token, partition_directory).local_idx`
+- `frame_token = FrameToken::new(umem_id, frame_index)`
+- `resolved = resolve_frame_token(frame_token, partition_directory)` (finds owner and partition)
 - `frame_token = resolve_local_frame_idx(umem_group_id, local_idx).frame_token`
 - `descriptor_addr = (local_idx << frame_size_log2) + headroom`
 - `local_idx = descriptor_addr >> frame_size_log2` (headroom is within frame bounds)

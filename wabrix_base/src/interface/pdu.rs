@@ -4,7 +4,7 @@ use log::trace;
 use std::ops::Add;
 use xsk_core::FrameDesc;
 
-use crate::frame_registry::{resolve_frame_token, CMD_BIT};
+use crate::frame_registry::FrameToken;
 use crate::SystemBus;
 use wabrix_api::exports::WPdu;
 
@@ -57,12 +57,18 @@ unsafe impl Send for Pdu {}
 #[cfg(not(target_arch = "wasm32"))]
 impl Drop for Pdu {
     fn drop(&mut self) {
+        // SAFETY: The host keeps a live PDU's SystemBus pointer valid for the PDU's lifetime.
+        // `try_umem_addr` handles a null pointer and checks that the UMEM group is active.
+        // The worker registry pointer is dereferenced only after its null check.
         unsafe {
-            // 0. Check if the PDU is an uninitialized Pdu::default(), e.g. happens in PacketGenNode
+            // A default PDU has no bus pointer; inactive or invalid UMEM groups fail this check.
             if self.try_umem_addr().is_none() {
                 log::debug!("Ignoring drop of uninitialized PDU slot");
                 return;
             }
+            let frame_token = self.to_frame_token();
+            let bus = &*self.system_bus;
+
             // 1. FAST PATH: Thread-Local Return
             // Check if we are currently executing on the worker thread that owns this frame.
             // If so, bypass the return queue entirely and return directly to the local stash.
@@ -70,14 +76,14 @@ impl Drop for Pdu {
             if !registry_ptr.is_null() {
                 let registry = &mut *registry_ptr;
 
-                if registry.worker_id == (self.owner_id() as usize) {
+                if registry.worker_id == (self.worker_id() as usize) {
                     // We are on the owning thread! Bypass the return queue entirely.
                     // Return the memory instantly to the local stash.
                     trace!(
                         "Drop for Pdu: Returning frame {} to local stash",
-                        self.frame_token()
+                        frame_token
                     );
-                    registry.release_local(self.frame_token());
+                    registry.release_local(frame_token);
                     return;
                 }
             }
@@ -85,26 +91,16 @@ impl Drop for Pdu {
             // 2. SLOW PATH: Cross-Thread Return
             // We are on a different thread (e.g., cross-worker exception routing).
             // We must route the release command via the bus.
-            if !self.system_bus.is_null() {
-                // 2. Access the SystemBus
-                // Safety: The SystemBus is allocated in main() inside an Arc
-                // and lives for the duration of the program.
-                let bus = &*self.system_bus;
-
-                // 3. Route the frame back to its owner
-                // We use the owner_id (u8) to select the correct SPSC sender.
-                // If this Pdu is on the same core as owner_id, this is a local SPSC send.
-                // If on a different core, this is a cross-core SPSC send.
-                // We ignore SendError (e.g., if the channel is full or disconnected on shutdown).
-                if bus.bus_senders[self.owner_id() as usize]
-                    .push(self.frame_token())
-                    .is_err()
-                {
-                    log::error!(
-                        "🔥 CRITICAL: return queue full, frame {} leaked!",
-                        self.frame_token()
-                    );
-                }
+            // 3. Route the frame back to its owner using the worker's SPSC sender.
+            // We ignore SendError (e.g., if the channel is full or disconnected on shutdown).
+            if bus.bus_senders[self.worker_id() as usize]
+                .push(frame_token)
+                .is_err()
+            {
+                log::error!(
+                    "🔥 CRITICAL: return queue full, frame {} leaked!",
+                    frame_token
+                );
             }
         }
     }
@@ -114,8 +110,9 @@ impl fmt::Display for Pdu {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "(Frame token: {}, data_len= {}), headers=\n{}",
-            self.frame_token(),
+            "(UMEM group: {}, frame index: {}, data_len= {}), headers=\n{}",
+            self.umem_group_id(),
+            self.frame_index(),
             self.data_len(),
             self.headers(),
         )
@@ -128,8 +125,8 @@ impl Pdu {
     #[inline(always)]
     pub fn new(
         desc: FrameDesc,
-        frame_token: u32,
-        owner_id: u8,
+        umem_group_id: u32,
+        worker_id: u8,
         system_bus: *const SystemBus,
         frame_size_log2: u8,
     ) -> Self {
@@ -137,11 +134,17 @@ impl Pdu {
             desc.addr(),
             desc.length(),
             desc.options(),
-            frame_token,
+            umem_group_id,
             frame_size_log2,
-            owner_id,
+            worker_id,
         );
         Pdu { w, system_bus }
+    }
+
+    /// Returns this frame's UMEM group and UMEM-local frame index.
+    #[inline(always)]
+    pub fn to_frame_token(&self) -> FrameToken {
+        FrameToken::new(self.umem_group_id(), self.frame_index())
     }
 
     /// Reconstruct the FrameDesc for transmission
@@ -188,16 +191,14 @@ impl Pdu {
         // We assume the Host lifecycle guarantees it points to a valid SystemBus.
         let bus = unsafe { &*self.system_bus };
 
-        // 2. Safe Bounds Check (Prevents Panics)
-        // .get() returns Option<&Option<usize>>
-        // .copied() turns it into Option<Option<usize>>
-        // .flatten() turns it into Option<usize>
-        let umem_group_id =
-            resolve_frame_token(self.frame_token(), &bus.partition_directory)?.umem_group_id;
-        bus.umem_addr.get(umem_group_id).copied().flatten()
+        // Bounds-check the stored UMEM group before returning its mapped base address.
+        bus.umem_addr
+            .get(self.umem_group_id() as usize)
+            .copied()
+            .flatten()
     }
 
-    /// Returns the UMEM group owning this frame token.
+    /// Returns the UMEM group stored in this descriptor when that UMEM is active.
     #[inline(always)]
     pub fn umem_id(&self) -> Option<u8> {
         if self.system_bus.is_null() {
@@ -207,8 +208,9 @@ impl Pdu {
         // SAFETY: the SystemBus pointer is installed when the PDU is created and
         // remains valid for the PDU's lifetime.
         let bus = unsafe { &*self.system_bus };
-        resolve_frame_token(self.frame_token(), &bus.partition_directory)
-            .and_then(|resolved| u8::try_from(resolved.umem_group_id).ok())
+        let umem_group_id = self.umem_group_id() as usize;
+        bus.umem_addr.get(umem_group_id).copied().flatten()?;
+        u8::try_from(umem_group_id).ok()
     }
 
     /// returns pointer to the first byte of the frame this Pdu represents
@@ -237,18 +239,31 @@ impl Pdu {
     /// increments the reference count in the SystemBus for this frame token.
     /// The actual packet data in UMEM is NOT copied.
     pub fn shallow_copy(&self) -> Self {
+        // SAFETY: The SystemBus pointer is checked for null and remains alive for this PDU.
         unsafe {
             // 1. Notify the central logic that this frame has a new reference
             if !self.system_bus.is_null() {
                 let bus = &*self.system_bus;
-                if bus.bus_senders[self.owner_id() as usize]
-                    .push(CMD_BIT | self.frame_token())
-                    .is_err()
-                {
-                    log::error!(
-                        "🔥 CRITICAL: return queue full, retain for frame {} dropped!",
-                        self.frame_token()
-                    );
+                let umem_id = self.umem_group_id() as usize;
+                if bus.umem_addr.get(umem_id).copied().flatten().is_none() {
+                    log::error!("Cannot retain frame from inactive UMEM group {}", umem_id);
+                } else {
+                    let frame_token = self.to_frame_token();
+                    let owner = self.worker_id() as usize;
+                    if let Some(queue) = bus.bus_senders.get(owner) {
+                        if queue.push(frame_token.with_retain_command()).is_err() {
+                            log::error!(
+                                "🔥 CRITICAL: return queue full, retain for frame {} dropped!",
+                                frame_token
+                            );
+                        }
+                    } else {
+                        log::error!(
+                            "Cannot retain frame {} for invalid worker {}",
+                            frame_token,
+                            owner
+                        );
+                    }
                 }
             }
         }
@@ -453,9 +468,9 @@ mod tests {
                 desc_addr: HEADROOM,
                 desc_len: INITIAL_PAYLOAD_LEN as u32,
                 desc_options: 0u32,
-                frame_token: 0u32,
+                umem_group_id: 0u32,
                 frame_size_log2: 11,
-                owner_id: 0u8,
+                worker_id: 0u8,
                 flags: 0u8,
                 _padding: 0u8,
                 system_bus: 0u64 as *const SystemBus,
@@ -546,8 +561,8 @@ mod tests {
         // We pass a null pointer for SystemBus as we won't trigger bus operations
         let mut pdu = Pdu::new(
             desc,
-            0,                 // frame_token
-            0,                 // owner_id
+            0,                 // umem_group_id
+            0,                 // worker_id
             core::ptr::null(), // system_bus
             frame_size_log2,
         );

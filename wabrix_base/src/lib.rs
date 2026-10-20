@@ -9,7 +9,7 @@ pub mod node_instance_id;
 pub mod system;
 pub mod telemetry;
 
-use crate::frame_registry::{decode_frame_token, encode_frame_token, MAX_PARTITIONS, MAX_UMEM};
+use crate::frame_registry::{FrameToken, MAX_PARTITIONS, MAX_UMEM};
 use crate::interface::batch::Batch;
 use core::fmt::Display;
 use crossbeam_queue::ArrayQueue;
@@ -47,7 +47,7 @@ impl Drop for RuntimeUmemConfig {
 #[derive(Debug, Clone, Copy)]
 #[repr(align(64))]
 pub struct UmemPartition {
-    /// Stable index carried by every frame token in this partition.
+    /// Stable index used by the UMEM-local frame-index lookup table.
     pub partition_id: usize,
     pub worker_id: usize,     // Worker thread that owns this partition
     pub umem_group_id: usize, // Memory domain (UMEM group)
@@ -60,44 +60,39 @@ pub struct UmemPartition {
     pub local_end: u32,
 }
 
-/// Direct lookup from a logical, equal-sized UMEM partition to its frame-token partition.
+/// Direct lookup from a logical UMEM slot to its owning registry partition.
 #[derive(Debug, Clone, Default)]
 pub struct UmemPartitionMap {
     partition_size: u32,
     partition_ids: Vec<Option<u8>>,
 }
 
-/// Token and owner resolved from a UMEM group and local frame index.
+/// Token and owning worker resolved from a UMEM group and local frame index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedLocalFrame {
-    pub frame_token: u32,
+    pub frame_token: FrameToken,
     pub worker_id: usize,
 }
 
 impl UmemPartition {
-    /// Check ownership against a frame token
-    /// (format: partition ID plus partition-relative offset).
+    /// Checks whether this partition owns the UMEM-local frame identified by the token.
     #[inline]
-    pub fn owns_frame_token(&self, frame_token: u32) -> bool {
-        let (partition_id, offset) = decode_frame_token(frame_token);
-        partition_id == self.partition_id
-            && offset < self.local_end.saturating_sub(self.local_start)
+    pub fn owns_frame_token(&self, frame_token: FrameToken) -> bool {
+        frame_token.umem_id() as usize == self.umem_group_id
+            && (self.local_start..self.local_end).contains(&frame_token.frame_index())
     }
 }
 
-/// Per-worker lockless return queue: packed u32 commands.
-/// Bit 31 = command (0 = Release, 1 = Retain); bits 30-23 = partition ID;
-/// bits 22-0 = partition-relative offset.
-/// See frame_registry::{CMD_BIT, is_retain, extract_frame_token} for helpers.
+/// Per-worker lockless return queue of `FrameToken`s. The high bit of `umem_id`
+/// marks a retain command; a clear bit means release.
 #[derive(Clone)]
 #[repr(align(64))]
 pub struct SystemBus {
-    /// One ArrayQueue<u32> per worker. Senders push packed u32 commands;
-    /// the owning worker pops them in process_returns().
-    pub bus_senders: Vec<Arc<ArrayQueue<u32>>>,
-    /// partition metadata for frame-token resolution indexed by partition_id.
+    /// One queue per worker; the owning worker processes frame lifecycle commands.
+    pub bus_senders: Vec<Arc<ArrayQueue<FrameToken>>>,
+    /// partition metadata for owner resolution indexed by partition_id.
     pub partition_directory: Vec<Option<UmemPartition>>,
-    /// Per-logical-partition token IDs used for constant-time frame-token resolution.
+    /// Per-logical-partition registry IDs used for constant-time owner resolution.
     /// This stores one entry per configured UMEM group
     pub frame_partition_maps: Vec<UmemPartitionMap>,
     pub umem_addr: [Option<usize>; MAX_UMEM],
@@ -110,16 +105,11 @@ impl SystemBus {
         for partition in partitions {
             assert!(
                 partition.partition_id < MAX_PARTITIONS,
-                "partition ID exceeds token capacity"
+                "partition ID exceeds directory capacity"
             );
             assert!(
                 partition.local_end >= partition.local_start,
                 "partition range is inverted"
-            );
-            assert!(
-                partition.local_end - partition.local_start
-                    <= crate::frame_registry::MAX_PARTITION_FRAMES,
-                "partition exceeds token offset capacity"
             );
             assert!(
                 directory[partition.partition_id].is_none(),
@@ -168,7 +158,7 @@ impl SystemBus {
 
             assert!(
                 partition.partition_id < MAX_PARTITIONS,
-                "partition ID exceeds token capacity"
+                "partition ID exceeds directory capacity"
             );
 
             let first_slot = (local_start / map.partition_size) as usize;
@@ -176,7 +166,7 @@ impl SystemBus {
             for slot in first_slot..end_slot.min(map.partition_ids.len()) {
                 assert!(
                     map.partition_ids[slot].is_none(),
-                    "logical UMEM partition is assigned to multiple frame-token partitions"
+                    "logical UMEM partition is assigned to multiple registry partitions"
                 );
                 map.partition_ids[slot] = Some(partition.partition_id as u8);
             }
@@ -204,13 +194,13 @@ impl SystemBus {
         }
 
         Some(ResolvedLocalFrame {
-            frame_token: encode_frame_token(partition_id, local_idx - partition.local_start),
+            frame_token: FrameToken::new(umem_group_id as u32, local_idx),
             worker_id: partition.worker_id,
         })
     }
 }
 
-/// SAFETY: Arc<ArrayQueue<u32>> is Send, so Vec<Arc<ArrayQueue<u32>>> is also Send.
+/// SAFETY: `FrameToken` is `Send`, so the cross-worker queues are also `Send`.
 unsafe impl Send for SystemBus {}
 
 /// Directives tell the scheduler where the batch should go next.

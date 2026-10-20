@@ -78,7 +78,7 @@ pub struct XSocketRx {
     config: Arc<XdpSocketConfig>,
     scratch_addrs: Vec<u64>,
     scratch_descriptors_recv_batch: Vec<FrameDesc>,
-    scratch_frames: Vec<u32>,
+    scratch_frames: Vec<wabrix_base::frame_registry::FrameToken>,
     total_produced: usize,
     total_received: usize,
     empty_spins: usize,
@@ -486,7 +486,13 @@ impl XSocket {
             config: self.config.clone(),
             scratch_addrs: vec![0; MAX_FILL],
             scratch_descriptors_recv_batch: vec![FrameDesc::default(); MAX_FILL],
-            scratch_frames: vec![0u32; MAX_FILL],
+            scratch_frames: vec![
+                wabrix_base::frame_registry::FrameToken::new(
+                    self.config.umem_config.group_id as u32,
+                    0,
+                );
+                MAX_FILL
+            ],
             total_produced: 0,
             total_received: 0,
             empty_spins: 0,
@@ -555,9 +561,7 @@ use rustix::event::{poll, PollFd, PollFlags};
 use rustix::io::Errno;
 use separator::Separatable;
 use wabrix_api::MAX_BATCH_SIZE;
-use wabrix_base::frame_registry::{
-    get_tsc_frequency, get_worker_frame_registry, resolve_frame_token,
-};
+use wabrix_base::frame_registry::{get_tsc_frequency, get_worker_frame_registry, FrameToken};
 use wabrix_base::system::{rdtsc_us, try_get_tsc_frequency};
 use wabrix_base::{RuntimeUmemConfig, SystemBus};
 
@@ -786,12 +790,7 @@ impl XSocketRx {
         let headroom = self.config.umem_config.head_room as u64;
 
         for i in 0..actual_batch {
-            let Some(local_idx) =
-                resolve_frame_token(self.scratch_frames[i], &self.bus.partition_directory)
-                    .map(|resolved| resolved.local_idx)
-            else {
-                continue;
-            };
+            let local_idx = self.scratch_frames[i].frame_index();
             // Use a 1-cycle bitwise shift instead of multiplication
             let addr = ((local_idx as u64) << frame_size_log2) + headroom;
             // Write directly to our persistent struct buffer
@@ -1308,16 +1307,16 @@ impl BatchRx for XSocketRx {
         // 6. Process the received packets
         let frame_size_log2 = self.config.umem_config.frame_size_log2;
         let bus_ptr = &*self.bus as *const _;
-        let group_id = self.config.umem_config.group_id;
+        let umem_group_id = self.config.umem_config.group_id;
 
         // This guarantees zero bounds-checking overhead
         let received_descriptors = &self.scratch_descriptors_recv_batch[..rcvd];
         for desc in received_descriptors {
             let local_idx = (desc.addr() as u32) >> frame_size_log2; // local_idx is wrt. current Umem
-            let Some(resolved_frame) = self.bus.resolve_local_frame_idx(group_id, local_idx) else {
+            let Some(resolved_frame) = self.bus.resolve_local_frame_idx(umem_group_id, local_idx) else {
                 log::warn!(
                     "receive_into_batch: no frame token for UMEM {}, local frame {}",
-                    group_id,
+                    umem_group_id,
                     local_idx
                 );
                 continue;
@@ -1330,7 +1329,7 @@ impl BatchRx for XSocketRx {
 
             let mut pdu = Pdu::new(
                 *desc,
-                resolved_frame.frame_token,
+                umem_group_id as u32,
                 frame_owner,
                 bus_ptr,
                 frame_size_log2,
@@ -1739,7 +1738,7 @@ impl XSocketTx {
                     local_idx,
                     self.config.umem_config.group_id
                 );
-                self.release_frame(resolved_frame.frame_token);
+                self.release_frame(resolved_frame.frame_token, resolved_frame.worker_id);
             }
         } else {
             if self.total_sent_packets > self.total_consumed {
@@ -1757,8 +1756,7 @@ impl XSocketTx {
         Ok(consumed)
     }
 
-    fn release_frame(&mut self, frame_token: u32) {
-        let owner = self.determine_owner(frame_token);
+    fn release_frame(&mut self, frame_token: FrameToken, owner: usize) {
         /*
         log::trace!(
             "Worker {}: Releasing frame_token={}, determined owner={}, my worker_id={}",
@@ -1799,17 +1797,6 @@ impl XSocketTx {
                 frame_token
             );
         }
-    }
-
-    fn determine_owner(&self, frame_token: u32) -> usize {
-        if let Some(resolved) = resolve_frame_token(frame_token, &self.bus.partition_directory) {
-            return resolved.worker_id;
-        }
-        log::warn!(
-            "determine_owner: invalid frame token={}, defaulting to worker 0",
-            frame_token
-        );
-        0
     }
 }
 impl Drop for XSocketRx {

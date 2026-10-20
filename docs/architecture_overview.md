@@ -1,6 +1,6 @@
 # Wabrix Architecture Overview
 
-Wabrix is a run-to-completion (RTC) userspace networking engine built on AF_XDP, with optional WebAssembly plugins. Its configuration, control plane, and data plane have distinct responsibilities. For frame ownership, socket rings, and addressing details, see [Data Model and Architecture](../docs/architecture.md).
+Wabrix is a run-to-completion (RTC) userspace networking engine built on AF_XDP, with optional WebAssembly plugins. Its configuration, control plane, and data plane have distinct responsibilities. For frame ownership, socket rings, and addressing details, see [Data Model and Architecture](architecture.md).
 
 ## 1. Configuration
 
@@ -14,7 +14,7 @@ Wabrix is a run-to-completion (RTC) userspace networking engine built on AF_XDP,
 * **Wasm memory:** When enabled, Wasm linear memory includes an alias of UMEM and a private mailbox region. The mailbox does not reserve frames at the start of UMEM; all UMEM frames remain available to worker partitions.
 * **`XSocketRegistry`:** Registers AF_XDP sockets and splits each into `XSocketRx` and `XSocketTx` halves for independent node binding.
 * **`FrameRegistry`:** Provides a worker-local allocator for its owned partitions, accessed through thread-local storage without a registry mutex.
-* **`SystemBus`:** Provides one bounded, lock-free `crossbeam_queue::ArrayQueue<u32>` per worker for frame retain/release commands, plus a partition directory for ownership and address resolution. It does not transport packet batches.
+* **`SystemBus`:** Provides one bounded, lock-free `crossbeam_queue::ArrayQueue<FrameToken>` per worker for frame retain/release commands, plus a partition directory for ownership and address resolution. Each token contains a UMEM group ID and UMEM-local frame index; the queue-only retain command uses the high bit of the UMEM ID. It does not transport packet batches.
 
 ## 3. Pipeline Construction (`PipelineFactory`)
 
@@ -25,7 +25,7 @@ Wabrix is a run-to-completion (RTC) userspace networking engine built on AF_XDP,
 ## 4. Data Plane (`PipelineRunner`)
 
 * **Run-to-completion:** A worker runs its pipelines with configured CPU affinity. Source nodes produce packet batches, which the runner routes through the DAG. Nodes process or drop packets in those batches.
-* **Frame lifecycle:** Free stashes and PDUs carry frame tokens (partition ID plus partition-relative offset). AF_XDP rings carry UMEM-relative byte addresses. Same-owner drops and TX completions normally return directly through the local registry; foreign-owner returns use SystemBus.
+* **Frame lifecycle:** Free stashes and SystemBus carry `FrameToken` values (UMEM group ID plus UMEM-local frame index). PDUs carry the UMEM group ID and derive the frame index from the descriptor address. AF_XDP rings carry UMEM-relative byte addresses. Same-owner drops and TX completions normally return directly through the local registry; foreign-owner returns use SystemBus.
 * **Synchronization:** The registry is worker-local and frame-return queues are lock-free, but socket ring handles use mutex wrappers. The entire packet path is not lock-free.
 * **Control dispatch:** The runner polls its control queue at control/timer polling boundaries and dispatches events to matching nodes. Node identities and control metadata remain available at runtime.
 

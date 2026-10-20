@@ -15,9 +15,7 @@ use crate::toml_parser::{PartitionRequest, WorkerBuilderConfig};
 use crate::xscrubber_skel::XscrubberSkel;
 use crate::xsocket::{XSocket, XSocketRx, XSocketTx, XdpSocketConfig};
 use crate::{BatchRx, BatchTx};
-use wabrix_base::frame_registry::{
-    resolve_frame_token, FrameRegistry, MAX_PARTITIONS, MAX_PARTITION_FRAMES, MAX_UMEM,
-};
+use wabrix_base::frame_registry::{FrameRegistry, FrameToken, MAX_PARTITIONS, MAX_UMEM};
 use wabrix_base::system::PlatformData;
 use wabrix_base::telemetry::TelemetryRegistry;
 use wabrix_base::{ControlEvent, RuntimeUmemConfig, SystemBus, UmemPartition};
@@ -64,9 +62,9 @@ impl SystemBuilder {
             control_senders: Vec::new(),
         });
         // 1. Initialize return queues for the System Bus.
-        // One ArrayQueue<u32> per worker; senders push packed u32 commands, the owning worker pops them.
+        // One FrameToken queue per worker; the high UMEM-ID bit marks retain commands.
         let mut bus_senders = Vec::new();
-        let mut bus_receivers: Vec<Option<Arc<ArrayQueue<u32>>>> = Vec::new();
+        let mut bus_receivers: Vec<Option<Arc<ArrayQueue<FrameToken>>>> = Vec::new();
 
         for _ in 0..self.workers.len() {
             let queue = Arc::new(ArrayQueue::new(RETURN_QUEUE_CAPACITY));
@@ -128,19 +126,16 @@ impl SystemBuilder {
                 let end_idx = start_idx + (partition_req.count as u32 * partition_size);
 
                 if next_partition_id >= MAX_PARTITIONS {
-                    return Err("partition count exceeds the 8-bit frame-token capacity".into());
+                    return Err("partition count exceeds the registry partition limit".into());
                 }
-                let local_start = start_idx - umem_conf.group_start_frame_idx;
-                let local_end = end_idx - umem_conf.group_start_frame_idx;
-                let partition_len = local_end
-                    .checked_sub(local_start)
-                    .ok_or_else(|| format!("Worker {}: partition range is inverted", worker_id))?;
-                if partition_len > MAX_PARTITION_FRAMES {
-                    return Err(format!(
-                        "Worker {}: partition has {} frames, maximum is {}",
-                        worker_id, partition_len, MAX_PARTITION_FRAMES
-                    )
-                    .into());
+                let local_start = start_idx
+                    .checked_sub(umem_conf.group_start_frame_idx)
+                    .ok_or_else(|| format!("Worker {}: partition starts before UMEM", worker_id))?;
+                let local_end = end_idx
+                    .checked_sub(umem_conf.group_start_frame_idx)
+                    .ok_or_else(|| format!("Worker {}: partition ends before UMEM", worker_id))?;
+                if local_end < local_start {
+                    return Err(format!("Worker {}: partition range is inverted", worker_id).into());
                 }
 
                 let partition = UmemPartition {
@@ -286,20 +281,13 @@ impl SystemBuilder {
                     if let Some(registry) =
                         wabrix_system.frame_registries[config.worker_id].as_mut()
                     {
-                        let mut frame_tokens = vec![0u32; umem_conf.fq_size as usize];
+                        let mut frame_tokens =
+                            vec![FrameToken::new(group_id as u32, 0); umem_conf.fq_size as usize];
                         let allocated = registry.allocate_batch_into(group_id, &mut frame_tokens);
 
                         for &frame_token in &frame_tokens[..allocated] {
-                            if let Some(resolved) =
-                                resolve_frame_token(frame_token, &system_bus.partition_directory)
-                            {
-                                initial_addrs.push(umem_descs[resolved.local_idx as usize].addr());
-                            } else {
-                                warn!(
-                                    "Skipping invalid initial fill token {} for UMEM {}",
-                                    frame_token, group_id
-                                );
-                            }
+                            initial_addrs
+                                .push(umem_descs[frame_token.frame_index() as usize].addr());
                         }
                     }
                 }
@@ -576,8 +564,6 @@ impl crate::pipeline::XSocketRxTxProvider for XSocketRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wabrix_base::frame_registry::decode_frame_token;
-
     // Helper to create test SystemBus and configs
     fn create_test_bus_and_configs() -> (Arc<SystemBus>, Vec<Option<Arc<RuntimeUmemConfig>>>) {
         let queue = Arc::new(ArrayQueue::new(64));
@@ -650,17 +636,11 @@ mod tests {
         configure_test_bus(&mut bus, &[partition0, partition1], &configs);
 
         let frame0 = bus.resolve_local_frame_idx(0, 511).unwrap();
-        assert_eq!(
-            decode_frame_token(frame0.frame_token),
-            (partition0.partition_id, 511)
-        );
+        assert_eq!(frame0.frame_token, FrameToken::new(0, 511));
         assert_eq!(frame0.worker_id, partition0.worker_id);
 
         let frame1 = bus.resolve_local_frame_idx(0, 512).unwrap();
-        assert_eq!(
-            decode_frame_token(frame1.frame_token),
-            (partition1.partition_id, 0)
-        );
+        assert_eq!(frame1.frame_token, FrameToken::new(0, 512));
         assert_eq!(frame1.worker_id, partition1.worker_id);
 
         assert!(bus.resolve_local_frame_idx(0, 1024).is_none());
@@ -689,15 +669,11 @@ mod tests {
 
         assert_eq!(registry.total_free_frames(), 100);
 
-        // All frames should decode to umem_id 0
+        // All frames should identify UMEM 0 directly.
         let frames = registry.allocate_batch(0, 100);
         assert_eq!(frames.len(), 100);
         for &f in &frames {
-            assert_eq!(
-                decode_frame_token(f).0,
-                0,
-                "frame {f:#010x} must belong to UMEM 0"
-            );
+            assert_eq!(f.umem_id(), 0, "frame {f} must belong to UMEM 0");
         }
     }
 
@@ -765,26 +741,18 @@ mod tests {
 
         assert_eq!(registry.total_free_frames(), 6144);
 
-        // All frames from UMEM 0 must decode to umem_id 0
+        // All frames from UMEM 0 carry that group ID.
         let frames0 = registry.allocate_batch(0, 4096);
         assert_eq!(frames0.len(), 4096);
         for &f in &frames0 {
-            assert_eq!(
-                decode_frame_token(f).0,
-                0,
-                "frame {f:#010x} must belong to UMEM 0"
-            );
+            assert_eq!(f.umem_id(), 0, "frame {f} must belong to UMEM 0");
         }
 
-        // All frames from UMEM 1 must decode to umem_id 1
+        // All frames from UMEM 1 carry that group ID.
         let frames1 = registry.allocate_batch(1, 2048);
         assert_eq!(frames1.len(), 2048);
         for &f in &frames1 {
-            assert_eq!(
-                decode_frame_token(f).0,
-                1,
-                "frame {f:#010x} must belong to UMEM 1"
-            );
+            assert_eq!(f.umem_id(), 1, "frame {f} must belong to UMEM 1");
         }
     }
 
@@ -838,26 +806,18 @@ mod tests {
             configs,
         );
 
-        // Allocate 10 frames from UMEM 0 — must all decode to umem_id 0
+        // Allocate 10 frames from UMEM 0.
         let frames = registry.allocate_batch(0, 10);
         assert_eq!(frames.len(), 10);
         for &f in &frames {
-            assert_eq!(
-                decode_frame_token(f).0,
-                0,
-                "frame {f:#010x} must be from UMEM 0"
-            );
+            assert_eq!(f.umem_id(), 0, "frame {f} must be from UMEM 0");
         }
 
-        // Allocate 5 frames from UMEM 1 — must all decode to umem_id 1
+        // Allocate 5 frames from UMEM 1.
         let frames = registry.allocate_batch(1, 5);
         assert_eq!(frames.len(), 5);
         for &f in &frames {
-            assert_eq!(
-                decode_frame_token(f).0,
-                1,
-                "frame {f:#010x} must be from UMEM 1"
-            );
+            assert_eq!(f.umem_id(), 1, "frame {f} must be from UMEM 1");
         }
 
         assert_eq!(registry.total_free_frames(), 185); // 200 - 15
@@ -930,11 +890,11 @@ mod tests {
 
         assert_eq!(registry.total_free_frames(), 1024);
 
-        // All 1024 frames must decode to umem_id 0
+        // All 1024 frames belong to UMEM 0.
         let frames = registry.allocate_batch(0, 1024);
         assert_eq!(frames.len(), 1024);
         for &f in &frames {
-            assert_eq!(decode_frame_token(f).0, 0);
+            assert_eq!(f.umem_id(), 0);
         }
     }
 
@@ -991,17 +951,15 @@ mod tests {
 
         assert_eq!(registry.total_free_frames(), 512);
 
-        // Frame tokens carry partition-relative offsets; resolve them to verify
-        // their UMEM-local indices are in [512, 1024).
+        // Frame tokens carry UMEM-local indices directly.
         let frames = registry.allocate_batch(0, 512);
         assert_eq!(frames.len(), 512);
         for &frame_token in &frames {
-            let resolved = resolve_frame_token(frame_token, &bus.partition_directory).unwrap();
-            assert_eq!(resolved.umem_group_id, 0);
+            assert_eq!(frame_token.umem_id(), 0);
             assert!(
-                (512..1024).contains(&resolved.local_idx),
+                (512..1024).contains(&frame_token.frame_index()),
                 "local_idx {} must be in [512, 1024)",
-                resolved.local_idx
+                frame_token.frame_index()
             );
         }
     }

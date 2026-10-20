@@ -49,12 +49,12 @@ There is **no `ipblower` crate in this workspace.** In-tree traffic generation i
 
 | File | Contains |
 |---|---|
-| `wabrix_base/src/lib.rs` | `RuntimeUmemConfig`, `UmemPartition`, `SystemBus` (bit-packed return queues), `Directive`, `Node` trait, `NodeId`, `ControlEvent` |
-| `wabrix_base/src/frame_registry.rs` | `FrameRegistry`, `PartitionData`, thread-local `WORKER_FRAME_REGISTRY`, encode/decode helpers (`CMD_BIT`, `is_retain`, `decode_frame_token`) |
+| `wabrix_base/src/lib.rs` | `RuntimeUmemConfig`, `UmemPartition`, `SystemBus` (`FrameToken` return queues), `Directive`, `Node` trait, `NodeId`, `ControlEvent` |
+| `wabrix_base/src/frame_registry.rs` | `FrameToken`, `FrameRegistry`, `PartitionData`, thread-local `WORKER_FRAME_REGISTRY` |
 | `wabrix_base/src/mailbox.rs` | UMEM control-block / mailbox frame math for WASM plugin instances |
 | `wabrix_base/src/node_instance_id.rs` | Node instance identity types |
 | `wabrix_base/src/system.rs` | Platform detection, TSC/`rdtsc` helpers, NIC stat probing, IRQ/CPU-affinity and system-readiness checks |
-| `wabrix_base/src/interface/pdu.rs` | `Pdu` (packet descriptor carrying a frame token + UMEM pointer) |
+| `wabrix_base/src/interface/pdu.rs` | `Pdu` (packet descriptor carrying UMEM group ID + UMEM pointer; host derives frame index from descriptor address) |
 | `wabrix_base/src/interface/batch.rs` | `Batch` (fixed-capacity burst container, zero-alloc on hot path) |
 | `wabrix_base/src/telemetry.rs` | Lock-free metric counters, `TMLiveStats`, telemetry spawners |
 | `wabrix_lib/src/xsocket.rs` | `XSocket`, `XSocketRx`, `XSocketTx`, `XdpSocketConfig` |
@@ -146,9 +146,9 @@ Standard Rust ergonomics apply. Heap allocations, `anyhow`/`thiserror` for error
 > Full details: `docs/` and `wabrix/src/architecture.md` (if present).
 
 * **UMEM:** A contiguous `mmap`'d region shared by multiple AF_XDP sockets. Divided into fixed-size frames (e.g., 2048 B). Multiple UMEM groups can coexist (one per NUMA domain or per NIC).
-* **FrameRegistry (thread-local):** Each worker owns a `FrameRegistry` stored in thread-local storage (`WORKER_FRAME_REGISTRY`). It holds a `registry_map: Vec<Option<PartitionData>>` (one entry per UMEM group) and a `return_queue` (`Arc<ArrayQueue<u32>>`) for receiving frames returned by other workers.
-* **SystemBus:** Connects all workers. One `Arc<ArrayQueue<u32>>` slot per worker (`bus_senders`) and a partition-ID-indexed directory of canonical `UmemPartition` values. Frame commands are bit-packed: `bit 31 = command (0=Release, 1=Retain)`, `bits 30-23 = partition_id`, `bits 22-0 = partition-relative offset`. Helpers live in `frame_registry` (`CMD_BIT`, `is_retain`, `decode_frame_token`).
-* **Frame token vs UMEM-local frame index:** The frame token packs a partition ID and partition-relative offset; the direct directory resolves it to the owning worker, UMEM group, and UMEM-local index. The kernel rings use UMEM-local addresses, and `XSocketRx`/`XSocketTx` translate at the boundary.
+* **FrameRegistry (thread-local):** Each worker owns a `FrameRegistry` stored in thread-local storage (`WORKER_FRAME_REGISTRY`). It holds a `registry_map: Vec<Option<PartitionData>>` (one entry per UMEM group) and a `return_queue` (`Arc<ArrayQueue<FrameToken>>`) for receiving frames returned by other workers.
+* **SystemBus:** Connects all workers. One `Arc<ArrayQueue<FrameToken>>` slot per worker (`bus_senders`), a partition-ID-indexed directory of canonical `UmemPartition` values, and reverse maps from UMEM-local indices to partitions. A `FrameToken` is `{ umem_id: u32, frame_index: u32 }`; for queue commands only, the high bit of `umem_id` marks retain (clear means release). The command bit is cleared before registry operations.
+* **Frame token vs UMEM-local frame index:** A frame token directly identifies a UMEM group and its UMEM-local frame index. The partition directory resolves it to the owning worker and partition metadata. The kernel rings use UMEM-local addresses, and `XSocketRx`/`XSocketTx` translate at the boundary.
 * **XSocket split:** Each `XSocket` is split into `XSocketRx` (owns RX + Fill rings, accesses FrameRegistry via TLS) and `XSocketTx` (owns TX + Completion rings, returns frames via SystemBus only — never touches the registry directly).
 * **Pipeline DAG:** Workers run a sequence of nodes implementing the `Node` trait. Each node's `process(&mut self, batch: &mut Batch) -> Directive` mutates the batch in place (run-to-completion) and returns a `Directive` (`Next(NodeId)`, `Split(Vec<(NodeId, Batch)>)`, or `Stop`) telling the scheduler where the batch goes next. Nodes may also opt into `poll_timers` and `handle_control_event`. A `Batch` is a fixed-capacity burst container passed between nodes without allocation.
 

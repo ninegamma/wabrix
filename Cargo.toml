@@ -47,7 +47,9 @@ libbpf-cargo = "0.27.0"
 
 [patch.crates-io]
 libxdp-sys = { git = "https://github.com/ninegamma/libxdp-sys.git", branch = "ninegamma" }
-#xsk-core = { path= "../xsk-core" }
+
+[patch."https://github.com/ninegamma/xsk-core.git"]
+xsk-core = { path = "../xsk-core" }
 
 [patch."https://github.com/ninegamma/wabrix_api.git"]
 wabrix_api = { path = "../wabrix_api/wabrix_api"}
