@@ -55,7 +55,7 @@ src_ip = "10.10.10.222"
 
 [pipelines.nodes.hot_node_data]
 generation_limit = "500M"
-generation_rate = "16500K"
+generation_rate = "17000K"
 
 [[pipelines.nodes]]
 id = "tx_f0np0"

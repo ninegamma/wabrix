@@ -4,25 +4,28 @@
 
 Wabrix is an ultra-high-performance network data plane that combines **Linux AF_XDP** (kernel bypass) with **WebAssembly (Wasm)** sandboxing. It allows you to build, deploy, and execute custom network security logic at 25 Gbps+ line rates with zero CPU-copy overhead.
 
-Designed for environments where standard firewalls fail—such as proprietary IoT networks, ultra-low latency financial gateways, and IT/OT converged infrastructure—Wabrix provides the deterministic speed of hardware appliances with the agility of dynamic software plugins.
+Designed for environments where standard firewalls fail—such as proprietary IoT networks and IT/OT converged infrastructure—Wabrix provides the deterministic speed of hardware appliances with the agility of dynamic software plugins.
 
 ---
 
-## 🚀 Performance Metrics
+## 🚀 Performance Metrics (Intel© Core™ i7-14700K)
 
-* **Throughput:** Capable of 25 Gbps+ on standard COTS hardware.
+* **TX Performance**: Generates **22 Mpps/core** time-stamped UDP packets using the WebAssembly generator engine
+* **RX Performance**: Evaluates **17 Mpps/core** time-stamped UDP packets using the WebAssembly inspector engine
 * **Stateful Inspection:** High-speed, wire-speed tracking of millions of concurrent connection states (L4/L7) with a minimal, deterministic memory footprint.
-* **Efficiency:** Demonstrated setup and release of more than **1 million TCP connections/second per performance CPU core** (Intel© Core™ i7-14700K).
+* **Efficiency:** Demonstrated setup and release of more than **1 million TCP connections/second per performance CPU core**.
 * **Latency:** Deterministic, microsecond-level processing for time-sensitive industrial control loops and high-frequency trading (HFT).
 
 Wabrix's TOML configuration lets deployments tune the tradeoff between
 throughput and latency. This supports both low-latency applications and
 workloads that require extreme throughput per core while avoiding long latency tails.
 
-### 16 Mpps/core latency distribution of 500 million UDP packets
+### 17 Mpps/core latency distribution of 500 million UDP packets
 
-In [`gen_engine_1w.toml`](wabrix/examples/gen_engine_1w.toml), the generator is
-configured for 16 Mpps of UDP traffic on worker core 2. Packets leave one port
+This example ([`gen_engine_1w.toml`](wabrix/examples/gen_engine_1w.toml)) is tuned for high throughput using batch sizes of 512 packets. Nevertheless, the 99% percentile limit is still at 100 microseconds and the 99.9% percentile at 150 microseconds.
+
+The generator is
+configured for 17 Mpps of UDP traffic on worker core 2. Packets leave one port
 of the Intel E830VDA2 NIC, cross a DAC to its other port, and reach the
 single-core inspector on worker core 3 for latency measurement. The run is using NAPI busy polling,
 i.e., no extra cores for softirq interrupts.
@@ -35,17 +38,17 @@ flowchart LR
   parser["FastParserNode"]
   inspect["Inspector node<br/>worker core 3<br/>measures packet latency"]
 
-  gen -->|"UDP · 16 Mpps"| tx
+  gen -->|"UDP · 17 Mpps"| tx
   tx -->|"DAC"| rx
   rx --> parser --> inspect
 ```
 
-The histogram below shows the latency distribution across a 500 million packet
+The histogram below shows the latency distribution at 17 Mpps across a 500 million packet
 sample. Each bucket spans 10 microseconds, and the logarithmic vertical axis
 makes the exponentially decreasing low-frequency tail visible alongside the concentration in the
-lower-latency buckets. **There is zero packet loss and no long tail.**
+lower-latency buckets. **There is zero packet loss and no long tail.** (See also [Latency 16 Mpps.png](Latency%2016%20Mpps.png).)
 
-![Latency distribution across 500 million packets](Latency%202026-10-12%2014-43-06.png)
+![Latency distribution across 500 million packets](Latency%2017%20Mpps.png)
 
 
 ## 🏗️ Architecture
@@ -165,15 +168,17 @@ Wabrix follows an **Open-Core** model:
 
 * **Wabrix Core (Open Source):** The high-speed execution engine, TOML parser, and XDP socket management are freely available under the AGPLv3 license.
 
-* **NineGamma Enterprise (In Development):** Wabrix is an evolving solo-project. My mid-term commercial roadmap focuses on advanced plugins for **Deep-Packet Inspection (especially for proprietary/custom protocols), specialized threat mitigation, and enterprise orchestration tools.**
+* **NineGamma Enterprise (In Development):** Wabrix is an evolving solo-project. 
+My mid-term commercial roadmap focuses on advanced plugins for **Deep-Packet Inspection (especially for proprietary/custom protocols), 
+specialized threat mitigation, and enterprise orchestration tools.**
 
 **Design Partners Wanted**
-Rather than building these enterprise features in a vacuum, I am currently looking for **1-2 exclusive Design Partners** to sponsor priority development and shape the immediate roadmap. If your organization has a specific high-performance use case (like filtering a proprietary IoT protocol or requiring microsecond latency for financial trading edges), reach out to discuss a collaboration.
+Rather than building these enterprise features in a vacuum, I am currently looking for **1-2 exclusive Design Partners** to sponsor priority development 
+and shape the immediate roadmap. If your organization has a specific high-performance use case (like filtering a proprietary IoT protocol), reach out to discuss a collaboration.
 
 ## 💡 Primary Use Cases
 
 * **Bring-Your-Own-Protocol (BYOP) Parsing:** Drop-in support for proprietary, in-house, or legacy industrial protocols (IoT/Automotive/Manufacturing). Write a 50-line Rust parser, compile it to Wasm, and filter your custom UDP/TCP traffic at 25 Gbps without waiting for vendor firmware updates.
-* **Ultra-Low Latency Financial Gateways:** Traditional firewalls are too slow for high-frequency trading (HFT) environments. Wabrix parses FIX and proprietary trading protocols in microseconds using kernel-bypass, securing trading edges without introducing jitter.
 * **Line-Rate Volumetric Mitigation:** Dynamically deploy Wasm-based heuristics to silently drop 20+ Gbps of malicious DDoS traffic on standard COTS servers before it overwhelms sensitive control systems.
 
 ## 🤝 Contributing

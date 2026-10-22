@@ -3147,6 +3147,7 @@ dependencies = [
 [[package]]
 name = "wabrix_api"
 version = "0.5.1"
+source = "git+https://github.com/ninegamma/wabrix_api.git?branch=main#41bb44907c6f475dab65f1c12fac9506b87c3283"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -4016,6 +4017,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 [[package]]
 name = "xsk-core"
 version = "0.2.2"
+source = "git+https://github.com/ninegamma/xsk-core.git?branch=main#794a96de6987cf283a8a3e9cc359268dbe3a40ca"
 dependencies = [
  "bitflags 2.13.1",
  "cfg-if",

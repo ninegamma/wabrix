@@ -1,3 +1,5 @@
+* test more multi-worker and multi-queue examples
+* implement flow direction
 * implement the bypass logic: e.g
 ```toml
   [[pipelines]]
