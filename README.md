@@ -2,9 +2,36 @@
 
 **The programmable, zero-copy data plane for custom network security and line-rate protocol parsing.**
 
-Wabrix is an ultra-high-performance network data plane that combines **Linux AF_XDP** (kernel bypass) with **WebAssembly (Wasm)** sandboxing. It allows you to build, deploy, and execute custom network security logic at 25 Gbps+ line rates with zero CPU-copy overhead.
+Wabrix is an ultra-high-performance network data plane that combines **Linux AF_XDP** (kernel bypass) with **WebAssembly (Wasm)** sandboxing. It allows you to build, deploy, and execute custom network security logic at 25-100 Gbps+ line rates with zero CPU-copy overhead.
 
 Designed for environments where standard firewalls fail—such as proprietary IoT networks and IT/OT converged infrastructure—Wabrix provides the deterministic speed of hardware appliances with the agility of dynamic software plugins.
+
+### Main Features
+
+* **Ultra-High Performance via AF_XDP:** Achieves DPDK-like line-rate performance (up to 22 Mpps TX and 17 Mpps RX per core) using standard Linux drivers, preserving kernel control over power states and hardware.
+
+
+* **Zero-Copy WebAssembly Integration:** Maps the AF_XDP UMEM directly into the Wasm linear memory space, allowing Wasm plugins to process raw packet data in-place without `memcpy` CPU overhead.
+
+
+* **Zero-Downtime Hot-Reloading:** Deploys and updates custom network security logic directly on the fast path using Wasmtime, requiring no system reboots or dropped connections.
+
+
+* **Stateful L4/L7 Inspection:** Tracks millions of concurrent connection states at wire-speed, demonstrating the setup and release of over 1 million TCP connections per second per core.
+
+
+* **Deterministic Microsecond Latency:** Designed for industrial control loops, maintaining a 99th percentile latency of 100 microseconds at 17 Mpps with zero packet loss.
+
+
+* **Programmable DAG Pipelines:** Defines network routing and security logic through a declarative, TOML-based Directed Acyclic Graph (DAG) configuration.
+
+
+* **Scalable Shared-Nothing Architecture:** Operates with a run-to-completion model across multiple cores, supporting multiple UMEMs and concurrent virtual and physical interfaces.
+
+
+* **Native Telemetry & Monitoring:** Exposes real-time runtime diagnostics via Prometheus metrics endpoints, complete with integrated Grafana dashboards.
+
+
 
 ---
 
