@@ -5,8 +5,8 @@ ifaces= [
     #{ name = "enp2s0f1np1", rxd = 8096, txd = 8096, irq_core = 5 } ,
 ]
 umem= [
-    { id = 0, frame_size = 2048, frame_count = 301056, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 1 },
-    { id = 1, frame_size = 2048, frame_count = 301056, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 1 },
+    { id = 0, frame_size = 2048, frame_count = 262144, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 1 },
+    { id = 1, frame_size = 2048, frame_count = 262144, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 1 },
 ]
 
 # Optional XSK fields:
@@ -55,7 +55,7 @@ src_ip = "10.10.10.222"
 
 [pipelines.nodes.hot_node_data]
 generation_limit = "500M"
-generation_rate = "17000K"
+generation_rate = "15000K"
 
 [[pipelines.nodes]]
 id = "tx_f0np0"
@@ -106,8 +106,9 @@ routes = ["drop", "drop"]
 #routes = ["tx_f1np1", "drop"]
 # Node-level state override
 desired_state = "Running"
-args= { umem = "1", wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/inspector_engine.wasm" }
-hot_args= {}
+args= { umem = "1" }
+hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/inspector_engine.wasm" }
+#hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/inspector_engine_new.wasm" }
 
 [pipelines.nodes.node_data]
 src_ip = "10.10.10.31"

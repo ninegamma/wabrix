@@ -43,12 +43,11 @@ pub struct XdpSocketConfig {
 
 pub struct XSocket {
     umem: Arc<Umem>,
-    // Shared Rings are wrapped in Arc<Mutex<>> to allow sharing across threads/managers
-    // rings are only shared between sockets bound to the same interface and queue
-    // maybe later we implement different XSockets for the case of shared and unshared fq/cq rings
+    // Fill/completion rings may be shared across sockets, so they use Arc<Mutex<>>.
+    // The RX queue is uniquely owned by the RX half after split.
     fill_queue: Arc<Mutex<FillQueue>>,
     comp_queue: Arc<Mutex<CompQueue>>,
-    pub(crate) rx_queue: Arc<Mutex<RxQueue>>,
+    pub(crate) rx_queue: RxQueue,
     pub(crate) tx_queue: Arc<Mutex<TxQueue>>,
     fd: RawFd,
     // Note: frame_registry removed - will be managed at worker level
@@ -70,11 +69,12 @@ pub struct XSocketRx {
     umem: Arc<Umem>,
     rx_metadata_enabled: bool,
     fill_queue: Arc<Mutex<FillQueue>>,
-    rx_queue: Arc<Mutex<RxQueue>>,
+    rx_queue: RxQueue,
     // THE ANCHOR: Keeps the TX side alive even if the TX node is never built
     _tx_queue_keepalive: Arc<Mutex<TxQueue>>,
     _comp_queue_keepalive: Arc<Mutex<CompQueue>>,
     bus: Arc<SystemBus>,
+    frame_owner_lookup: FrameOwnerLookup,
     config: Arc<XdpSocketConfig>,
     scratch_addrs: Vec<u64>,
     scratch_descriptors_recv_batch: Vec<FrameDesc>,
@@ -136,8 +136,6 @@ pub struct XSocketTx {
     comp_descs_helper: Vec<u64>,
     comp_queue: Arc<Mutex<CompQueue>>,
     tx_queue: Arc<Mutex<TxQueue>>,
-    // THE ANCHOR: Keeps the RX side alive even if the RX node is never built
-    _rx_queue_keepalive: Arc<Mutex<RxQueue>>,
     _fill_queue_keepalive: Arc<Mutex<FillQueue>>,
     bus: Arc<SystemBus>,
     config: Arc<XdpSocketConfig>,
@@ -245,7 +243,7 @@ impl XSocket {
         let fd = rx_q.fd().as_raw_fd();
         let xdp_fm = Self {
             umem,
-            rx_queue: Arc::new(Mutex::new(rx_q)),
+            rx_queue: rx_q,
             tx_queue: Arc::new(Mutex::new(tx_q)),
             fill_queue: fq.clone(),
             comp_queue: cq.clone(),
@@ -442,8 +440,7 @@ impl XSocket {
     }
 
     pub fn xdp_rx_statistics(&self) -> std::io::Result<XdpStatistics> {
-        let rx_guard = self.rx_queue.lock();
-        rx_guard.fd().xdp_statistics()
+        self.rx_queue.fd().xdp_statistics()
     }
 
     /// Split this XSocket into separate RX and TX components
@@ -479,10 +476,13 @@ impl XSocket {
             umem: self.umem.clone(),
             rx_metadata_enabled: self.config.rx_timestamp,
             fill_queue: self.fill_queue.clone(),
-            rx_queue: self.rx_queue.clone(),
+            rx_queue: self.rx_queue,
             _tx_queue_keepalive: self.tx_queue.clone(),
             _comp_queue_keepalive: self.comp_queue.clone(),
             bus: self.bus.clone(),
+            frame_owner_lookup: self
+                .bus
+                .frame_owner_lookup(self.config.umem_config.group_id),
             config: self.config.clone(),
             scratch_addrs: vec![0; MAX_FILL],
             scratch_descriptors_recv_batch: vec![FrameDesc::default(); MAX_FILL],
@@ -543,7 +543,6 @@ impl XSocket {
             comp_descs_helper: vec![0; 4 * MAX_BATCH_SIZE],
             comp_queue: self.comp_queue,
             tx_queue: self.tx_queue,
-            _rx_queue_keepalive: self.rx_queue,
             _fill_queue_keepalive: self.fill_queue,
             bus: self.bus,
             config: self.config,
@@ -563,7 +562,7 @@ use separator::Separatable;
 use wabrix_api::MAX_BATCH_SIZE;
 use wabrix_base::frame_registry::{get_tsc_frequency, get_worker_frame_registry, FrameToken};
 use wabrix_base::system::{rdtsc_us, try_get_tsc_frequency};
-use wabrix_base::{RuntimeUmemConfig, SystemBus};
+use wabrix_base::{FrameOwnerLookup, RuntimeUmemConfig, SystemBus};
 
 impl XSocketRx {
     /// Rebind this half to the worker that takes ownership of it.
@@ -1016,10 +1015,11 @@ impl BatchRx for XSocketRx {
 
         // USING PRE-ALLOCATED STRUCT BUFFER
         // We slice into the buffer we already own. Zero memory allocation, zero memset overhead!
-        // Lock the queue. It is uncontended, so it takes ~15 cycles.
-        let mut rx_guard = self.rx_queue.lock();
-        let mut rcvd =
-            unsafe { rx_guard.consume(&mut self.scratch_descriptors_recv_batch[..max_to_pull]) };
+        // This RX ring has a single owner, so consume it directly without a mutex.
+        let mut rcvd = unsafe {
+            self.rx_queue
+                .consume(&mut self.scratch_descriptors_recv_batch[..max_to_pull])
+        };
 
         #[cfg(feature = "profiling")]
         let t2 = unsafe { core::arch::x86_64::_rdtsc() };
@@ -1045,7 +1045,8 @@ impl BatchRx for XSocketRx {
                 // Yield this tiny micro-window to the CPU pipeline
                 core::hint::spin_loop();
                 rcvd = unsafe {
-                    rx_guard.consume(&mut self.scratch_descriptors_recv_batch[..max_to_pull])
+                    self.rx_queue
+                        .consume(&mut self.scratch_descriptors_recv_batch[..max_to_pull])
                 };
             }
 
@@ -1063,7 +1064,7 @@ impl BatchRx for XSocketRx {
                 // descriptors, so this records the RX backlog delivered by NAPI.
                 #[cfg(feature = "profiling")]
                 {
-                    let available_after_poll = rx_guard.nb_avail_exact() as usize;
+                    let available_after_poll = self.rx_queue.nb_avail_exact() as usize;
                     self.napi_poll_available_descriptors += available_after_poll as u64;
                     if available_after_poll > 0 {
                         self.napi_poll_available_samples += 1;
@@ -1073,7 +1074,8 @@ impl BatchRx for XSocketRx {
                 }
 
                 let newly_received = unsafe {
-                    rx_guard.consume(&mut self.scratch_descriptors_recv_batch[rcvd..max_to_pull])
+                    self.rx_queue
+                        .consume(&mut self.scratch_descriptors_recv_batch[rcvd..max_to_pull])
                 };
 
                 #[cfg(feature = "profiling")]
@@ -1117,7 +1119,7 @@ impl BatchRx for XSocketRx {
                     if fq_needs_wakeup {
                         self.wakeup_rx_queue()?;
                         rcvd = unsafe {
-                            rx_guard
+                            self.rx_queue
                                 .consume(&mut self.scratch_descriptors_recv_batch[..max_to_pull])
                         };
                     }
@@ -1205,8 +1207,6 @@ impl BatchRx for XSocketRx {
             self.empty_spins = 0;
         }
         // The RX ring is no longer accessed after the consume/wakeup stage.
-        // Release its lock before periodic diagnostics query the socket stats.
-        drop(rx_guard);
         // ⏱️ END STAGE 3
 
         self.total_received += rcvd;
@@ -1253,10 +1253,7 @@ impl BatchRx for XSocketRx {
         let received = self.total_received as u64;
         if received >= self.last_diagnostic_received + 10_000_000 {
             self.last_diagnostic_received = received;
-            let xdp_stats = {
-                let rx_guard = self.rx_queue.lock();
-                rx_guard.fd().xdp_statistics()
-            };
+            let xdp_stats = self.rx_queue.fd().xdp_statistics();
             match xdp_stats {
                 Ok(stats) => log::debug!(
                     "{}: RX diagnostics: received={}, produced={}, deficit={}, max_deficit={}, replenish_attempts={}, lock_busy={}, no_frames={}, ring_full={}, zero_produced={}, partial_submissions={}, xdp_dropped={}, xdp_invalid_descs={}, xdp_rx_ring_full={}, xdp_fill_ring_empty={}",
@@ -1308,12 +1305,17 @@ impl BatchRx for XSocketRx {
         let frame_size_log2 = self.config.umem_config.frame_size_log2;
         let bus_ptr = &*self.bus as *const _;
         let umem_group_id = self.config.umem_config.group_id;
+        // A shared receive timestamp per batch avoids one TSC read per descriptor.
+        let receive_tsc = unsafe { core::arch::x86_64::_rdtsc() };
 
         // This guarantees zero bounds-checking overhead
         let received_descriptors = &self.scratch_descriptors_recv_batch[..rcvd];
         for desc in received_descriptors {
             let local_idx = (desc.addr() as u32) >> frame_size_log2; // local_idx is wrt. current Umem
-            let Some(resolved_frame) = self.bus.resolve_local_frame_idx(umem_group_id, local_idx) else {
+            let Some(frame_owner) = self
+                .frame_owner_lookup
+                .worker_for_local_frame_idx(local_idx)
+            else {
                 log::warn!(
                     "receive_into_batch: no frame token for UMEM {}, local frame {}",
                     umem_group_id,
@@ -1325,7 +1327,7 @@ impl BatchRx for XSocketRx {
             // this frame. The initial Fill Queue may contain frames supplied
             // by another worker, and frames returned through the shared bus
             // retain their original partition ownership.
-            let frame_owner = resolved_frame.worker_id as u8;
+            let frame_owner = frame_owner as u8;
 
             let mut pdu = Pdu::new(
                 *desc,
@@ -1353,7 +1355,7 @@ impl BatchRx for XSocketRx {
             pdu.w.set_rx_timestamp(hardware_timestamp);
             // Keep the existing host-TSC timestamp for latency calculations;
             // hardware RX time is exposed separately through rx_timestamp().
-            pdu.w.set_timestamp(unsafe { core::arch::x86_64::_rdtsc() });
+            pdu.w.set_timestamp(receive_tsc);
 
             // Since we ALREADY calculated max_to_pull to guarantee capacity,
             // we can confidently unwrap/ignore the error branch.
@@ -1802,12 +1804,11 @@ impl XSocketTx {
 impl Drop for XSocketRx {
     fn drop(&mut self) {
         log::debug!(
-            "RUST DROP: XSocketRx (Queue {}) dropping after {} receive calls. Refs remaining -> FQ: {}, CQ: {}, RX: {}, TX: {}",
+            "RUST DROP: XSocketRx (Queue {}) dropping after {} receive calls. Refs remaining -> FQ: {}, CQ: {}, TX: {}",
             self.config.queue_id,
             self.receive_calls,
             Arc::strong_count(&self.fill_queue),
             Arc::strong_count(&self._comp_queue_keepalive),
-            Arc::strong_count(&self.rx_queue),
             Arc::strong_count(&self._tx_queue_keepalive)
         );
     }
@@ -1816,11 +1817,10 @@ impl Drop for XSocketRx {
 impl Drop for XSocketTx {
     fn drop(&mut self) {
         log::debug!(
-            "RUST DROP: XSocketTx (Queue {}) dropping. Refs remaining -> FQ: {}, CQ: {}, RX: {}, TX: {}",
+            "RUST DROP: XSocketTx (Queue {}) dropping. Refs remaining -> FQ: {}, CQ: {}, TX: {}",
             self.config.queue_id,
             Arc::strong_count(&self._fill_queue_keepalive),
             Arc::strong_count(&self.comp_queue),
-            Arc::strong_count(&self._rx_queue_keepalive),
             Arc::strong_count(&self.tx_queue)
         );
     }

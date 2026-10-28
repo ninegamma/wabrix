@@ -11,6 +11,69 @@ use wabrix_base::telemetry::TelemetryRegistry;
 use wabrix_base::ControlEvent;
 use xsk_core::Umem;
 
+/// Capture the CPUs available to an ordinary, unpinned thread before any
+/// packet worker applies its per-thread CPU affinity.
+#[cfg(all(feature = "wasm", target_os = "linux"))]
+fn generic_thread_cpu_affinity() -> anyhow::Result<(Vec<usize>, usize)> {
+    let mut mask_size = std::mem::size_of::<libc::cpu_set_t>();
+
+    // Linux can be built with a CPU mask larger than libc's fixed cpu_set_t.
+    // Grow the buffer when the kernel reports that the initial mask is too small.
+    loop {
+        let word_size = std::mem::size_of::<libc::c_ulong>();
+        let word_count = mask_size.div_ceil(word_size);
+        let mut mask = vec![0 as libc::c_ulong; word_count];
+        let actual_mask_size = mask.len() * word_size;
+        let result = unsafe {
+            libc::sched_getaffinity(
+                0,
+                actual_mask_size,
+                mask.as_mut_ptr().cast::<libc::cpu_set_t>(),
+            )
+        };
+
+        if result == 0 {
+            let cpus = mask
+                .iter()
+                .enumerate()
+                .flat_map(|(word_index, word)| {
+                    (0..libc::c_ulong::BITS as usize).filter_map(move |bit| {
+                        (word & (1 << bit) != 0)
+                            .then_some(word_index * libc::c_ulong::BITS as usize + bit)
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            if cpus.is_empty() {
+                anyhow::bail!("the current thread has no CPUs available in its affinity mask");
+            }
+
+            return Ok((cpus, actual_mask_size));
+        }
+
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::EINVAL) && mask_size < 1024 * 1024 {
+            mask_size *= 2;
+            continue;
+        }
+
+        return Err(error).map_err(Into::into);
+    }
+}
+
+#[cfg(all(feature = "wasm", not(target_os = "linux")))]
+fn generic_thread_cpu_affinity() -> anyhow::Result<(Vec<usize>, usize)> {
+    let cpus = core_affinity::get_core_ids()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|core| core.id)
+        .collect::<Vec<_>>();
+    if cpus.is_empty() {
+        anyhow::bail!("could not determine CPUs available to generic threads");
+    }
+    Ok((cpus, 0))
+}
+
 pub struct WabrixSystem {
     pub(crate) xsocket_registry: XSocketRegistry,
     /// Indexed by worker_id (0..num_workers).
@@ -36,6 +99,17 @@ impl WabrixSystem {
         workers_completed: Arc<AtomicUsize>,
         is_one_shot: bool, // ipblower's one-shot mode
     ) -> anyhow::Result<Vec<JoinHandle<Result<Vec<PipelineStats>, String>>>> {
+        // Capture the controller thread's allowed CPUs before worker threads
+        // pin themselves to isolated packet-processing cores. Background Wasm
+        // work restores this mask so the OS can schedule it like generic work.
+        #[cfg(feature = "wasm")]
+        let generic_cpu_affinity = generic_thread_cpu_affinity()?;
+        #[cfg(feature = "wasm")]
+        info!(
+            "CPUs allowed for Wasm housekeeping/background threads: {:?}",
+            generic_cpu_affinity.0
+        );
+
         // --- SPAWN WORKER THREADS ---
 
         info!("Spawning pipeline worker threads...");
@@ -76,6 +150,8 @@ impl WabrixSystem {
                     is_one_shot,
                     control_rx: worker_control_rx,
                     control_senders: worker_control_senders,
+                    #[cfg(feature = "wasm")]
+                    generic_cpu_affinity: generic_cpu_affinity.clone(),
                 },
             );
 

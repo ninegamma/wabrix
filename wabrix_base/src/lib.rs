@@ -67,6 +67,50 @@ pub struct UmemPartitionMap {
     partition_ids: Vec<Option<u8>>,
 }
 
+/// Immutable per-socket cache for resolving an UMEM-local frame to its owner.
+/// Entries correspond to logical partition slots, keeping the cache small
+/// even when a UMEM contains many frames.
+#[derive(Debug, Clone, Default)]
+pub struct FrameOwnerLookup {
+    partition_size: u32,
+    partition_size_shift: u32,
+    partition_size_is_power_of_two: bool,
+    partition_size_reciprocal: u64,
+    slots: Vec<Option<FramePartitionOwner>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FramePartitionOwner {
+    local_start: u32,
+    local_end: u32,
+    worker_id: usize,
+}
+
+impl FrameOwnerLookup {
+    /// Resolves a frame to its owning worker, returning `None` for gaps and
+    /// indices outside the configured UMEM.
+    #[inline]
+    pub fn worker_for_local_frame_idx(&self, local_idx: u32) -> Option<usize> {
+        if self.partition_size == 0 {
+            return None;
+        }
+
+        let slot = if self.partition_size_is_power_of_two {
+            (local_idx >> self.partition_size_shift) as usize
+        } else {
+            // The floored reciprocal underestimates the quotient by at most
+            // one for a u32 dividend; correct it to preserve exact division.
+            let quotient = ((u64::from(local_idx) * self.partition_size_reciprocal) >> 32) as u32;
+            let remainder = local_idx - quotient * self.partition_size;
+            (quotient + u32::from(remainder >= self.partition_size)) as usize
+        };
+
+        let partition = self.slots.get(slot)?.as_ref()?;
+        (local_idx >= partition.local_start && local_idx < partition.local_end)
+            .then_some(partition.worker_id)
+    }
+}
+
 /// Token and owning worker resolved from a UMEM group and local frame index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedLocalFrame {
@@ -173,6 +217,40 @@ impl SystemBus {
         }
 
         maps
+    }
+
+    /// Builds the compact ownership lookup used by an RX socket for every
+    /// received descriptor. Partition configuration is immutable after setup.
+    pub fn frame_owner_lookup(&self, umem_group_id: usize) -> FrameOwnerLookup {
+        let Some(map) = self.frame_partition_maps.get(umem_group_id) else {
+            return FrameOwnerLookup::default();
+        };
+        if map.partition_size == 0 {
+            return FrameOwnerLookup::default();
+        }
+
+        let slots = map
+            .partition_ids
+            .iter()
+            .map(|partition_id| {
+                let partition_id = (*partition_id)? as usize;
+                let partition = self.partition_directory.get(partition_id)?.as_ref()?;
+                Some(FramePartitionOwner {
+                    local_start: partition.local_start,
+                    local_end: partition.local_end,
+                    worker_id: partition.worker_id,
+                })
+            })
+            .collect();
+
+        FrameOwnerLookup {
+            partition_size: map.partition_size,
+            partition_size_shift: map.partition_size.trailing_zeros(),
+            partition_size_is_power_of_two: map.partition_size.is_power_of_two(),
+            partition_size_reciprocal: (u64::from(u32::MAX) + 1)
+                / u64::from(map.partition_size),
+            slots,
+        }
     }
 
     /// Resolves a UMEM-local frame index to its frame token and owning worker.

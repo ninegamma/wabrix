@@ -1,5 +1,6 @@
 use crate::wasm_engine;
 use dashmap::DashMap;
+use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -376,33 +377,47 @@ impl WasmManager {
     }
 
     /// Retrieves a compiled component from in-memory cache, disk cache, or compiles from source.
-    /// Compiled artifacts are stored in /tmp/wabrix-wasm-cache/ keyed by filename + mtime,
-    /// so repeated dataplane restarts skip the Cranelift compilation step entirely.
+    /// Compiled artifacts are cached by source content, so replacing a component at
+    /// the same path cannot accidentally reuse the previous version.
     pub fn get_component(&self, path: &str) -> Result<Component> {
         use dashmap::mapref::entry::Entry;
 
-        match self.cache.entry(path.to_string()) {
+        let bytes = std::fs::read(path).map_err(|e| {
+            wasmtime::Error::msg(format!("failed to read Wasm component {path}: {e}"))
+        })?;
+        let content_hash = Sha256::digest(&bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let cache_key = format!("{path}:{content_hash}");
+
+        match self.cache.entry(cache_key) {
             Entry::Occupied(entry) => {
                 // Another thread already compiled it. Return the cached Arc.
                 Ok(entry.get().clone())
             }
             Entry::Vacant(entry) => {
                 // We are the first thread! Compile or load from disk.
-                let component = Self::load_or_compile(&self.engine, path)?;
+                let component = Self::load_or_compile(&self.engine, path, &bytes, &content_hash)?;
                 entry.insert(component.clone());
                 Ok(component)
             }
         }
     }
 
-    fn load_or_compile(engine: &Engine, wasm_path: &str) -> Result<Component> {
-        if let Some(cache_path) = Self::disk_cache_path(wasm_path) {
+    fn load_or_compile(
+        engine: &Engine,
+        wasm_path: &str,
+        bytes: &[u8],
+        content_hash: &str,
+    ) -> Result<Component> {
+        if let Some(cache_path) = Self::disk_cache_path(wasm_path, content_hash) {
             if cache_path.exists() {
                 // SAFETY: These files are written exclusively by Component::serialize() below,
                 // from WASM files under our own control on the same machine.
                 match unsafe { Component::deserialize_file(engine, &cache_path) } {
                     Ok(component) => {
-                        log::info!("Loaded WASM from disk cache: {}", wasm_path);
+                        log::debug!("Loaded WASM from disk cache: {}", wasm_path);
                         return Ok(component);
                     }
                     Err(e) => {
@@ -416,7 +431,7 @@ impl WasmManager {
                 "Compiling WASM component (this may take a few seconds): {}",
                 wasm_path
             );
-            let component = Component::from_file(engine, wasm_path)?;
+            let component = Component::from_binary(engine, bytes)?;
 
             let dir = cache_path
                 .parent()
@@ -436,24 +451,15 @@ impl WasmManager {
             Ok(component)
         } else {
             // No cache path derivable (unusual path) — compile directly
-            Component::from_file(engine, wasm_path)
+            Component::from_binary(engine, bytes)
         }
     }
 
-    /// Derives a disk cache path for a given .wasm file.
-    /// The modification time of the source file is embedded in the name so that
-    /// rebuilding the WASM automatically invalidates the cache.
-    fn disk_cache_path(wasm_path: &str) -> Option<std::path::PathBuf> {
-        let mtime = std::fs::metadata(wasm_path)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-
+    /// Derives a disk cache path from the component filename and its contents.
+    fn disk_cache_path(wasm_path: &str, content_hash: &str) -> Option<std::path::PathBuf> {
         let stem = std::path::Path::new(wasm_path).file_stem()?.to_str()?;
         let cache_dir = std::path::Path::new("/tmp/wabrix-wasm-cache");
-        Some(cache_dir.join(format!("{}-{}.cwasm", stem, mtime)))
+        Some(cache_dir.join(format!("{}-{}.cwasm", stem, content_hash)))
     }
 
     pub fn engine(&self) -> &Engine {

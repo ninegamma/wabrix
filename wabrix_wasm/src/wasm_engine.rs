@@ -1,8 +1,11 @@
 use crate::wasm_manager::{MyHostState, WasmManager};
+use crate::wasm_reloader::WasmReloadSpec;
 use core::mem::size_of;
 use std::collections::HashMap;
 use std::mem::MaybeUninit;
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use wabrix_api::tcp_common::EngineTimerPlan;
 use wabrix_api::{
     BatchMetadata, MAX_BATCH_SIZE, TIMER_KIND_NONE, TIMER_KIND_SYN, TIMER_KIND_TIMEOUT,
@@ -40,10 +43,16 @@ use self::exports::wabrix::plugins::packet_engine::TelemetryMetric;
 
 pub struct WasmEngine {
     id: NodeId,
+    pipeline_name: String,
+    worker_id: usize,
+    worker_index: usize,
+    tsc_frequency: u64,
+    manager: Arc<WasmManager>,
+    wasm_file_path: String,
+    base_node_data: HashMap<String, String>,
+    hot_node_data: HashMap<String, String>,
     /// Wasmtime state: Store holds the UMEM handle via MyHostState
-    store: Store<MyHostState>,
-    /// The generated bindings struct (named after the 'world' in CamelCase)
-    bindings: EnginePlugin,
+    runtime: WasmRuntime,
     /// Index corresponds to the Route ID returned by Wasm
     routing_table: Vec<NodeId>,
     /// Control event receiver channel
@@ -62,7 +71,40 @@ pub struct WasmEngine {
     /// Set permanently true after WASM returns a malformed response.
     /// All further WASM calls are skipped to prevent SIGSEGV from bad UMEM writes.
     poisoned: bool,
-    timer_diagnostics: TimerDiagnostics,
+    timer_diagnostics: FinalTimerDiagnostics,
+}
+
+pub(crate) struct WasmRuntime {
+    store: Store<MyHostState>,
+    bindings: EnginePlugin,
+}
+
+struct FinalTimerDiagnostics {
+    node_id: NodeId,
+    diagnostics: TimerDiagnostics,
+    report_on_drop: bool,
+}
+
+impl Deref for FinalTimerDiagnostics {
+    type Target = TimerDiagnostics;
+
+    fn deref(&self) -> &Self::Target {
+        &self.diagnostics
+    }
+}
+
+impl DerefMut for FinalTimerDiagnostics {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.diagnostics
+    }
+}
+
+impl Drop for FinalTimerDiagnostics {
+    fn drop(&mut self) {
+        if self.report_on_drop {
+            self.diagnostics.report_final(&self.node_id);
+        }
+    }
 }
 
 impl WasmEngine {
@@ -72,12 +114,14 @@ impl WasmEngine {
         pipeline_name: String,
         worker_id: usize,
         worker_index: usize,
-        manager: &WasmManager,
+        manager: Arc<WasmManager>,
         wasm_file_path: &str,
         routing_table: Vec<NodeId>, // Accept any number of routes
         telemetry_metrics: TelemetryMetrics,
         umem_id: u8,
         node_data: HashMap<String, String>,
+        base_node_data: HashMap<String, String>,
+        hot_node_data: HashMap<String, String>,
         platform_data: &PlatformData,
         mailbox_offset: u32,
     ) -> Result<Self, String> {
@@ -85,7 +129,7 @@ impl WasmEngine {
             &node_data,
             &routing_table,
             platform_data.tsc_frequency,
-            pipeline_name,
+            pipeline_name.clone(),
             worker_id,
             worker_index,
         );
@@ -95,6 +139,11 @@ impl WasmEngine {
         let component = manager
             .get_component(wasm_file_path)
             .map_err(|e| format!("Failed to load Wasm component '{}': {}", wasm_file_path, e))?;
+        log::debug!(
+            "NODE {}: Wasm component is ready; instantiating {}",
+            id,
+            wasm_file_path
+        );
 
         // 2. Build an instance-specific handle with a private linear mapping
         //    and an alias of the complete shared UMEM.
@@ -133,40 +182,57 @@ impl WasmEngine {
                     wasm_file_path, e
                 )
             })?;
+        log::debug!(
+            "NODE {}: Wasm instance created; calling init-data for {}",
+            id,
+            wasm_file_path
+        );
 
-        if !node_data.is_empty() {
-            let data: Vec<(String, String)> = node_data.into_iter().collect();
-            let init_result = bindings.wabrix_plugins_packet_engine().call_init_data(
-                &mut store,
-                &data,
-                platform_data.tsc_frequency,
-            );
+        let data: Vec<(String, String)> = node_data.into_iter().collect();
+        let init_result = bindings.wabrix_plugins_packet_engine().call_init_data(
+            &mut store,
+            &data,
+            platform_data.tsc_frequency,
+        );
+        log::debug!("NODE {}: init-data returned for {}", id, wasm_file_path);
 
-            match init_result {
-                Ok(true) => {
-                    // Plugin accepted the configuration and initialized successfully
-                }
-                Ok(false) => {
-                    // Plugin rejected the configuration due to missing or invalid data
-                    return Err(format!(
-                        "WasmEngine node {} rejected initialization data. Verify TOML parameters.",
-                        id
-                    ));
-                }
-                Err(e) => {
-                    // Wasm runtime encountered a trap or fatal execution error during init
-                    return Err(format!(
-                        "WasmEngine node {} crashed during init-data execution: {}",
-                        id, e
-                    ));
-                }
+        match init_result {
+            Ok(true) => {
+                // Plugin accepted the configuration and initialized successfully
+            }
+            Ok(false) => {
+                // Plugin rejected the configuration due to missing or invalid data
+                return Err(format!(
+                    "WasmEngine node {} rejected initialization data. Verify TOML parameters.",
+                    id
+                ));
+            }
+            Err(e) => {
+                // Wasm runtime encountered a trap or fatal execution error during init
+                return Err(format!(
+                    "WasmEngine node {} crashed during init-data execution: {}",
+                    id, e
+                ));
             }
         }
 
+        let final_timer_diagnostics = FinalTimerDiagnostics {
+            node_id: id.clone(),
+            diagnostics: timer_diagnostics,
+            report_on_drop: true,
+        };
+
         Ok(Self {
             id,
-            store,
-            bindings,
+            pipeline_name,
+            worker_id,
+            worker_index,
+            tsc_frequency: platform_data.tsc_frequency,
+            manager,
+            wasm_file_path: wasm_file_path.to_string(),
+            base_node_data,
+            hot_node_data,
+            runtime: WasmRuntime { store, bindings },
             routing_table,
             processed_packets: 0,
             #[cfg(feature = "profiling")]
@@ -176,8 +242,104 @@ impl WasmEngine {
             mailbox_offset,
             umem_id,
             poisoned: false,
-            timer_diagnostics,
+            timer_diagnostics: final_timer_diagnostics,
         })
+    }
+
+    pub(crate) fn reload_spec(&self) -> WasmReloadSpec {
+        WasmReloadSpec {
+            id: self.id.clone(),
+            pipeline_name: self.pipeline_name.clone(),
+            worker_id: self.worker_id,
+            worker_index: self.worker_index,
+            tsc_frequency: self.tsc_frequency,
+            manager: self.manager.clone(),
+            base_node_data: self.base_node_data.clone(),
+            routing_table: self.routing_table.clone(),
+            telemetry_metrics: self.telemetry_metrics.clone(),
+            umem_id: self.umem_id,
+            mailbox_offset: self.mailbox_offset,
+        }
+    }
+
+    /// Installs only runtime-owned state; graph and node accounting remain with this node.
+    pub(crate) fn install_candidate(&mut self, mut candidate: WasmEngine) -> WasmRuntime {
+        std::mem::swap(&mut self.runtime, &mut candidate.runtime);
+        self.poisoned = false;
+        self.wasm_file_path = candidate.wasm_file_path;
+        self.hot_node_data = candidate.hot_node_data;
+        candidate.runtime
+    }
+
+    /// Transfer plugin-owned state at the runner boundary, immediately before activation.
+    /// The old runtime is not called again until this operation and the subsequent swap finish.
+    pub(crate) fn transfer_state_to_candidate(
+        &mut self,
+        candidate: &mut WasmEngine,
+    ) -> Result<(), String> {
+        let state = tokio::task::block_in_place(|| {
+            self.runtime
+                .bindings
+                .wabrix_plugins_packet_engine()
+                .call_save_state(&mut self.runtime.store)
+        })
+        .map_err(|error| format!("old plugin trapped while saving state: {error}"))?
+        .map_err(|error| format!("old plugin could not save state: {error}"))?;
+
+        tokio::task::block_in_place(|| {
+            candidate
+                .runtime
+                .bindings
+                .wabrix_plugins_packet_engine()
+                .call_restore_state(&mut candidate.runtime.store, &state)
+        })
+        .map_err(|error| format!("replacement plugin trapped while restoring state: {error}"))?
+        .map_err(|error| format!("replacement plugin rejected state: {error}"))
+    }
+
+    /// Extracts a staged runtime so its destruction can happen on the reaper thread.
+    pub(crate) fn into_runtime(self) -> WasmRuntime {
+        self.runtime
+    }
+
+    pub(crate) fn send_plugin_control_event(&mut self, event: &ControlEvent) -> ControlEventResult {
+        let handled = tokio::task::block_in_place(|| {
+            self.runtime
+                .bindings
+                .wabrix_plugins_packet_engine()
+                .call_on_control_event(&mut self.runtime.store, event.opcode, &event.payload)
+        });
+        match handled {
+            Ok(true) => ControlEventResult::Handled,
+            Ok(false) | Err(_) if matches!(event.opcode, 1 | 2 | 3 | 255) => {
+                ControlEventResult::InvalidPayload
+            }
+            Ok(false) | Err(_) => ControlEventResult::Unsupported,
+        }
+    }
+
+    pub(crate) fn is_poisoned(&self) -> bool {
+        self.poisoned
+    }
+
+    pub(crate) fn node_id(&self) -> &NodeId {
+        &self.id
+    }
+
+    pub(crate) fn wasm_file_path(&self) -> &str {
+        &self.wasm_file_path
+    }
+
+    pub(crate) fn hot_node_data(&self) -> &HashMap<String, String> {
+        &self.hot_node_data
+    }
+
+    pub(crate) fn set_hot_node_data(&mut self, hot_node_data: HashMap<String, String>) {
+        self.hot_node_data = hot_node_data;
+    }
+
+    pub(crate) fn suppress_final_diagnostics(&mut self) {
+        self.timer_diagnostics.report_on_drop = false;
     }
 
     fn store_oob_telemetry(&self, metrics: Vec<TelemetryMetric>) {
@@ -229,7 +391,7 @@ impl WasmEngine {
         // this instance's mailbox slice is exclusively owned by this thread
         // during the entire call window (write before call, read after return).
         let mailbox_ptr: *mut HostBatch = {
-            let base = self.store.data().umem.linear_base();
+            let base = self.runtime.store.data().umem.linear_base();
             // SAFETY: mailbox_offset is within this instance's private linear
             // memory mapping, which the host created before instantiation.
             unsafe { (base as *mut u8).add(self.mailbox_offset as usize) as *mut HostBatch }
@@ -256,10 +418,11 @@ impl WasmEngine {
             }
         }
         let status = self
+            .runtime
             .bindings
             .wabrix_plugins_packet_engine()
             .call_process_batch(
-                &mut self.store,
+                &mut self.runtime.store,
                 len as u32,
                 self.umem_offset,
                 self.mailbox_offset,
@@ -303,9 +466,10 @@ impl WasmEngine {
                 flag.store(false, Ordering::Relaxed);
             }
             let out_of_band_stats = self
+                .runtime
                 .bindings
                 .wabrix_plugins_packet_engine()
-                .call_get_telemetry(&mut self.store)
+                .call_get_telemetry(&mut self.runtime.store)
                 .unwrap_or_else(|e| {
                     log::error!("Failed to call get-telemetry on packet-engine: {}", e);
                     vec![]
@@ -468,9 +632,10 @@ impl Node for WasmEngine {
         // profiling are applied consistently to both the idle and packet-producing paths.
         let directive = {
             let timer_plan = match self
+                .runtime
                 .bindings
                 .wabrix_plugins_packet_engine()
-                .call_process_timers(&mut self.store, current_tsc)
+                .call_process_timers(&mut self.runtime.store, current_tsc)
             {
                 Ok(plan) => plan,
                 Err(err) => {
@@ -502,9 +667,10 @@ impl Node for WasmEngine {
                         flag.store(false, Ordering::Relaxed);
                     }
                     let oob = self
+                        .runtime
                         .bindings
                         .wabrix_plugins_packet_engine()
-                        .call_get_telemetry(&mut self.store)
+                        .call_get_telemetry(&mut self.runtime.store)
                         .unwrap_or_default();
                     if !oob.is_empty() {
                         self.store_oob_telemetry(oob);
@@ -632,19 +798,8 @@ impl Node for WasmEngine {
         if self.poisoned {
             return ControlEventResult::Unsupported;
         }
-        // We only get here if the PipelineRunner already verified the wildcard matched us!
-        let handled = tokio::task::block_in_place(|| {
-            self.bindings
-                .wabrix_plugins_packet_engine()
-                .call_on_control_event(&mut self.store, event.opcode, &event.payload)
-        });
-        match handled {
-            Ok(true) => ControlEventResult::Handled,
-            Ok(false) | Err(_) if matches!(event.opcode, 1 | 2 | 3 | 255) => {
-                ControlEventResult::InvalidPayload
-            }
-            Ok(false) | Err(_) => ControlEventResult::Unsupported,
-        }
+        // Host-side Wasm updates are intercepted by PipelineRunner's reload controller.
+        self.send_plugin_control_event(event)
     }
 
     fn processed_packets(&self) -> u64 {
@@ -654,11 +809,5 @@ impl Node for WasmEngine {
     #[cfg(feature = "profiling")]
     fn profiling_cycles(&self) -> u64 {
         self.total_cycles
-    }
-}
-
-impl Drop for WasmEngine {
-    fn drop(&mut self) {
-        self.timer_diagnostics.report_final(&self.id);
     }
 }

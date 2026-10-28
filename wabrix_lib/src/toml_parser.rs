@@ -99,6 +99,37 @@ fn default_umem_configs() -> Vec<UmemConfig> {
     }]
 }
 
+fn default_hugepage_size_bytes() -> Result<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo")
+        .map_err(|error| anyhow!("could not read /proc/meminfo for HugeTLB page size: {error}"))?;
+    meminfo
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name != "Hugepagesize" {
+                return None;
+            }
+
+            let mut fields = value.split_whitespace();
+            let size_kib = fields.next()?.parse::<u64>().ok()?;
+            if fields.next()? != "kB" {
+                return None;
+            }
+            size_kib.checked_mul(1024)
+        })
+        .filter(|size| *size > 0)
+        .ok_or_else(|| anyhow!("could not parse Hugepagesize from /proc/meminfo"))
+}
+
+fn gcd_u64(mut left: u64, mut right: u64) -> u64 {
+    while right != 0 {
+        let remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    left
+}
+
 fn default_xsk_mappings() -> Vec<XskMapping> {
     vec![XskMapping {
         iface: "lo".to_string(),
@@ -768,6 +799,7 @@ impl WabricksConfig {
         }
 
         // 2. Validate UMEM configurations
+        let hugepage_size_bytes = default_hugepage_size_bytes()?;
         let mut umem_ids = HashSet::new();
         for umem_cfg in &section.umem {
             // UMEM group IDs index fixed-capacity runtime tables.
@@ -836,6 +868,26 @@ impl WabricksConfig {
                     umem_cfg.id,
                     umem_cfg.frame_count,
                     umem_cfg.partitions
+                ));
+            }
+
+            let umem_size_bytes =
+                u64::from(umem_cfg.frame_count) * u64::from(umem_cfg.frame_size);
+            if umem_size_bytes % hugepage_size_bytes != 0 {
+                let frame_count_alignment = hugepage_size_bytes
+                    / gcd_u64(hugepage_size_bytes, u64::from(umem_cfg.frame_size));
+                let next_aligned_frame_count =
+                    u64::from(umem_cfg.frame_count).div_ceil(frame_count_alignment)
+                        * frame_count_alignment;
+                return Err(anyhow!(
+                    "UMEM {}: frame_count ({}) × frame_size ({}) = {} bytes is not aligned to the system HugeTLB page size ({} bytes). With HugeTLB allocation, frame_count must be a multiple of {} for this frame_size; next aligned count is {}.",
+                    umem_cfg.id,
+                    umem_cfg.frame_count,
+                    umem_cfg.frame_size,
+                    umem_size_bytes,
+                    hugepage_size_bytes,
+                    frame_count_alignment,
+                    next_aligned_frame_count
                 ));
             }
         }
@@ -2334,7 +2386,7 @@ mod tests {
                 { name = "lo", rxd = 2048, txd = 2048 }
             ]
             umem = [
-                { id = 0, frame_size = 2048, frame_count = 65392, fq_size = 1024, cq_size = 1024, head_room = 128 }
+                { id = 0, frame_size = 2048, frame_count = 65536, fq_size = 1024, cq_size = 1024, head_room = 128 }
             ]
             xsk = [
                 { iface = "lo", queues = [0, 1], umem = 0, rxq_size = 1024, txq_size = 1024, zerocopy = true }
@@ -2740,8 +2792,8 @@ mod tests {
                 {{ name = "lo", rxd = 2048, txd = 2048 }}
             ]
             umem = [
-                {{ id = 0, frame_size = 2048, frame_count = 65392, fq_size = 1024, cq_size = 1024, head_room = 128 }},
-                {{ id = 1, frame_size = 2048, frame_count = 65392, fq_size = 1024, cq_size = 1024, head_room = 128 }}
+                {{ id = 0, frame_size = 2048, frame_count = 65536, fq_size = 1024, cq_size = 1024, head_room = 128 }},
+                {{ id = 1, frame_size = 2048, frame_count = 65536, fq_size = 1024, cq_size = 1024, head_room = 128 }}
             ]
             xsk = [
                 {{ iface = "lo", queues = [0], umem = 0, rxq_size = 1024, txq_size = 1024, zerocopy = true }}
@@ -2840,7 +2892,7 @@ mod tests {
         [[wabrix.umem]]
         id = 0
         frame_size = 2048
-        frame_count = 65392
+        frame_count = 65536
         fq_size = 512
         cq_size = 512
         head_room = 128
@@ -2849,7 +2901,7 @@ mod tests {
         [[wabrix.umem]]
         id = 1
         frame_size = 2048
-        frame_count = 65392
+        frame_count = 65536
         fq_size = 512
         cq_size = 512
         head_room = 128

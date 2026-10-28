@@ -16,6 +16,20 @@ fn supports_hot_node_data(node_type: &str) -> bool {
     matches!(node_type, "TcpNode" | "WasmEngine")
 }
 
+fn args_equal_except_wasm_path(
+    current: &HashMap<String, String>,
+    target: &HashMap<String, String>,
+) -> bool {
+    current
+        .iter()
+        .filter(|(key, _)| key.as_str() != "wasm_file_path")
+        .all(|(key, value)| target.get(key) == Some(value))
+        && target
+            .iter()
+            .filter(|(key, _)| key.as_str() != "wasm_file_path")
+            .all(|(key, value)| current.get(key) == Some(value))
+}
+
 pub enum ReconciliationResult {
     FullRestart,
     LiveUpdated(Vec<Arc<ControlEvent>>),
@@ -77,9 +91,17 @@ pub fn reconcile_config(
                 return ReconciliationResult::FullRestart;
             }
 
-            // Static arguments trigger a full restart if modified
+            let mut diff_updates = WasmHashMap::new();
+
+            // A WasmEngine artifact path is an executable update and is staged
+            // on the workers. Other argument changes still require rebuilding
+            // the node graph and therefore a full restart.
             if current_node.args != target_node.args {
-                return ReconciliationResult::FullRestart;
+                if target_node.node_type != "WasmEngine"
+                    || !args_equal_except_wasm_path(&current_node.args, &target_node.args)
+                {
+                    return ReconciliationResult::FullRestart;
+                }
             }
 
             // Startup data is consumed during construction and cannot be
@@ -109,6 +131,25 @@ pub fn reconcile_config(
             // Detect changes in RCU-backed declarative state
             if current_node.hot_args != target_node.hot_args {
                 requires_rcu_update = true;
+                if target_node.node_type == "WasmEngine"
+                    && current_node.effective_arg("wasm_file_path")
+                        != target_node.effective_arg("wasm_file_path")
+                {
+                    let Some(path) = target_node.effective_arg("wasm_file_path") else {
+                        return ReconciliationResult::FullRestart;
+                    };
+                    diff_updates.insert("wasm_file_path".to_string(), path.clone());
+                }
+            }
+
+            if target_node.node_type == "WasmEngine"
+                && current_node.effective_arg("wasm_file_path")
+                    != target_node.effective_arg("wasm_file_path")
+            {
+                let Some(path) = target_node.effective_arg("wasm_file_path") else {
+                    return ReconciliationResult::FullRestart;
+                };
+                diff_updates.insert("wasm_file_path".to_string(), path.clone());
             }
 
             // Detect changes in Wasm plugin runtime parameters and generate imperative events
@@ -118,8 +159,6 @@ pub fn reconcile_config(
                 }
                 let current_map = current_node.hot_node_data.as_ref().unwrap_or(&empty_map);
                 let target_map = target_node.hot_node_data.as_ref().unwrap_or(&empty_map);
-
-                let mut diff_updates = WasmHashMap::new();
 
                 // Identify keys that were removed and mark them with an empty string tombstone
                 for key in current_map.keys() {
@@ -132,11 +171,12 @@ pub fn reconcile_config(
                 for (key, value) in target_map.iter() {
                     diff_updates.insert(key.clone(), value.clone());
                 }
+            }
 
+            if !diff_updates.is_empty() {
                 let payload = HotWasmPayload {
                     updates: diff_updates,
                 };
-
                 match to_allocvec(&payload) {
                     Ok(bytes) => {
                         let event = ControlEvent {
@@ -151,7 +191,7 @@ pub fn reconcile_config(
                     }
                     Err(e) => {
                         return ReconciliationResult::Error(format!(
-                            "Failed to serialize hot_node_data for node {}: {}",
+                            "Failed to serialize hot update for node {}: {}",
                             target_node.id, e
                         ));
                     }

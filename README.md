@@ -41,7 +41,7 @@ Designed for environments where standard firewalls fail—such as proprietary Io
 * **RX Performance**: Evaluates **17 Mpps/core** time-stamped UDP packets using the WebAssembly inspector engine
 * **Stateful Inspection:** High-speed, wire-speed tracking of millions of concurrent connection states (L4/L7) with a minimal, deterministic memory footprint.
 * **Efficiency:** Demonstrated setup and release of more than **1 million TCP connections/second per performance CPU core**.
-* **Latency:** Deterministic, microsecond-level processing for time-sensitive industrial control loops and high-frequency trading (HFT).
+* **Latency:** Deterministic, microsecond-level processing for time-sensitive industrial control loops.
 
 Wabrix's TOML configuration lets deployments tune the tradeoff between
 throughput and latency. This supports both low-latency applications and
@@ -87,6 +87,29 @@ Wabrix works by bypassing the standard Linux networking stack using a modern, ke
 2. **Zero-Copy Wasm:** The UMEM is mapped directly into the linear memory space of a WebAssembly runtime. Wasm plugins process the raw packet data in-place without `memcpy` operations.
 
 3. **Programmable Pipeline:** Network security logic is defined via TOML-based DAGs (Directed Acyclic Graphs), allowing for hot-reloading of security modules without system reboots.
+
+### Live Wasm policy updates
+
+For a live `WasmEngine` update, deploy the replacement component at a new path,
+change that node's `hot_args.wasm_file_path` in a target TOML file, then apply
+the file with the running CLI's `apply <file.toml>` command. For example, update
+`filter-v1.wasm` to `filter-v2.wasm` while leaving the node's routes and UMEM
+unchanged.
+
+Each worker compiles or loads and instantiates its replacement in the background.
+It keeps processing with the current component until the replacement has passed
+instantiation and `init-data`; then it switches between bursts and retires the
+old runtime asynchronously. The AF_XDP sockets and pipeline stay running, and
+packets already being processed finish on the old component. If staging fails,
+that worker keeps the old component active and logs the error. Workers activate
+independently, so a short rollout can have both component versions processing
+traffic while the remaining workers finish staging.
+
+This preserves network connections for stateless inspection and filtering logic.
+The current Wasm interface does not migrate plugin-owned session state, so a
+stateful TCP plugin should not be hot-reloaded while it owns live sessions.
+See [Wasm Component Hot Reloading](docs/wasm_hot_reload.md) for the full reload
+lifecycle, configuration behavior, and operational limits.
 
 ## 📦 Getting Started
 

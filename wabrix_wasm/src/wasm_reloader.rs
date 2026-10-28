@@ -1,0 +1,427 @@
+use crate::wasm_engine::{WasmEngine, WasmRuntime};
+use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError, TrySendError};
+use std::collections::HashMap;
+use wabrix_api::{HotWasmPayload, StandardOpcode};
+use wabrix_base::system::PlatformData;
+use wabrix_base::telemetry::TelemetryMetrics;
+use wabrix_base::{ControlEvent, ControlEventResult, Node, NodeId};
+
+/// CPU mask captured from an unpinned controller thread before workers start.
+#[derive(Clone)]
+struct BackgroundCpuAffinity {
+    allowed_cpus: Vec<usize>,
+    mask_size: usize,
+}
+
+/// Restore generic-thread scheduling before doing Wasm work, which otherwise
+/// inherits both the worker's single-core affinity and its real-time policy.
+fn configure_background_thread(affinity: Option<&BackgroundCpuAffinity>) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        // A thread spawned by a pinned FIFO worker inherits that worker's
+        // single-core affinity and may inherit its real-time policy. Widen its
+        // CPU mask first so lowering its priority cannot leave setup starved
+        // on the packet worker's core.
+        if let Some(affinity) = affinity {
+            let word_size = std::mem::size_of::<libc::c_ulong>();
+            let required_words = affinity
+                .allowed_cpus
+                .iter()
+                .max()
+                .map(|cpu| cpu / libc::c_ulong::BITS as usize + 1)
+                .unwrap_or(0);
+            let word_count = affinity.mask_size.div_ceil(word_size).max(required_words);
+            let mask_size = word_count * word_size;
+            let mut mask = vec![0 as libc::c_ulong; word_count];
+            for &cpu in &affinity.allowed_cpus {
+                let word = cpu / libc::c_ulong::BITS as usize;
+                let bit = cpu % libc::c_ulong::BITS as usize;
+                mask[word] |= (1 as libc::c_ulong) << bit;
+            }
+
+            let result = unsafe {
+                libc::sched_setaffinity(0, mask_size, mask.as_ptr().cast::<libc::cpu_set_t>())
+            };
+            if result != 0 {
+                return Err(format!(
+                    "could not restore generic CPU affinity: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+        }
+
+        let param = libc::sched_param { sched_priority: 0 };
+        let scheduling_result =
+            unsafe { libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_OTHER, &param) };
+        if scheduling_result != 0 {
+            return Err(format!(
+                "could not set generic SCHED_OTHER policy: {}",
+                std::io::Error::from_raw_os_error(scheduling_result)
+            ));
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    let _ = affinity;
+
+    Ok(())
+}
+
+/// Immutable inputs needed to build a replacement Wasm instance off the runner thread.
+/// It captures node identity, memory/runtime handles, and base configuration; each reload
+/// supplies its target module path and current hot node data separately.
+#[derive(Clone)]
+pub(crate) struct WasmReloadSpec {
+    pub(crate) id: NodeId,
+    pub(crate) pipeline_name: String,
+    pub(crate) worker_id: usize,
+    pub(crate) worker_index: usize,
+    pub(crate) tsc_frequency: u64,
+    pub(crate) manager: std::sync::Arc<crate::wasm_manager::WasmManager>,
+    pub(crate) base_node_data: HashMap<String, String>,
+    pub(crate) routing_table: Vec<NodeId>,
+    pub(crate) telemetry_metrics: TelemetryMetrics,
+    pub(crate) umem_id: u8,
+    pub(crate) mailbox_offset: u32,
+}
+
+impl WasmReloadSpec {
+    pub(crate) fn instantiate(
+        &self,
+        wasm_file_path: String,
+        hot_node_data: HashMap<String, String>,
+    ) -> Result<WasmEngine, String> {
+        let mut node_data = self.base_node_data.clone();
+        node_data.extend(hot_node_data.clone());
+        let platform_data = PlatformData {
+            tsc_frequency: self.tsc_frequency,
+        };
+
+        WasmEngine::new(
+            self.id.clone(),
+            self.pipeline_name.clone(),
+            self.worker_id,
+            self.worker_index,
+            self.manager.clone(),
+            &wasm_file_path,
+            self.routing_table.clone(),
+            self.telemetry_metrics.clone(),
+            self.umem_id,
+            node_data,
+            self.base_node_data.clone(),
+            hot_node_data,
+            &platform_data,
+            self.mailbox_offset,
+        )
+        .map(|mut candidate| {
+            // A staged candidate is temporary until the runner installs its runtime.
+            candidate.suppress_final_diagnostics();
+            candidate
+        })
+    }
+}
+
+/// One in-flight replacement tracked by the runner-owned reload controller.
+struct PendingWasmReload {
+    /// Index of the target node in the owning `PipelineRunner`'s node vector.
+    node_index: usize,
+    /// Receives the staged candidate or its error once background construction finishes.
+    ready: Receiver<Result<WasmEngine, String>>,
+}
+
+/// PipelineRunner-owned controller for staging, publishing, and retiring Wasm runtimes.
+/// It is only polled at the runner's existing timer/control boundary.
+#[derive(Default)]
+pub struct WasmReloadController {
+    /// Candidate builds still in progress, associated with their runner node slots.
+    pending: Vec<PendingWasmReload>,
+    /// Sends replaced runtimes to a background thread so Wasmtime teardown stays off-runner.
+    retire_tx: Option<Sender<WasmRuntime>>,
+    /// Old runtimes retained temporarily when the bounded reaper queue is full.
+    retired_runtimes: Vec<WasmRuntime>,
+    /// CPU mask for background work, captured before packet workers are pinned.
+    background_cpu_affinity: Option<std::sync::Arc<BackgroundCpuAffinity>>,
+}
+
+impl WasmReloadController {
+    /// Allows background Wasm work to use the CPUs available to generic threads.
+    pub fn set_background_cpu_affinity(&mut self, affinity: (Vec<usize>, usize)) {
+        self.background_cpu_affinity = Some(std::sync::Arc::new(BackgroundCpuAffinity {
+            allowed_cpus: affinity.0,
+            mask_size: affinity.1,
+        }));
+    }
+
+    #[inline]
+    pub fn has_work(&self) -> bool {
+        !self.pending.is_empty() || !self.retired_runtimes.is_empty()
+    }
+
+    /// Owns the host-side Wasm configuration protocol. The node handles only
+    /// plugin ABI calls; compilation and reload lifecycle are controlled here.
+    pub fn handle_control_event(
+        &mut self,
+        node_index: usize,
+        engine: &mut WasmEngine,
+        event: &ControlEvent,
+    ) -> ControlEventResult {
+        if engine.is_poisoned() {
+            return ControlEventResult::Unsupported;
+        }
+
+        if event.opcode != StandardOpcode::UpdateConfiguration as u32 {
+            return engine.send_plugin_control_event(event);
+        }
+
+        let Ok(payload) = postcard::from_bytes::<HotWasmPayload>(&event.payload) else {
+            return engine.send_plugin_control_event(event);
+        };
+        let wasm_file_path = payload.updates.get("wasm_file_path").cloned();
+        let mut plugin_updates = payload.updates;
+        plugin_updates.remove("wasm_file_path");
+
+        if let Some(path) = wasm_file_path {
+            if path.is_empty() {
+                return ControlEventResult::InvalidPayload;
+            }
+
+            let mut next_hot_node_data = engine.hot_node_data().clone();
+            for (key, value) in &plugin_updates {
+                if value.is_empty() {
+                    next_hot_node_data.remove(key);
+                } else {
+                    next_hot_node_data.insert(key.clone(), value.clone());
+                }
+            }
+
+            if let Err(error) = self.ensure_reaper(engine.node_id()) {
+                log::error!(
+                    "NODE {}: could not start Wasm runtime reaper: {}",
+                    engine.node_id(),
+                    error
+                );
+                return ControlEventResult::InvalidPayload;
+            }
+
+            log::info!(
+                "NODE {}: staging Wasm component {} (currently active: {})",
+                engine.node_id(),
+                path,
+                engine.wasm_file_path()
+            );
+
+            let (tx, rx) = bounded(1);
+            let spec = engine.reload_spec();
+            let staged_path = path.clone();
+            let staged_node_data = next_hot_node_data.clone();
+            let node_id = engine.node_id().clone();
+            let background_cpu_affinity = self.background_cpu_affinity.clone();
+            if let Err(error) = std::thread::Builder::new()
+                .name(format!("wasm-reload-{node_id}"))
+                .spawn(move || {
+                    let staged = configure_background_thread(background_cpu_affinity.as_deref())
+                        .and_then(|()| spec.instantiate(staged_path, staged_node_data));
+                    let _ = tx.send(staged);
+                })
+            {
+                log::error!(
+                    "NODE {}: could not start Wasm reload worker: {}",
+                    engine.node_id(),
+                    error
+                );
+                return ControlEventResult::InvalidPayload;
+            }
+
+            if let Some(pending) = self
+                .pending
+                .iter_mut()
+                .find(|pending| pending.node_index == node_index)
+            {
+                // Supersede an older candidate for this node. Its worker is detached;
+                // dropping the receiver makes it discard any eventual result.
+                pending.ready = rx;
+            } else {
+                self.pending.push(PendingWasmReload {
+                    node_index,
+                    ready: rx,
+                });
+            }
+            engine.set_hot_node_data(next_hot_node_data);
+
+            // Keep the active plugin in sync while the replacement is staging.
+            // The candidate receives these values through init-data.
+            if !plugin_updates.is_empty() {
+                let filtered_payload = HotWasmPayload {
+                    updates: plugin_updates,
+                };
+                if let Ok(bytes) = postcard::to_allocvec(&filtered_payload) {
+                    let filtered_event = ControlEvent {
+                        address_pattern: event.address_pattern.clone(),
+                        opcode: event.opcode,
+                        payload: bytes,
+                    };
+                    let _ = engine.send_plugin_control_event(&filtered_event);
+                }
+            }
+
+            return ControlEventResult::Handled;
+        }
+
+        // A data-only update remains a synchronous plugin control event. Keep the
+        // cached reload inputs in sync only when the plugin accepts the update.
+        let result = engine.send_plugin_control_event(event);
+        if matches!(result, ControlEventResult::Handled) {
+            let mut next_hot_node_data = engine.hot_node_data().clone();
+            for (key, value) in plugin_updates {
+                if value.is_empty() {
+                    next_hot_node_data.remove(&key);
+                } else {
+                    next_hot_node_data.insert(key, value);
+                }
+            }
+            engine.set_hot_node_data(next_hot_node_data);
+        }
+        result
+    }
+
+    /// Checks completed candidates only when the runner is already polling timers
+    /// and control events, never from the per-batch Wasm execution path.
+    pub fn poll_ready(&mut self, nodes: &mut [Box<dyn Node>]) {
+        self.flush_retired_runtimes();
+
+        let mut index = 0;
+        while index < self.pending.len() {
+            let result = match self.pending[index].ready.try_recv() {
+                Ok(result) => Some(result),
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => {
+                    let pending = self.pending.swap_remove(index);
+                    log::error!(
+                        "Wasm reload worker for node index {} exited without a result",
+                        pending.node_index
+                    );
+                    continue;
+                }
+            };
+
+            let Some(result) = result else {
+                index += 1;
+                continue;
+            };
+
+            let pending = self.pending.swap_remove(index);
+            let node_index = pending.node_index;
+            match result {
+                Ok(mut candidate) => {
+                    let Some(engine) = nodes.get_mut(node_index).and_then(|node| {
+                        let node_any = &mut **node as &mut dyn std::any::Any;
+                        node_any.downcast_mut::<WasmEngine>()
+                    }) else {
+                        log::error!(
+                            "Wasm reload candidate for node index {} has no WasmEngine target",
+                            node_index
+                        );
+                        continue;
+                    };
+
+                    if let Err(error) = engine.transfer_state_to_candidate(&mut candidate) {
+                        log::error!(
+                            "Wasm reload state transfer failed for node {}; keeping component {} active: {}",
+                            engine.node_id(),
+                            engine.wasm_file_path(),
+                            error
+                        );
+                        self.queue_retired_runtime(candidate.into_runtime());
+                        continue;
+                    }
+
+                    let version = candidate.wasm_file_path().to_string();
+                    let old_runtime = engine.install_candidate(candidate);
+                    log::info!(
+                        "NODE {}: activated Wasm component {} without restarting the pipeline",
+                        engine.node_id(),
+                        version
+                    );
+                    self.queue_retired_runtime(old_runtime);
+                }
+                Err(error) => {
+                    let active_path = nodes
+                        .get_mut(node_index)
+                        .and_then(|node| {
+                            let node_any = &mut **node as &mut dyn std::any::Any;
+                            node_any.downcast_mut::<WasmEngine>()
+                        })
+                        .map(|engine| engine.wasm_file_path())
+                        .unwrap_or("<unknown>");
+                    log::error!(
+                        "Wasm reload failed for node index {}; keeping component {} active: {}",
+                        node_index,
+                        active_path,
+                        error
+                    );
+                }
+            }
+        }
+
+        self.flush_retired_runtimes();
+    }
+
+    fn ensure_reaper(&mut self, node_id: &NodeId) -> Result<(), String> {
+        if self.retire_tx.is_some() {
+            return Ok(());
+        }
+
+        let (retire_tx, retire_rx) = bounded::<WasmRuntime>(2);
+        let (ready_tx, ready_rx) = bounded(1);
+        let background_cpu_affinity = self.background_cpu_affinity.clone();
+        std::thread::Builder::new()
+            .name(format!("wasm-retire-{node_id}"))
+            .spawn(move || {
+                if let Err(error) = configure_background_thread(background_cpu_affinity.as_deref())
+                {
+                    let _ = ready_tx.send(Err(error));
+                    return;
+                }
+                let _ = ready_tx.send(Ok(()));
+                while let Ok(runtime) = retire_rx.recv() {
+                    drop(runtime);
+                }
+            })
+            .map_err(|error| format!("failed to start Wasm runtime reaper: {error}"))?;
+        ready_rx.recv().map_err(|_| {
+            "Wasm runtime reaper exited before configuring its thread".to_string()
+        })??;
+        self.retire_tx = Some(retire_tx);
+        Ok(())
+    }
+
+    fn queue_retired_runtime(&mut self, runtime: WasmRuntime) {
+        if let Some(retire_tx) = &self.retire_tx {
+            match retire_tx.try_send(runtime) {
+                Ok(()) => return,
+                Err(TrySendError::Full(runtime) | TrySendError::Disconnected(runtime)) => {
+                    self.retired_runtimes.push(runtime);
+                }
+            }
+        } else {
+            self.retired_runtimes.push(runtime);
+        }
+    }
+
+    fn flush_retired_runtimes(&mut self) {
+        let Some(retire_tx) = &self.retire_tx else {
+            return;
+        };
+
+        let mut pending = Vec::new();
+        for runtime in self.retired_runtimes.drain(..) {
+            match retire_tx.try_send(runtime) {
+                Ok(()) => {}
+                Err(TrySendError::Full(runtime) | TrySendError::Disconnected(runtime)) => {
+                    pending.push(runtime);
+                }
+            }
+        }
+        self.retired_runtimes = pending;
+    }
+}

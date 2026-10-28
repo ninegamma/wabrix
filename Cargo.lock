@@ -3224,6 +3224,8 @@ dependencies = [
  "dashmap",
  "libc",
  "log",
+ "postcard",
+ "sha2",
  "tokio",
  "wabrix_api",
  "wabrix_base",

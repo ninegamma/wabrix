@@ -25,6 +25,8 @@ use wabrix_base::telemetry::{HistogramMetrics, NamedHistogramMetrics, TelemetryR
 use wabrix_base::{ControlEvent, ControlEventResult, Directive, Node, NodeId};
 #[cfg(feature = "wasm")]
 use wabrix_wasm::wasm_manager::WasmManager;
+#[cfg(feature = "wasm")]
+use wabrix_wasm::{WasmEngine, WasmReloadController};
 
 /// Real-time priority used by the packet-processing workers.
 ///
@@ -829,9 +831,25 @@ impl PipelineFactory {
                     let umem_info = manager.umem();
                     let mailbox_offset = umem_info.mailbox_offset(0);
 
-                    // Engine plugins need the merged startup data while planning timers,
-                    // before the first process-batch callback is made.
+                    // The initial instance needs merged startup data (base plus hot)
+                    // while planning timers, before its first process-batch callback.
                     let combined_node_data = node_instance.node_config.startup_node_data();
+
+                    // Keep the stable base separately: a later WASM reload combines it
+                    // with the latest hot_node_data instead of reusing a stale snapshot.
+                    let mut base_node_data = node_instance
+                        .node_config
+                        .node_data
+                        .clone()
+                        .unwrap_or_default();
+                    if let Some(batch_size) = node_instance.node_config.args.get("batch_size") {
+                        base_node_data.insert("batch_size".to_string(), batch_size.clone());
+                    }
+                    let hot_node_data = node_instance
+                        .node_config
+                        .hot_node_data
+                        .clone()
+                        .unwrap_or_default();
 
                     use wabrix_wasm::WasmEngine;
                     Box::new(WasmEngine::new(
@@ -839,12 +857,14 @@ impl PipelineFactory {
                         pipeline_instance.name.clone(),
                         worker_id,
                         pipeline_instance.worker_index,
-                        manager,
+                        manager.clone(),
                         wasm_path,
                         routing_table,
                         telemetry_metrics,
                         umem_id as u8,
                         combined_node_data,
+                        base_node_data,
+                        hot_node_data,
                         platform_data,
                         mailbox_offset,
                     )?)
@@ -974,7 +994,13 @@ pub struct PipelineRunner {
     /// Cache the indices of nodes that need control events
     #[allow(dead_code)]
     control_indices: Vec<usize>,
+    /// Owns Wasm reload staging and retirement; polled only at timer/control boundaries.
+    #[cfg(feature = "wasm")]
+    wasm_reload_controller: WasmReloadController,
     last_timer_poll: u64,
+    /// Cached cycle interval for timer polling; refreshed when hot config changes.
+    timer_poll_frequency: u64,
+    timer_poll_interval_cycles: u64,
     tsc_freq: u64,
     /// RCU handle for this pipeline's hot config — poll_frequency is read from here at runtime
     pipeline_rcu: Arc<ArcSwap<HotPipelineConfig>>,
@@ -1045,6 +1071,10 @@ impl PipelineRunner {
             last_timer_poll: 0,
             timer_indices,
             control_indices,
+            #[cfg(feature = "wasm")]
+            wasm_reload_controller: WasmReloadController::default(),
+            timer_poll_frequency: 0,
+            timer_poll_interval_cycles: 0,
             tsc_freq,
             pipeline_rcu,
         })
@@ -1186,16 +1216,25 @@ impl PipelineRunner {
             self.execute_directive_chain(directive);
         }
 
-        let now = rdtsc();
         let poll_frequency = hot.poll_frequency.max(1);
+        if poll_frequency != self.timer_poll_frequency {
+            self.timer_poll_frequency = poll_frequency;
+            self.timer_poll_interval_cycles = self.tsc_freq / poll_frequency;
+        }
 
         // Safely check elapsed time, preventing potential underflow
-        if now.saturating_sub(self.last_timer_poll) > self.tsc_freq / poll_frequency {
+        let now = rdtsc();
+        if now.saturating_sub(self.last_timer_poll) > self.timer_poll_interval_cycles {
             self.last_timer_poll = now;
 
             // =========================================================
             //    TIMERS: Process asynchronous events
             // =========================================================
+            #[cfg(feature = "wasm")]
+            if self.wasm_reload_controller.has_work() {
+                self.wasm_reload_controller.poll_ready(&mut self.nodes);
+            }
+
             for timer_pos in 0..self.timer_indices.len() {
                 let idx = self.timer_indices[timer_pos];
                 self.working_batch.clear();
@@ -1213,39 +1252,57 @@ impl PipelineRunner {
             // =========================================================
             if let Some(rx) = &mut self.control_rx {
                 while let Ok(event) = rx.try_recv() {
-                    // Functional approach: filter and process without nested loops
-                    self.node_identities
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, identity)| identity.matches_pattern(&event.address_pattern))
-                        .for_each(|(idx, identity)| {
-                            log::info!(
-                                "Runner routing event opcode {} to node {}",
-                                event.opcode,
-                                identity.node_name
-                            );
-                            let result = self.nodes[idx].handle_control_event(&event);
-                            match result {
-                                ControlEventResult::Handled => {
-                                    log::debug!(
-                                        "Control event opcode {} handled by node {}",
-                                        event.opcode, identity.node_name
-                                    );
-                                }
-                                ControlEventResult::InvalidPayload => {
-                                    log::warn!(
-                                        "Control event opcode {} rejected by node {}: invalid payload",
-                                        event.opcode, identity.node_name
-                                    );
-                                }
-                                ControlEventResult::Unsupported => {
-                                    log::debug!(
-                                        "Control event opcode {} unsupported by node {}",
-                                        event.opcode, identity.node_name
-                                    );
-                                }
+                    for (idx, identity) in self.node_identities.iter().enumerate() {
+                        if !identity.matches_pattern(&event.address_pattern) {
+                            continue;
+                        }
+
+                        log::info!(
+                            "Runner routing event opcode {} to node {}",
+                            event.opcode,
+                            identity.node_name
+                        );
+                        #[cfg(feature = "wasm")]
+                        let result = if event.opcode == StandardOpcode::UpdateConfiguration as u32
+                            && identity.node_type == "WasmEngine"
+                        {
+                            let node_any = &mut *self.nodes[idx] as &mut dyn std::any::Any;
+                            match node_any.downcast_mut::<WasmEngine>() {
+                                Some(engine) => self
+                                    .wasm_reload_controller
+                                    .handle_control_event(idx, engine, &event),
+                                None => ControlEventResult::Unsupported,
                             }
-                        });
+                        } else {
+                            self.nodes[idx].handle_control_event(&event)
+                        };
+                        #[cfg(not(feature = "wasm"))]
+                        let result = self.nodes[idx].handle_control_event(&event);
+
+                        match result {
+                            ControlEventResult::Handled => {
+                                log::debug!(
+                                    "Control event opcode {} handled by node {}",
+                                    event.opcode,
+                                    identity.node_name
+                                );
+                            }
+                            ControlEventResult::InvalidPayload => {
+                                log::warn!(
+                                    "Control event opcode {} rejected by node {}: invalid payload",
+                                    event.opcode,
+                                    identity.node_name
+                                );
+                            }
+                            ControlEventResult::Unsupported => {
+                                log::debug!(
+                                    "Control event opcode {} unsupported by node {}",
+                                    event.opcode,
+                                    identity.node_name
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1560,6 +1617,9 @@ pub struct WorkerPipelineSpawnConfig {
     pub is_one_shot: bool,
     pub control_rx: Option<Receiver<Arc<ControlEvent>>>,
     pub control_senders: Vec<crossbeam_channel::Sender<Arc<ControlEvent>>>,
+    /// CPUs available to generic threads, captured before packet workers are pinned.
+    #[cfg(feature = "wasm")]
+    pub generic_cpu_affinity: (Vec<usize>, usize),
 }
 
 pub fn spawn_worker_pipelines(
@@ -1575,6 +1635,8 @@ pub fn spawn_worker_pipelines(
         is_one_shot,
         mut control_rx,
         control_senders,
+        #[cfg(feature = "wasm")]
+        generic_cpu_affinity,
     } = config;
 
     // Capture the TSC start timestamp
@@ -1612,6 +1674,16 @@ pub fn spawn_worker_pipelines(
         // applied to this worker thread only; lack of CAP_SYS_NICE/root
         // privileges is reported but does not prevent the data plane starting.
         set_worker_fifo_scheduling(worker_id);
+
+        // Wasm compilation and teardown run on background threads. Give those
+        // threads the unpinned controller's CPU mask so the OS can schedule
+        // them on any CPU available to generic work.
+        #[cfg(feature = "wasm")]
+        for runner in &mut runners {
+            runner
+                .wasm_reload_controller
+                .set_background_cpu_affinity(generic_cpu_affinity.clone());
+        }
 
         let tid = unsafe { libc::syscall(libc::SYS_gettid) };
 

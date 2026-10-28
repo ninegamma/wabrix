@@ -16,6 +16,8 @@ wabrix_api = { workspace = true }
 crossbeam-channel = { workspace = true }
 tokio = { workspace = true }
 anyhow = "1.0.104"
+postcard = "1.1.3"
+sha2 = "0.10"
 libc = { workspace = true }
 
 [lib]
