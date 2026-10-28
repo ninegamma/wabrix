@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-
 use wabrix_base::interface::batch::Batch;
 use wabrix_base::NodeId;
 
