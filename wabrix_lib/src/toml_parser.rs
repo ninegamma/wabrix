@@ -15,6 +15,8 @@ use wabrix_base::frame_registry::MAX_UMEM;
 use wabrix_base::node_instance_id::NodeInstanceId;
 use wabrix_base::RuntimeUmemConfig;
 
+const NAPI_POLL_TIMEOUT_NS_LIMIT: u64 = 1_000_000_000;
+
 /// Persisted position of a single graph node, stored under [layout] in wabrix.toml.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct SavedPosition {
@@ -938,6 +940,14 @@ impl WabricksConfig {
 
         // 4. Validate XSK mappings
         for (idx, xsk_cfg) in section.xsk.iter().enumerate() {
+            if xsk_cfg.napi_poll_timeout_ns >= NAPI_POLL_TIMEOUT_NS_LIMIT {
+                return Err(anyhow!(
+                    "XSK mapping {}: napi_poll_timeout_ns must be less than 1 second, got {} ns",
+                    idx,
+                    xsk_cfg.napi_poll_timeout_ns
+                ));
+            }
+
             // Validate referenced interface is defined in ifaces array
             if !iface_names.contains(&xsk_cfg.iface) {
                 return Err(anyhow!(

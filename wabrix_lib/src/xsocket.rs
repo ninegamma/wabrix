@@ -30,7 +30,7 @@ pub struct XdpSocketConfig {
     pub umem_config: Arc<RuntimeUmemConfig>,
     pub xdp_mode: String,  // "native", "skb", or "auto"
     pub poll_mode: String, // "userspace_ring_spin" or "napi_busy_poll"
-    /// Per-socket timeout for the userspace poll syscall, in nanoseconds.
+    /// Per-socket timeout for userspace poll, in nanoseconds; must be less than one second.
     pub napi_poll_timeout_ns: u64,
     /// Per-socket kernel/NAPI busy-poll duration, in nanoseconds.
     pub busy_poll_ns: u64,
@@ -59,8 +59,74 @@ const MAX_FILL: usize = 2048;
 /// Bytes reserved immediately before each RX packet for XDP RX metadata.
 const RX_METADATA_HEADROOM: usize = core::mem::size_of::<u64>();
 const RX_DIAGNOSTIC_LOG_INTERVAL: u64 = 10_000;
+/// Minimum receive batch size to target before returning a short nonempty batch.
+const RX_BATCH_TOP_UP_TARGET: usize = 96;
+/// Maximum time spent waiting for additional descriptors during top-up.
+const RX_BATCH_TOP_UP_WAIT_NS: u64 = 1_000;
+const RX_TSC_NS_PER_TICK_SHIFT: u32 = 32;
 #[cfg(feature = "profiling")]
 const NAPI_DIAGNOSTIC_LOG_INTERVAL: u64 = 100_000;
+#[cfg(feature = "profiling")]
+const RX_CALL_PATH_COUNT: usize = 8;
+
+#[cfg(feature = "profiling")]
+#[derive(Clone, Copy, Default)]
+struct RxCallProfile {
+    calls: u64,
+    packets: u64,
+    total_tsc_ticks: u64,
+    frames_replenished: u64,
+}
+
+#[inline(always)]
+fn read_tsc() -> u64 {
+    // SAFETY: The dataplane targets x86_64 CPUs with the TSC instruction available.
+    unsafe { core::arch::x86_64::_rdtsc() }
+}
+
+#[cfg(feature = "profiling")]
+fn format_rx_call_paths(profiles: &[RxCallProfile]) -> String {
+    use std::fmt::Write as _;
+
+    const PATH_NAMES: [&str; RX_CALL_PATH_COUNT] = [
+        "ring/direct/no-refill",
+        "ring/direct/refill-attempt",
+        "ring/spin/no-refill",
+        "ring/spin/refill-attempt",
+        "NAPI/no-spin/no-refill",
+        "NAPI/no-spin/refill-attempt",
+        "NAPI/spin/no-refill",
+        "NAPI/spin/refill-attempt",
+    ];
+
+    let mut details = String::new();
+    for (path, profile) in profiles.iter().enumerate() {
+        if profile.calls == 0 {
+            continue;
+        }
+        if !details.is_empty() {
+            details.push_str("; ");
+        }
+
+        let ticks_per_call = profile.total_tsc_ticks / profile.calls;
+        let ticks_per_packet = if profile.packets == 0 {
+            0
+        } else {
+            profile.total_tsc_ticks / profile.packets
+        };
+        let _ = write!(
+            details,
+            "{}: {} calls, {} ticks/call, {} ticks/packet, {} frames added",
+            PATH_NAMES[path],
+            profile.calls,
+            ticks_per_call,
+            ticks_per_packet,
+            profile.frames_replenished
+        );
+    }
+    details
+}
+
 /// Split components for independent RX and TX access
 /// These DO NOT own the frame registry - it's accessed via thread-local storage
 pub struct XSocketRx {
@@ -110,8 +176,14 @@ pub struct XSocketRx {
     max_napi_poll_consume: usize,
     #[cfg(feature = "profiling")]
     max_napi_poll_available: usize,
+    /// Number of successful receive calls for each returned packet count.
+    #[cfg(feature = "profiling")]
+    rx_successful_call_profiles: Vec<RxCallProfile>,
     napi_poll_timeout: rustix::time::Timespec,
     napi_busy_poll: bool,
+    /// Q32 fixed-point nanoseconds per TSC tick for the bounded RX top-up wait.
+    rx_tsc_ns_per_tick_q32: u64,
+    rx_batch_top_up_wait_ticks: u64,
     receive_calls: u64,
     fd: RawFd, // file descriptor of the AF_XDP socket
     // Profiling fields
@@ -120,6 +192,19 @@ pub struct XSocketRx {
     pub prof_replenish_calls: u64,
     pub prof_consume_cycles: u64,
     pub prof_wakeup_cycles: u64,
+    pub prof_rx_batch_top_up_ticks: u64,
+    #[cfg(feature = "profiling")]
+    rx_batch_top_up_calls: u64,
+    #[cfg(feature = "profiling")]
+    rx_batch_top_up_target_reached: u64,
+    #[cfg(feature = "profiling")]
+    rx_batch_top_up_deadline_exits: u64,
+    #[cfg(feature = "profiling")]
+    rx_batch_top_up_poll_errors: u64,
+    #[cfg(feature = "profiling")]
+    rx_batch_top_up_packets_added: u64,
+    #[cfg(feature = "profiling")]
+    rx_batch_top_up_total_ticks: u64,
     pub prof_pdu_batch_cycles: u64,
     pub prof_empty_spin_cycles: u64,
     pub prof_total_packets: u64,
@@ -453,17 +538,28 @@ impl XSocket {
                                                                       // Socket splitting can happen before the worker initializes its
                                                                       // thread-local TSC frequency. Keep the same 2.5 GHz fallback used by
                                                                       // `rdtsc_us()` so the NAPI poll interval never becomes zero.
-        let tsc_frequency = try_get_tsc_frequency().unwrap_or(2_500_000_000);
+        let tsc_frequency = try_get_tsc_frequency()
+            .unwrap_or(2_500_000_000)
+            .max(1);
+        let rx_batch_top_up_wait_ticks = (((RX_BATCH_TOP_UP_WAIT_NS as u128)
+            * (tsc_frequency as u128))
+            / 1_000_000_000)
+            .max(1) as u64;
+        // Precompute the conversion used before each NAPI poll. This replaces a
+        // variable u128 division in the RX loop with a u64 multiply and shift.
+        let rx_tsc_ns_per_tick_q32 =
+            ((1_000_000_000u64 << RX_TSC_NS_PER_TICK_SHIFT) / tsc_frequency).max(1);
         let napi_poll_target_cycles =
             (((target_us as u128) * (tsc_frequency as u128)) / 1_000_000).max(1) as u64;
         let napi_poll_timeout = rustix::time::Timespec {
-            tv_sec: (self.config.napi_poll_timeout_ns / 1_000_000_000) as _,
-            tv_nsec: (self.config.napi_poll_timeout_ns % 1_000_000_000) as _,
+            // TOML validation guarantees the timeout is less than one second.
+            tv_sec: 0,
+            tv_nsec: self.config.napi_poll_timeout_ns as _,
         };
         let napi_busy_poll = self.config.poll_mode == "napi_busy_poll";
         if self.config.poll_mode == "napi_busy_poll" {
             info!(
-                "NAPI poll interval for {} queue {}: flush_timeout_ns={}, poll_target_interval_cycles={}",
+                "NAPI poll interval for {} queue {}: flush_timeout_ns={}, poll_target_interval_tsc_ticks={}",
                 self.config.interface,
                 self.config.queue_id,
                 self.config.napi_flush_timeout_ns,
@@ -519,8 +615,16 @@ impl XSocket {
             max_napi_poll_consume: 0,
             #[cfg(feature = "profiling")]
             max_napi_poll_available: 0,
+            #[cfg(feature = "profiling")]
+            // Allocate profiling storage at socket setup, never in the RX loop.
+            rx_successful_call_profiles: vec![
+                RxCallProfile::default();
+                (MAX_BATCH_SIZE + 1) * RX_CALL_PATH_COUNT
+            ],
             napi_poll_timeout,
             napi_busy_poll,
+            rx_tsc_ns_per_tick_q32,
+            rx_batch_top_up_wait_ticks,
             receive_calls: 0,
             fd,
             prof_reclaim_replenish_cycles: 0,
@@ -528,6 +632,19 @@ impl XSocket {
             prof_replenish_calls: 0,
             prof_consume_cycles: 0,
             prof_wakeup_cycles: 0,
+            prof_rx_batch_top_up_ticks: 0,
+            #[cfg(feature = "profiling")]
+            rx_batch_top_up_calls: 0,
+            #[cfg(feature = "profiling")]
+            rx_batch_top_up_target_reached: 0,
+            #[cfg(feature = "profiling")]
+            rx_batch_top_up_deadline_exits: 0,
+            #[cfg(feature = "profiling")]
+            rx_batch_top_up_poll_errors: 0,
+            #[cfg(feature = "profiling")]
+            rx_batch_top_up_packets_added: 0,
+            #[cfg(feature = "profiling")]
+            rx_batch_top_up_total_ticks: 0,
             prof_pdu_batch_cycles: 0,
             prof_empty_spin_cycles: 0,
             prof_total_packets: 0,
@@ -894,15 +1011,15 @@ impl XSocketRx {
                 self.prof_monster_spikes += 1;
                 self.prof_max_replenish_cycles = self.prof_max_replenish_cycles.max(duration);
 
-                // Only print if the spike is absurdly high (e.g., > 50,000 cycles)
+                // Only print if the spike is absurdly high (e.g., > 50,000 TSC ticks).
                 log::trace!(
-                    "MONSTER SPIKE DETECTED on socket {}: Replenish of {} frames took {} cycles!",
+                    "MONSTER SPIKE DETECTED on socket {}: Replenish of {} frames took {} TSC ticks!",
                     self.source_id(),
                     produced,
                     duration
                 );
                 log::trace!(
-                    "\n=== Replenish X-Ray (Cycles) ===\n\
+                    "\n=== Replenish X-Ray (TSC Ticks) ===\n\
              Lock      : {}\n\
              Allocator : {}\n\
              Math Loop : {}\n\
@@ -926,6 +1043,15 @@ impl XSocketRx {
 // Implement BatchRx for XSocketRx
 impl BatchRx for XSocketRx {
     fn receive_into_batch(&mut self, batch: &mut Batch, max_count: usize) -> anyhow::Result<usize> {
+        #[cfg(feature = "profiling")]
+        let mut fill_replenish_attempted = false;
+        #[cfg(feature = "profiling")]
+        let mut frames_replenished = 0usize;
+        #[cfg(feature = "profiling")]
+        let mut used_napi_poll = false;
+        #[cfg(feature = "profiling")]
+        let mut used_local_spin = false;
+
         self.receive_calls += 1;
 
         // Get the worker's frame registry from thread-local storage
@@ -971,7 +1097,15 @@ impl BatchRx for XSocketRx {
         //let fq_size = self.config.umem_config.fq_size as usize;
         self.max_fill_deficit = self.max_fill_deficit.max(self.fill_deficit);
         if self.fill_deficit >= FILL_REPLENISH_THRESHOLD {
+            #[cfg(feature = "profiling")]
+            {
+                fill_replenish_attempted = true;
+            }
             let produced = self.replenish_fill_queue(self.fill_deficit);
+            #[cfg(feature = "profiling")]
+            {
+                frames_replenished = produced;
+            }
             self.fill_deficit = self.fill_deficit.saturating_sub(produced);
             if self.fill_deficit > 4096
                 && self
@@ -1034,14 +1168,16 @@ impl BatchRx for XSocketRx {
 
         // ⏱️ START STAGE 3: Wakeup / Empty Path
         // SMART KERNEL WAKEUP LOGIC
-        #[cfg(feature = "profiling")]
-        let mut t3 = 0;
         // Demand-Driven NAPI Polling
         if rcvd == 0 {
             self.empty_spins += 1;
             // LOCAL SPIN: Allow a brief window to catch fast-arriving packets
             // completely locklessly without wasting cycles on a syscall.
             if self.empty_spins < 64 && self.napi_busy_poll {
+                #[cfg(feature = "profiling")]
+                {
+                    used_local_spin = true;
+                }
                 // Yield this tiny micro-window to the CPU pipeline
                 core::hint::spin_loop();
                 rcvd = unsafe {
@@ -1054,6 +1190,7 @@ impl BatchRx for XSocketRx {
             if rcvd == 0 && self.napi_busy_poll {
                 #[cfg(feature = "profiling")]
                 {
+                    used_napi_poll = true;
                     self.napi_poll_attempts += 1;
                 }
 
@@ -1099,7 +1236,7 @@ impl BatchRx for XSocketRx {
                     self.prof_started = false;
                     let now = unsafe { core::arch::x86_64::_rdtsc() };
                     log::debug!(
-                        "**** Traffic burst ended after ~ {} cycles ({} us)",
+                        "**** Traffic burst ended after ~ {} TSC ticks ({} us)",
                         (now - self.prof_burst_start).separated_string(),
                         (((now - self.prof_burst_start) as f64
                             * (1_000_000.0 / get_tsc_frequency() as f64))
@@ -1127,16 +1264,6 @@ impl BatchRx for XSocketRx {
 
                 #[cfg(feature = "profiling")]
                 {
-                    t3 = unsafe { core::arch::x86_64::_rdtsc() };
-                }
-
-                #[cfg(feature = "profiling")]
-                if self.prof_started {
-                    self.prof_wakeup_cycles += t3 - t2;
-                }
-
-                #[cfg(feature = "profiling")]
-                {
                     if log::log_enabled!(log::Level::Debug)
                         && self.prof_started
                         && rcvd > 0
@@ -1153,6 +1280,139 @@ impl BatchRx for XSocketRx {
                             self.total_received + rcvd,
                             frame_registry.total_free_frames()
                         );
+                    }
+                }
+            }
+        }
+
+        // End the wakeup stage before any optional short-batch waiting so stage
+        // timings remain additive in the periodic RX cycle breakdown.
+        #[cfg(feature = "profiling")]
+        let t3 = read_tsc();
+        #[cfg(feature = "profiling")]
+        if self.prof_started {
+            self.prof_wakeup_cycles += t3 - t2;
+        }
+
+        // When a short batch is already available, briefly wait for more descriptors
+        // before returning it. This amortizes fixed RX work across larger batches.
+        if rcvd > 0 {
+            // `max_to_pull` is bounded by the caller's configured batch_size
+            // (`max_count`), so top-up never targets a larger batch than requested.
+            let target = RX_BATCH_TOP_UP_TARGET.min(max_to_pull);
+            if rcvd < target {
+                #[cfg(feature = "profiling")]
+                let packets_before_top_up = rcvd;
+                let top_up_start = read_tsc();
+                #[cfg(feature = "profiling")]
+                let mut top_up_poll_error = false;
+
+                loop {
+                    let elapsed_ticks = read_tsc().wrapping_sub(top_up_start);
+                    if elapsed_ticks >= self.rx_batch_top_up_wait_ticks {
+                        break;
+                    }
+
+                    if self.napi_busy_poll {
+                        let remaining_ticks =
+                            self.rx_batch_top_up_wait_ticks - elapsed_ticks;
+                        // remaining_ticks is bounded by the top-up budget, so
+                        // this Q32 product fits in u64 and avoids hot-path division.
+                        let remaining_ns = (remaining_ticks * self.rx_tsc_ns_per_tick_q32)
+                            >> RX_TSC_NS_PER_TICK_SHIFT;
+                        let poll_timeout_ns =
+                            remaining_ns.min(self.napi_poll_timeout.tv_nsec as u64);
+                        if poll_timeout_ns == 0 {
+                            break;
+                        }
+
+                        #[cfg(feature = "profiling")]
+                        {
+                            used_napi_poll = true;
+                            self.napi_poll_attempts += 1;
+                        }
+
+                        let poll_timeout = rustix::time::Timespec {
+                            // Both the remaining top-up budget and configured timeout
+                            // are below one second, so this value fits in tv_nsec.
+                            tv_sec: 0,
+                            tv_nsec: poll_timeout_ns as _,
+                        };
+                        if self
+                            .poll_for_napi_packets(Some(&poll_timeout))
+                            .is_err()
+                        {
+                            #[cfg(feature = "profiling")]
+                            {
+                                top_up_poll_error = true;
+                            }
+                            break;
+                        }
+
+                        #[cfg(feature = "profiling")]
+                        {
+                            let available_after_poll =
+                                self.rx_queue.nb_avail_exact() as usize;
+                            self.napi_poll_available_descriptors +=
+                                available_after_poll as u64;
+                            if available_after_poll > 0 {
+                                self.napi_poll_available_samples += 1;
+                            }
+                            self.max_napi_poll_available =
+                                self.max_napi_poll_available.max(available_after_poll);
+                        }
+                    } else {
+                        #[cfg(feature = "profiling")]
+                        {
+                            used_local_spin = true;
+                        }
+                        core::hint::spin_loop();
+                    }
+
+                    // SAFETY: The RX ring is single-owner, and this slice starts after the
+                    // descriptors already consumed and ends at the caller-provided capacity.
+                    let newly_received = unsafe {
+                        self.rx_queue.consume(
+                            &mut self.scratch_descriptors_recv_batch[rcvd..max_to_pull],
+                        )
+                    };
+                    rcvd += newly_received;
+
+                    #[cfg(feature = "profiling")]
+                    if self.napi_busy_poll {
+                        if newly_received == 0 {
+                            self.napi_poll_empty += 1;
+                        }
+                        self.max_napi_poll_consume =
+                            self.max_napi_poll_consume.max(newly_received);
+                        self.napi_poll_packets += newly_received as u64;
+                    }
+
+                    if rcvd >= target {
+                        break;
+                    }
+                }
+
+                #[cfg(feature = "profiling")]
+                let top_up_ticks = read_tsc().wrapping_sub(top_up_start);
+                #[cfg(feature = "profiling")]
+                if self.prof_started {
+                    self.prof_rx_batch_top_up_ticks += top_up_ticks;
+                }
+
+                #[cfg(feature = "profiling")]
+                {
+                    self.rx_batch_top_up_total_ticks += top_up_ticks;
+                    self.rx_batch_top_up_calls += 1;
+                    self.rx_batch_top_up_packets_added +=
+                        (rcvd - packets_before_top_up) as u64;
+                    if rcvd >= target {
+                        self.rx_batch_top_up_target_reached += 1;
+                    } else if top_up_ticks >= self.rx_batch_top_up_wait_ticks {
+                        self.rx_batch_top_up_deadline_exits += 1;
+                    }
+                    if top_up_poll_error {
+                        self.rx_batch_top_up_poll_errors += 1;
                     }
                 }
             }
@@ -1178,17 +1438,6 @@ impl BatchRx for XSocketRx {
             }
 
             self.fill_deficit += rcvd; // We owe the FILL_RING this many frames
-
-            #[cfg(feature = "profiling")]
-            let t3 = unsafe { core::arch::x86_64::_rdtsc() };
-
-            #[cfg(feature = "profiling")]
-            {
-                // Record the time it took just to check the condition when rcvd > 0
-                if self.prof_started {
-                    self.prof_wakeup_cycles += t3 - t2;
-                }
-            }
 
             // 5. ZERO-OVERHEAD LOGGING
             // By wrapping this in `log_enabled!`, Rust absolutely guarantees that `rdtsc_us()`
@@ -1387,31 +1636,34 @@ impl BatchRx for XSocketRx {
                 let s1_cpp = self.prof_reclaim_replenish_cycles / total;
                 let s2_cpp = self.prof_consume_cycles / total;
                 let s3_cpp = self.prof_wakeup_cycles / total;
-                let s4_cpp = self.prof_pdu_batch_cycles / total;
-                let total_cpp = s1_cpp + s2_cpp + s3_cpp + s4_cpp;
+                let s4_cpp = self.prof_rx_batch_top_up_ticks / total;
+                let s5_cpp = self.prof_pdu_batch_cycles / total;
+                let total_cpp = s1_cpp + s2_cpp + s3_cpp + s4_cpp + s5_cpp;
 
                 log::debug!(
-                    "\n=== CPU Cycle Breakdown (Per Packet Average over {} pkts) ===\n\
-                     1. Reclaim & Replenish : {:>4} cycles\n\
-                     2. Lockless Consume    : {:>4} cycles\n\
-                     3. Wakeup Logic        : {:>4} cycles\n\
-                     4. PDU Gen & Batch Push: {:>4} cycles\n\
+                    "\n=== TSC Tick Breakdown (Per Packet Average over {} pkts) ===\n\
+                     1. Reclaim & Replenish : {:>4} TSC ticks\n\
+                     2. Lockless Consume    : {:>4} TSC ticks\n\
+                     3. Wakeup Logic        : {:>4} TSC ticks\n\
+                     4. RX Batch Top-up     : {:>4} TSC ticks\n\
+                     5. PDU Gen & Batch Push: {:>4} TSC ticks\n\
                      --------------------------------------------------\n\
-                     Total Active CPU Cost  : {:>4} cycles/packet\n\
-                     Total Empty Spins Cost : {:>10} cycles (Total for {} packets)\n\
+                     Total Active RX Cost   : {:>4} TSC ticks/packet\n\
+                     Total Empty Spins Cost : {:>10} TSC ticks (Total for {} packets)\n\
                      ==================================================",
                     total.separated_string(),
                     s1_cpp,
                     s2_cpp,
                     s3_cpp,
                     s4_cpp,
+                    s5_cpp,
                     total_cpp,
                     self.prof_empty_spin_cycles.separated_string(),
                     total.separated_string()
                 );
 
                 log::debug!(
-                    "{}: Replenish diagnostics: monster_spikes={}, max_replenish_cycles={}",
+                    "{}: Replenish diagnostics: monster_spikes={}, max_replenish_tsc_ticks={}",
                     self.source_id(),
                     self.prof_monster_spikes.separated_string(),
                     self.prof_max_replenish_cycles.separated_string(),
@@ -1421,11 +1673,33 @@ impl BatchRx for XSocketRx {
                 self.prof_reclaim_replenish_cycles = 0;
                 self.prof_consume_cycles = 0;
                 self.prof_wakeup_cycles = 0;
+                self.prof_rx_batch_top_up_ticks = 0;
                 self.prof_pdu_batch_cycles = 0;
                 self.prof_empty_spin_cycles = 0;
                 self.prof_total_packets = 0;
                 self.prof_max_replenish_cycles = 0;
                 self.prof_monster_spikes = 0;
+            }
+        }
+
+        #[cfg(feature = "profiling")]
+        {
+            // Time reclaim through packet-to-PDU batching; exclude the accounting update itself.
+            let call_cycles = read_tsc() - t0;
+            // Path index bits: NAPI poll, local spin, then fill-ring replenish attempt.
+            let path = (usize::from(used_napi_poll) << 2)
+                | (usize::from(used_local_spin) << 1)
+                | usize::from(fill_replenish_attempted);
+            // One worker-local update captures batching and path costs without locks,
+            // allocation, or logging in the packet loop.
+            if let Some(profile) = self
+                .rx_successful_call_profiles
+                .get_mut(rcvd * RX_CALL_PATH_COUNT + path)
+            {
+                profile.calls += 1;
+                profile.packets += rcvd as u64;
+                profile.total_tsc_ticks += call_cycles;
+                profile.frames_replenished += frames_replenished as u64;
             }
         }
 
@@ -1658,8 +1932,9 @@ impl XSocketTx {
         let borrowed_fd = unsafe { BorrowedFd::borrow_raw(self.fd) };
         let mut poll_fds = [PollFd::new(&borrowed_fd, PollFlags::OUT)];
         let timeout = rustix::time::Timespec {
-            tv_sec: (self.config.napi_poll_timeout_ns / 1_000_000_000) as _,
-            tv_nsec: (self.config.napi_poll_timeout_ns % 1_000_000_000) as _,
+            // TOML validation guarantees the timeout is less than one second.
+            tv_sec: 0,
+            tv_nsec: self.config.napi_poll_timeout_ns as _,
         };
 
         poll(&mut poll_fds, Some(&timeout))?;
@@ -1803,6 +2078,208 @@ impl XSocketTx {
 }
 impl Drop for XSocketRx {
     fn drop(&mut self) {
+        #[cfg(feature = "profiling")]
+        {
+            let target_hits_percent = if self.rx_batch_top_up_calls == 0 {
+                0.0
+            } else {
+                self.rx_batch_top_up_target_reached as f64 * 100.0
+                    / self.rx_batch_top_up_calls as f64
+            };
+            let packets_added_per_attempt = if self.rx_batch_top_up_calls == 0 {
+                0.0
+            } else {
+                self.rx_batch_top_up_packets_added as f64
+                    / self.rx_batch_top_up_calls as f64
+            };
+            let ticks_per_attempt = if self.rx_batch_top_up_calls == 0 {
+                0
+            } else {
+                self.rx_batch_top_up_total_ticks / self.rx_batch_top_up_calls
+            };
+            info!(
+                "{}: RX batch top-up: target={} packets, wait_limit={} ns, attempts={}, target_reached={} ({:.1}%), deadline_exits={}, poll_errors={}, packets_added={}, avg_added_per_attempt={:.2}, total={} TSC ticks, avg={} TSC ticks/attempt",
+                self.source_id(),
+                RX_BATCH_TOP_UP_TARGET,
+                RX_BATCH_TOP_UP_WAIT_NS,
+                self.rx_batch_top_up_calls.separated_string(),
+                self.rx_batch_top_up_target_reached.separated_string(),
+                target_hits_percent,
+                self.rx_batch_top_up_deadline_exits.separated_string(),
+                self.rx_batch_top_up_poll_errors.separated_string(),
+                self.rx_batch_top_up_packets_added.separated_string(),
+                packets_added_per_attempt,
+                self.rx_batch_top_up_total_ticks.separated_string(),
+                ticks_per_attempt
+            );
+
+            let mut calls_by_batch = [0u64; MAX_BATCH_SIZE + 1];
+            let mut totals_by_path = [RxCallProfile::default(); RX_CALL_PATH_COUNT];
+            let mut successful_calls = 0u64;
+            let mut total_packets = 0u64;
+            let mut total_tsc_ticks = 0u64;
+
+            for batch_size in 1..=MAX_BATCH_SIZE {
+                let profile_offset = batch_size * RX_CALL_PATH_COUNT;
+                for path in 0..RX_CALL_PATH_COUNT {
+                    let profile = self.rx_successful_call_profiles[profile_offset + path];
+                    calls_by_batch[batch_size] += profile.calls;
+                    successful_calls += profile.calls;
+                    total_packets += profile.packets;
+                    total_tsc_ticks += profile.total_tsc_ticks;
+                    totals_by_path[path].calls += profile.calls;
+                    totals_by_path[path].packets += profile.packets;
+                    totals_by_path[path].total_tsc_ticks += profile.total_tsc_ticks;
+                    totals_by_path[path].frames_replenished += profile.frames_replenished;
+                }
+            }
+
+            info!(
+                "{}: RX successful-call packet distribution: {} calls, {} packets; individual sizes below 0.5% are merged into adjacent ranges",
+                self.source_id(),
+                successful_calls,
+                self.total_received
+            );
+
+            let mut packet_count = if successful_calls == 0 {
+                MAX_BATCH_SIZE + 1
+            } else {
+                1
+            };
+            while packet_count <= MAX_BATCH_SIZE {
+                let calls = calls_by_batch[packet_count];
+                if (calls as f64) * 200.0 < successful_calls as f64 {
+                    let range_start = packet_count;
+                    let mut range_calls = 0u64;
+                    while packet_count <= MAX_BATCH_SIZE
+                        && (calls_by_batch[packet_count] as f64) * 200.0
+                            < successful_calls as f64
+                    {
+                        range_calls += calls_by_batch[packet_count];
+                        packet_count += 1;
+                    }
+
+                    if range_calls > 0 {
+                        let range_end = packet_count - 1;
+                        let percent = range_calls as f64 * 100.0 / successful_calls as f64;
+                        if range_start == range_end {
+                            info!(
+                                "{}: RX batch size {}: {} calls ({:.1}%)",
+                                self.source_id(),
+                                range_start,
+                                range_calls.separated_string(),
+                                percent
+                            );
+                        } else {
+                            info!(
+                                "{}: RX batch sizes {}–{}: {} calls ({:.1}%)",
+                                self.source_id(),
+                                range_start,
+                                range_end,
+                                range_calls.separated_string(),
+                                percent
+                            );
+                        }
+                    }
+                } else {
+                    let percent = calls as f64 * 100.0 / successful_calls as f64;
+                    info!(
+                        "{}: RX batch size {}: {} calls ({:.1}%)",
+                        self.source_id(),
+                        packet_count,
+                        calls.separated_string(),
+                        percent
+                    );
+                    packet_count += 1;
+                }
+            }
+
+            let ticks_per_call = if successful_calls == 0 {
+                0
+            } else {
+                total_tsc_ticks / successful_calls
+            };
+            let ticks_per_packet = if total_packets == 0 {
+                0
+            } else {
+                total_tsc_ticks / total_packets
+            };
+            debug!(
+                "{}: RX successful-call timing: {} calls, {} packets, {} TSC ticks/call, {} TSC ticks/packet; paths=[{}]",
+                self.source_id(),
+                successful_calls,
+                total_packets,
+                ticks_per_call,
+                ticks_per_packet,
+                format_rx_call_paths(&totals_by_path)
+            );
+
+            let mut top_batches = calls_by_batch
+                .iter()
+                .enumerate()
+                .skip(1)
+                .filter_map(|(batch_size, &calls)| (calls > 0).then_some((batch_size, calls)))
+                .collect::<Vec<_>>();
+            top_batches.sort_unstable_by(|left, right| right.1.cmp(&left.1));
+            top_batches.truncate(12);
+
+            let mut is_top_batch = [false; MAX_BATCH_SIZE + 1];
+            for &(batch_size, _) in &top_batches {
+                is_top_batch[batch_size] = true;
+            }
+
+            let mut other_sizes_by_path = [RxCallProfile::default(); RX_CALL_PATH_COUNT];
+            for batch_size in 1..=MAX_BATCH_SIZE {
+                if is_top_batch[batch_size] {
+                    continue;
+                }
+                let profile_offset = batch_size * RX_CALL_PATH_COUNT;
+                for path in 0..RX_CALL_PATH_COUNT {
+                    let profile = self.rx_successful_call_profiles[profile_offset + path];
+                    other_sizes_by_path[path].calls += profile.calls;
+                    other_sizes_by_path[path].packets += profile.packets;
+                    other_sizes_by_path[path].total_tsc_ticks += profile.total_tsc_ticks;
+                    other_sizes_by_path[path].frames_replenished += profile.frames_replenished;
+                }
+            }
+
+            for (batch_size, calls) in top_batches {
+                let profile_offset = batch_size * RX_CALL_PATH_COUNT;
+                let paths = &self.rx_successful_call_profiles
+                    [profile_offset..profile_offset + RX_CALL_PATH_COUNT];
+                let total_tsc_ticks = paths.iter().map(|profile| profile.total_tsc_ticks).sum::<u64>();
+                let packets = paths.iter().map(|profile| profile.packets).sum::<u64>();
+                let calls_percent = if successful_calls == 0 {
+                    0.0
+                } else {
+                    calls as f64 * 100.0 / successful_calls as f64
+                };
+                let ticks_per_call = total_tsc_ticks / calls;
+                let ticks_per_packet = if packets == 0 {
+                    0
+                } else {
+                    total_tsc_ticks / packets
+                };
+
+                debug!(
+                    "{}: RX batch={} calls={} ({:.1}%), {} TSC ticks/call, {} TSC ticks/packet; paths=[{}]",
+                    self.source_id(),
+                    batch_size,
+                    calls,
+                    calls_percent,
+                    ticks_per_call,
+                    ticks_per_packet,
+                    format_rx_call_paths(paths)
+                );
+            }
+
+            debug!(
+                "{}: RX other batch sizes timing: paths=[{}]",
+                self.source_id(),
+                format_rx_call_paths(&other_sizes_by_path)
+            );
+        }
+
         log::debug!(
             "RUST DROP: XSocketRx (Queue {}) dropping after {} receive calls. Refs remaining -> FQ: {}, CQ: {}, TX: {}",
             self.config.queue_id,
