@@ -19,9 +19,9 @@ use xsk_core::{CompQueue, FillQueue, FrameDesc, RxQueue, TxQueue, Umem};
 const RX_METADATA_HEADROOM: usize = core::mem::size_of::<u64>();
 const RX_DIAGNOSTIC_LOG_INTERVAL: u64 = 10_000;
 /// Minimum receive batch size to target before returning a short nonempty batch.
-const RX_BATCH_TOP_UP_TARGET: usize = 96;
-/// Minimum size needed to be received, before triggering a top-up
-const RX_BATCH_TOP_UP_TRIGGER: usize = 64;
+const RX_BATCH_TOP_UP_TARGET: usize = 128;
+/// Minimum number of packets required before triggering a top-up
+const RX_BATCH_TOP_UP_TRIGGER: usize = 16;
 /// Maximum time spent waiting for additional descriptors during top-up.
 pub(super) const RX_BATCH_TOP_UP_WAIT_NS: u64 = 1_000;
 pub(super) const RX_TSC_NS_PER_TICK_SHIFT: u32 = 32;
@@ -1236,7 +1236,7 @@ impl Drop for XSocketRx {
             } else {
                 self.rx_batch_top_up_total_ticks / self.rx_batch_top_up_calls
             };
-            info!(
+            debug!(
                 "{}: RX batch top-up: target={} packets, wait_limit={} ns, attempts={}, target_reached={} ({:.1}%), deadline_exits={}, poll_errors={}, packets_added={}, avg_added_per_attempt={:.2}, total={} TSC ticks, avg={} TSC ticks/attempt",
                 self.source_id(),
                 RX_BATCH_TOP_UP_TARGET,

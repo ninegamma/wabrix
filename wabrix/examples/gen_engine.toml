@@ -35,11 +35,9 @@ type = "WasmEngine"
 routes = ["tx_sink_0", "drop", "drop"]
 # Node-level state override
 desired_state = "Running"
-args= { umem = "0", batch_size = "512" }
+# batch_size_variance is an absolute +/- frame count; batch_size + variance must fit MAX_BATCH_SIZE.
+args= { umem = "0", batch_size = "512", batch_size_variance = "128" }
 hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/generator_engine.wasm" }
-#hot_args = { wasm_file_path = "/tmp/wabrix_api-14m-baseline/target/wasm32-wasip2/release/generator_engine.wasm" }
-
-#hot_args = { wasm_file_path = "/tmp/wabrix_api-14m-baseline/target/wasm32-wasip2/release/generator_engine.wasm" }
 
 [pipelines.nodes.node_data]
 prot = "UDP"

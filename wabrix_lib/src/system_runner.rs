@@ -80,7 +80,7 @@ pub struct WabrixSystem {
     pub(crate) frame_registries: Vec<Option<FrameRegistry>>,
     pub telemetry_registry: Arc<TelemetryRegistry>,
     /// Indexed by worker_id (0..num_workers).
-    pub(crate) worker_runners: Vec<Option<(CoreId, Vec<crate::pipeline::PipelineRunner>)>>,
+    pub(crate) worker_runners: Vec<Option<(CoreId, bool, Vec<crate::pipeline::PipelineRunner>)>>,
     pub(crate) platform_data: PlatformData,
     pub shared_state: Arc<crate::config::hot_config::SharedSystemState>,
     /// All live UMEM handles indexed by umem_id (0..MAX_UMEM). None = not used.
@@ -118,7 +118,7 @@ impl WabrixSystem {
         let mut control_senders = std::mem::take(&mut self.control_senders);
 
         for (worker_id, entry) in self.worker_runners.into_iter().enumerate() {
-            let (core_id, runners) = match entry {
+            let (core_id, no_turbo, runners) = match entry {
                 Some(v) => v,
                 None => continue,
             };
@@ -143,6 +143,7 @@ impl WabrixSystem {
                 runners,
                 crate::pipeline::WorkerPipelineSpawnConfig {
                     core_id,
+                    no_turbo,
                     frame_registry,
                     shutdown: shutdown_clone,
                     workers_completed: workers_completed_clone,

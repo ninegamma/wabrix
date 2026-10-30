@@ -480,7 +480,7 @@ impl SystemBuilder {
 
                 runners.push(runner);
             }
-            wabrix_system.worker_runners[worker_id] = Some((core_id, runners));
+            wabrix_system.worker_runners[worker_id] = Some((core_id, worker.no_turbo, runners));
         }
 
         wabrix_system.control_rx = ctrl_rx;

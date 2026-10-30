@@ -780,7 +780,7 @@ impl PipelineFactory {
                     let num_buckets =
                         match node_instance.node_config.effective_arg("wasm_file_path") {
                             //TODO calculate the num_buckets, or retrieve it from the wasm file
-                            Some(path) if path.contains("inspector_engine") => 5,
+                            Some(path) if path.contains("inspector_engine") => 7,
                             Some(path) if path.contains("filter_engine") => 2,
                             Some(path) if path.contains("generator_engine") => 23,
                             Some(path) if path.contains("tcp_engine") => 23,
@@ -844,6 +844,16 @@ impl PipelineFactory {
                         .unwrap_or_default();
                     if let Some(batch_size) = node_instance.node_config.args.get("batch_size") {
                         base_node_data.insert("batch_size".to_string(), batch_size.clone());
+                    }
+                    if let Some(batch_size_variance) = node_instance
+                        .node_config
+                        .args
+                        .get("batch_size_variance")
+                    {
+                        base_node_data.insert(
+                            "batch_size_variance".to_string(),
+                            batch_size_variance.clone(),
+                        );
                     }
                     let hot_node_data = node_instance
                         .node_config
@@ -1610,6 +1620,7 @@ fn cpu_seconds(cycles: u64, tsc_frequency: u64) -> String {
 /// JoinHandle that resolves to aggregated statistics
 pub struct WorkerPipelineSpawnConfig {
     pub core_id: CoreId,
+    pub no_turbo: bool,
     pub frame_registry: wabrix_base::frame_registry::FrameRegistry,
     pub shutdown: Arc<AtomicBool>,
     pub workers_completed: Arc<AtomicUsize>,
@@ -1628,6 +1639,7 @@ pub fn spawn_worker_pipelines(
 ) -> tokio::task::JoinHandle<Result<Vec<PipelineStats>, String>> {
     let WorkerPipelineSpawnConfig {
         core_id,
+        no_turbo,
         mut frame_registry,
         shutdown,
         workers_completed,
@@ -1662,6 +1674,16 @@ pub fn spawn_worker_pipelines(
                 "Failed to pin to core {}. Are you running with sudo?",
                 core_id.id
             );
+        }
+
+        if no_turbo {
+            if let Err(error) = wabrix_base::system::lock_cpu_frequency_at_base(core_id.id) {
+                log::warn!(
+                    "Worker CPU {} requested no_turbo, but its frequency could not be locked at base: {}",
+                    core_id.id,
+                    error
+                );
+            }
         }
 
         let worker_id = if !runners.is_empty() {

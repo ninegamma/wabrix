@@ -67,6 +67,7 @@ fn default_workers() -> Vec<WorkerConfig> {
         id: 0,
         core: 0,
         partitions: vec![PartitionRequest { umem: 0, count: 1 }],
+        no_turbo: false,
     }]
 }
 
@@ -275,6 +276,25 @@ pub struct WorkerConfig {
     pub core: usize,
     #[serde(default)]
     pub partitions: Vec<PartitionRequest>,
+    #[serde(default, deserialize_with = "deserialize_bool_or_string")]
+    pub no_turbo: bool,
+}
+
+fn deserialize_bool_or_string<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum BoolOrString {
+        Bool(bool),
+        String(String),
+    }
+
+    match BoolOrString::deserialize(deserializer)? {
+        BoolOrString::Bool(value) => Ok(value),
+        BoolOrString::String(value) => value.parse().map_err(serde::de::Error::custom),
+    }
 }
 
 fn default_poll_frequency() -> u64 {
@@ -492,7 +512,7 @@ impl NodeConfig {
     /// Builds the configuration map passed to an engine during startup.
     ///
     /// Values in `hot_node_data` override `node_data`, while derived startup
-    /// values such as `batch_size` take final precedence.
+    /// values such as `batch_size` and `batch_size_variance` take final precedence.
     pub fn startup_node_data(&self) -> HashMap<String, String> {
         let mut data = self.node_data.clone().unwrap_or_default();
 
@@ -502,6 +522,12 @@ impl NodeConfig {
 
         if let Some(batch_size) = self.args.get("batch_size") {
             data.insert("batch_size".to_string(), batch_size.clone());
+        }
+        if let Some(batch_size_variance) = self.args.get("batch_size_variance") {
+            data.insert(
+                "batch_size_variance".to_string(),
+                batch_size_variance.clone(),
+            );
         }
 
         data
@@ -544,6 +570,7 @@ pub struct PipelineInstance {
 pub struct WorkerBuilderConfig {
     pub id: u32,                          // The Worker ID (unique)
     pub core_id: u32,                     // The CPU Core to pin to
+    pub no_turbo: bool,
     pub pipelines: Vec<PipelineInstance>, // List of pipelines this worker runs
 }
 
@@ -634,6 +661,7 @@ impl WabricksConfig {
                 id: worker_id,
                 core: base_core + worker_id,
                 partitions: vec![PartitionRequest { umem: 0, count: 1 }],
+                no_turbo: false,
             };
             self.wabrix.workers.push(worker);
         }
@@ -1829,6 +1857,7 @@ impl WabricksConfig {
                     system_builder.workers.push(WorkerBuilderConfig {
                         id: worker_id as u32,
                         core_id: worker_conf.core as u32, // Set affinity here
+                        no_turbo: worker_conf.no_turbo,
                         pipelines: Vec::new(),
                     });
                     system_builder.workers.len() - 1
@@ -3024,7 +3053,7 @@ mod tests {
         let iface0 = checks.iter().find(|c| c.name == "enp2s0f0np0").unwrap();
         assert_eq!(iface0.poll_mode, "userspace_ring_spin");
         assert_eq!(iface0.irq_core, Some(8));
-        assert_eq!(iface0.serving_worker_cores, vec![2]);
+        assert!(iface0.serving_worker_cores.is_empty());
 
         let iface1 = checks.iter().find(|c| c.name == "enp2s0f1np1").unwrap();
         assert_eq!(iface1.poll_mode, "napi_busy_poll");

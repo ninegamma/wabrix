@@ -382,6 +382,124 @@ pub fn check_cpu_governor(cpu: usize) {
     }
 }
 
+/// Lock a CPU's cpufreq policy to its reported non-turbo base frequency.
+///
+/// Linux exposes these attributes for Intel and AMD cpufreq drivers when the
+/// driver supports a base-frequency limit. The policy may cover more than one
+/// logical CPU, depending on the processor and driver.
+pub fn lock_cpu_frequency_at_base(cpu: usize) -> io::Result<u64> {
+    const ATTEMPTS: usize = 10;
+    const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+
+    for attempt in 0..ATTEMPTS {
+        match try_lock_cpu_frequency_at_base(cpu) {
+            Ok(base_frequency) => return Ok(base_frequency),
+            Err(error) => {
+                if !is_retryable_cpufreq_error(&error) || attempt + 1 == ATTEMPTS {
+                    return Err(error);
+                }
+
+                std::thread::sleep(RETRY_DELAY);
+            }
+        }
+    }
+
+    Err(io::Error::other("cpufreq retry loop completed without a result"))
+}
+
+fn try_lock_cpu_frequency_at_base(cpu: usize) -> io::Result<u64> {
+    let cpu_path = format!("/sys/devices/system/cpu/cpu{cpu}/cpufreq");
+    let base_frequency_path = format!("{cpu_path}/base_frequency");
+    let min_frequency_path = format!("{cpu_path}/scaling_min_freq");
+    let max_frequency_path = format!("{cpu_path}/scaling_max_freq");
+
+    let base_frequency = fs::read_to_string(&base_frequency_path)?
+        .trim()
+        .parse::<u64>()
+        .map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid base frequency in {base_frequency_path}: {error}"),
+            )
+        })?;
+    if base_frequency == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("base frequency in {base_frequency_path} is zero"),
+        ));
+    }
+
+    if let Ok(related_cpus) = fs::read_to_string(format!("{cpu_path}/related_cpus")) {
+        let related_cpus = related_cpus.trim();
+        if related_cpus.split_whitespace().count() > 1
+            || related_cpus.contains('-')
+            || related_cpus.contains(',')
+        {
+            warn!(
+                "CPU {} shares a cpufreq policy with CPUs {}; the base-frequency cap applies to that whole policy",
+                cpu, related_cpus
+            );
+        }
+    }
+
+    let current_min = read_cpufreq_value(&min_frequency_path)?;
+    let current_max = read_cpufreq_value(&max_frequency_path)?;
+
+    // Keep each write within the currently permitted min/max interval.
+    if current_min > base_frequency {
+        fs::write(&min_frequency_path, base_frequency.to_string())?;
+    }
+    if current_max < base_frequency {
+        fs::write(&max_frequency_path, base_frequency.to_string())?;
+    }
+    if read_cpufreq_value(&min_frequency_path)? != base_frequency {
+        fs::write(&min_frequency_path, base_frequency.to_string())?;
+    }
+    if read_cpufreq_value(&max_frequency_path)? != base_frequency {
+        fs::write(&max_frequency_path, base_frequency.to_string())?;
+    }
+
+    let applied_min = read_cpufreq_value(&min_frequency_path)?;
+    let applied_max = read_cpufreq_value(&max_frequency_path)?;
+    if applied_min != base_frequency || applied_max != base_frequency {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            format!(
+                "CPU {cpu} frequency limits are {applied_min}-{applied_max} kHz, not the requested base {base_frequency} kHz"
+            ),
+        ));
+    }
+
+    info!(
+        "CPU {} frequency locked at {} MHz",
+        cpu,
+        base_frequency / 1000
+    );
+    Ok(base_frequency)
+}
+
+fn is_retryable_cpufreq_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+    ) || matches!(
+        error.raw_os_error(),
+        Some(libc::EBUSY) | Some(libc::EAGAIN)
+    )
+}
+
+fn read_cpufreq_value(path: &str) -> io::Result<u64> {
+    fs::read_to_string(path)?
+        .trim()
+        .parse::<u64>()
+        .map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid cpufreq value in {path}: {error}"),
+            )
+        })
+}
+
 fn process_exists(name: &str) -> bool {
     // Einfache Prüfung via /proc/ (funktioniert auf Linux)
     if let Ok(entries) = fs::read_dir("/proc") {

@@ -6,7 +6,7 @@ ifaces= [
 ]
 umem= [
     { id = 0, frame_size = 2048, frame_count = 262144, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 1 },
-    { id = 1, frame_size = 2048, frame_count = 262144, fq_size = 32768, cq_size = 32768, head_room = 128, partitions = 1 },
+    { id = 1, frame_size = 2048, frame_count = 262144, fq_size = 65536, cq_size = 32768, head_room = 128, partitions = 1 },
 ]
 
 # Optional XSK fields:
@@ -16,13 +16,13 @@ umem= [
 # Missing poll_mode defaults to "userspace_ring_spin".
 xsk= [
     { iface = "enp2s0f0np0", queues = [0], umem = 0, rxq_size = 32768, txq_size = 32768, zerocopy = true, xdp_mode = "auto",  poll_mode = "napi_busy_poll", napi_poll_timeout_ns = 2_050, busy_poll_ns = 2_000, busy_poll_budget= 512 },
-    { iface = "enp2s0f1np1", queues = [0], umem = 1, rxq_size = 32768, txq_size = 32768, zerocopy = true, xdp_mode = "auto",  poll_mode = "napi_busy_poll", napi_poll_timeout_ns = 2_050, busy_poll_ns = 2_000, busy_poll_budget= 512 },
+    { iface = "enp2s0f1np1", queues = [0], umem = 1, rxq_size = 65536, txq_size = 32768, zerocopy = true, xdp_mode = "auto",  poll_mode = "napi_busy_poll", napi_poll_timeout_ns = 2_000, busy_poll_ns = 3_000, busy_poll_budget= 768 },
 #    { iface = "enp2s0f1np1", queues = [0], umem = 1, rxq_size = 16384, txq_size = 16384, zerocopy = true, xdp_mode = "auto",  poll_mode = "userspace_ring_spin"},
 ]
 
 workers= [
-    { id = 0, core = 2, partitions = [{ umem = 0, count = 1 }] },
-    { id = 1, core = 3, partitions = [{ umem = 1, count = 1 }] },
+    { id = 0, core = 2, partitions = [{ umem = 0, count = 1 }], no_turbo = "false" },
+    { id = 1, core = 3, partitions = [{ umem = 1, count = 1 }], no_turbo = "true" },
 ]
 
 
@@ -43,7 +43,8 @@ type = "WasmEngine"
 routes = ["tx_f0np0", "drop", "drop"]
 # Node-level state override
 desired_state = "Running"
-args= { umem = "0", batch_size="512" }
+# batch_size_variance is an absolute +/- frame count; batch_size + variance must fit MAX_BATCH_SIZE.
+args= { umem = "0", batch_size = "512", batch_size_variance = "32" }
 hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/generator_engine.wasm" }
 
 [pipelines.nodes.node_data]
@@ -54,8 +55,8 @@ dst_mac = "44:49:88:06:63:39"
 src_ip = "10.10.10.222"
 
 [pipelines.nodes.hot_node_data]
-generation_limit = "500M"
-generation_rate = "17000K"
+generation_limit = "10000M"
+generation_rate = "10000K"
 
 [[pipelines.nodes]]
 id = "tx_f0np0"
@@ -89,7 +90,7 @@ id = "rx_f1np1"
 type = "BatchRxNode"
 routes = ["rx_parser"]
 queues = [0]
-args= { interface = "enp2s0f1np1", batch_size = "512" }
+args= { interface = "enp2s0f1np1", batch_size = "768" }
 hot_args= {}
 
 [[pipelines.nodes]]
@@ -107,8 +108,8 @@ routes = ["drop", "drop"]
 # Node-level state override
 desired_state = "Running"
 args= { umem = "1" }
-hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/inspector_engine.wasm" }
-#hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/inspector_engine_new.wasm" }
+#hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/inspector_engine.wasm" }
+hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/inspector_engine_new.wasm" }
 
 [pipelines.nodes.node_data]
 src_ip = "10.10.10.31"
