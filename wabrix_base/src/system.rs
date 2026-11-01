@@ -388,11 +388,30 @@ pub fn check_cpu_governor(cpu: usize) {
 /// driver supports a base-frequency limit. The policy may cover more than one
 /// logical CPU, depending on the processor and driver.
 pub fn lock_cpu_frequency_at_base(cpu: usize) -> io::Result<u64> {
+    retry_cpu_frequency_update(|| try_lock_cpu_frequency_at_base(cpu))
+}
+
+/// Remove a previous base-frequency cap by restoring the driver's full hardware
+/// frequency range. The cpufreq policy can cover multiple logical CPUs. Global
+/// boost controls and firmware must also permit turbo operation.
+pub fn enable_cpu_turbo(cpu: usize) -> io::Result<u64> {
+    let cpu_path = format!("/sys/devices/system/cpu/cpu{cpu}/cpufreq");
+    let max_frequency = retry_cpu_frequency_update(|| try_enable_cpu_turbo(&cpu_path))?;
+    warn_if_shared_cpu_policy(cpu, &cpu_path);
+    info!(
+        "CPU {} turbo-capable frequency limits restored (maximum {} MHz)",
+        cpu,
+        max_frequency / 1000
+    );
+    Ok(max_frequency)
+}
+
+fn retry_cpu_frequency_update(mut update: impl FnMut() -> io::Result<u64>) -> io::Result<u64> {
     const ATTEMPTS: usize = 10;
     const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 
     for attempt in 0..ATTEMPTS {
-        match try_lock_cpu_frequency_at_base(cpu) {
+        match update() {
             Ok(base_frequency) => return Ok(base_frequency),
             Err(error) => {
                 if !is_retryable_cpufreq_error(&error) || attempt + 1 == ATTEMPTS {
@@ -412,8 +431,6 @@ pub fn lock_cpu_frequency_at_base(cpu: usize) -> io::Result<u64> {
 fn try_lock_cpu_frequency_at_base(cpu: usize) -> io::Result<u64> {
     let cpu_path = format!("/sys/devices/system/cpu/cpu{cpu}/cpufreq");
     let base_frequency_path = format!("{cpu_path}/base_frequency");
-    let min_frequency_path = format!("{cpu_path}/scaling_min_freq");
-    let max_frequency_path = format!("{cpu_path}/scaling_max_freq");
 
     let base_frequency = fs::read_to_string(&base_frequency_path)?
         .trim()
@@ -431,46 +448,8 @@ fn try_lock_cpu_frequency_at_base(cpu: usize) -> io::Result<u64> {
         ));
     }
 
-    if let Ok(related_cpus) = fs::read_to_string(format!("{cpu_path}/related_cpus")) {
-        let related_cpus = related_cpus.trim();
-        if related_cpus.split_whitespace().count() > 1
-            || related_cpus.contains('-')
-            || related_cpus.contains(',')
-        {
-            warn!(
-                "CPU {} shares a cpufreq policy with CPUs {}; the base-frequency cap applies to that whole policy",
-                cpu, related_cpus
-            );
-        }
-    }
-
-    let current_min = read_cpufreq_value(&min_frequency_path)?;
-    let current_max = read_cpufreq_value(&max_frequency_path)?;
-
-    // Keep each write within the currently permitted min/max interval.
-    if current_min > base_frequency {
-        fs::write(&min_frequency_path, base_frequency.to_string())?;
-    }
-    if current_max < base_frequency {
-        fs::write(&max_frequency_path, base_frequency.to_string())?;
-    }
-    if read_cpufreq_value(&min_frequency_path)? != base_frequency {
-        fs::write(&min_frequency_path, base_frequency.to_string())?;
-    }
-    if read_cpufreq_value(&max_frequency_path)? != base_frequency {
-        fs::write(&max_frequency_path, base_frequency.to_string())?;
-    }
-
-    let applied_min = read_cpufreq_value(&min_frequency_path)?;
-    let applied_max = read_cpufreq_value(&max_frequency_path)?;
-    if applied_min != base_frequency || applied_max != base_frequency {
-        return Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
-            format!(
-                "CPU {cpu} frequency limits are {applied_min}-{applied_max} kHz, not the requested base {base_frequency} kHz"
-            ),
-        ));
-    }
+    warn_if_shared_cpu_policy(cpu, &cpu_path);
+    set_cpu_frequency_limits(&cpu_path, base_frequency, base_frequency)?;
 
     info!(
         "CPU {} frequency locked at {} MHz",
@@ -478,6 +457,75 @@ fn try_lock_cpu_frequency_at_base(cpu: usize) -> io::Result<u64> {
         base_frequency / 1000
     );
     Ok(base_frequency)
+}
+
+fn warn_if_shared_cpu_policy(cpu: usize, cpu_path: &str) {
+    if let Ok(related_cpus) = fs::read_to_string(format!("{cpu_path}/related_cpus")) {
+        let related_cpus = related_cpus.trim();
+        if related_cpus.split_whitespace().count() > 1
+            || related_cpus.contains('-')
+            || related_cpus.contains(',')
+        {
+            warn!(
+                "CPU {} shares a cpufreq policy with CPUs {}; frequency limits apply to that whole policy",
+                cpu, related_cpus
+            );
+        }
+    }
+}
+
+fn try_enable_cpu_turbo(cpu_path: &str) -> io::Result<u64> {
+    // Restore both bounds so a previous min=max=base lock is fully removed.
+    // Hardware limits are read before writing either policy attribute.
+    let min_frequency = read_cpufreq_value(&format!("{cpu_path}/cpuinfo_min_freq"))?;
+    let max_frequency = read_cpufreq_value(&format!("{cpu_path}/cpuinfo_max_freq"))?;
+    set_cpu_frequency_limits(cpu_path, min_frequency, max_frequency)?;
+    Ok(max_frequency)
+}
+
+fn set_cpu_frequency_limits(
+    cpu_path: &str,
+    min_frequency: u64,
+    max_frequency: u64,
+) -> io::Result<()> {
+    if min_frequency == 0 || min_frequency > max_frequency {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid CPU frequency range {min_frequency}-{max_frequency} kHz"),
+        ));
+    }
+    let min_frequency_path = format!("{cpu_path}/scaling_min_freq");
+    let max_frequency_path = format!("{cpu_path}/scaling_max_freq");
+
+    let current_min = read_cpufreq_value(&min_frequency_path)?;
+    let current_max = read_cpufreq_value(&max_frequency_path)?;
+
+    // Keep each write within the currently permitted min/max interval.
+    if current_min > max_frequency {
+        fs::write(&min_frequency_path, min_frequency.to_string())?;
+    }
+    if current_max < min_frequency {
+        fs::write(&max_frequency_path, max_frequency.to_string())?;
+    }
+    if read_cpufreq_value(&min_frequency_path)? != min_frequency {
+        fs::write(&min_frequency_path, min_frequency.to_string())?;
+    }
+    if read_cpufreq_value(&max_frequency_path)? != max_frequency {
+        fs::write(&max_frequency_path, max_frequency.to_string())?;
+    }
+
+    let applied_min = read_cpufreq_value(&min_frequency_path)?;
+    let applied_max = read_cpufreq_value(&max_frequency_path)?;
+    if applied_min != min_frequency || applied_max != max_frequency {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            format!(
+                "CPU frequency limits in {cpu_path} are {applied_min}-{applied_max} kHz, not the requested {min_frequency}-{max_frequency} kHz"
+            ),
+        ));
+    }
+
+    Ok(())
 }
 
 fn is_retryable_cpufreq_error(error: &io::Error) -> bool {
@@ -1430,6 +1478,91 @@ pub fn check_system(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestCpuFreq {
+        path: std::path::PathBuf,
+    }
+
+    impl TestCpuFreq {
+        fn new() -> Self {
+            static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("wabrix-cpufreq-test-{}-{id}", std::process::id()));
+            fs::create_dir(&path).unwrap();
+            let policy = Self { path };
+            for (name, value) in [
+                ("cpuinfo_min_freq", "800000"),
+                ("cpuinfo_max_freq", "5600000"),
+                ("scaling_min_freq", "3400000"),
+                ("scaling_max_freq", "3400000"),
+            ] {
+                fs::write(policy.path.join(name), value).unwrap();
+            }
+            policy
+        }
+
+        fn path(&self) -> &str {
+            self.path.to_str().unwrap()
+        }
+
+        fn limits(&self) -> (u64, u64) {
+            (
+                read_cpufreq_value(&format!("{}/scaling_min_freq", self.path())).unwrap(),
+                read_cpufreq_value(&format!("{}/scaling_max_freq", self.path())).unwrap(),
+            )
+        }
+    }
+
+    impl Drop for TestCpuFreq {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.path).unwrap();
+        }
+    }
+
+    #[test]
+    fn turbo_restores_hardware_limits_after_base_frequency_lock() {
+        let policy = TestCpuFreq::new();
+        assert_eq!(policy.limits(), (3_400_000, 3_400_000));
+
+        assert_eq!(try_enable_cpu_turbo(policy.path()).unwrap(), 5_600_000);
+        assert_eq!(policy.limits(), (800_000, 5_600_000));
+
+        // Applying the same setting again keeps the policy at the hardware limits.
+        try_enable_cpu_turbo(policy.path()).unwrap();
+        assert_eq!(policy.limits(), (800_000, 5_600_000));
+
+        // An explicit no_turbo request can still pin the policy back to base.
+        set_cpu_frequency_limits(policy.path(), 3_400_000, 3_400_000).unwrap();
+        assert_eq!(policy.limits(), (3_400_000, 3_400_000));
+    }
+
+    #[test]
+    fn turbo_rejects_invalid_hardware_limits_without_changing_policy() {
+        let policy = TestCpuFreq::new();
+        for (min, max) in [(0, 5_600_000), (800_000, 0), (5_600_000, 800_000)] {
+            fs::write(policy.path.join("cpuinfo_min_freq"), min.to_string()).unwrap();
+            fs::write(policy.path.join("cpuinfo_max_freq"), max.to_string()).unwrap();
+
+            assert_eq!(
+                try_enable_cpu_turbo(policy.path()).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert_eq!(policy.limits(), (3_400_000, 3_400_000));
+        }
+    }
+
+    #[test]
+    fn turbo_preserves_policy_when_hardware_limits_are_unavailable() {
+        let policy = TestCpuFreq::new();
+        fs::remove_file(policy.path.join("cpuinfo_max_freq")).unwrap();
+
+        assert_eq!(
+            try_enable_cpu_turbo(policy.path()).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(policy.limits(), (3_400_000, 3_400_000));
+    }
 
     #[test]
     fn test_interface_check_config_constructors() {

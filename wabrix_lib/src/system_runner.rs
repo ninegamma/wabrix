@@ -82,7 +82,8 @@ pub struct WabrixSystem {
     pub(crate) frame_registries: Vec<Option<FrameRegistry>>,
     pub telemetry_registry: Arc<TelemetryRegistry>,
     /// Indexed by worker_id (0..num_workers).
-    pub(crate) worker_runners: Vec<Option<(CoreId, bool, Vec<crate::pipeline::PipelineRunner>)>>,
+    pub(crate) worker_runners:
+        Vec<Option<(CoreId, Option<bool>, Vec<crate::pipeline::PipelineRunner>)>>,
     pub(crate) platform_data: PlatformData,
     pub shared_state: Arc<crate::config::hot_config::SharedSystemState>,
     /// All live UMEM handles indexed by umem_id (0..MAX_UMEM). None = not used.

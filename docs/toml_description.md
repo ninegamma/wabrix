@@ -129,13 +129,14 @@ xsk = [
 
 Array of worker threads. At least one is required.
 
-Default: one worker with `id=0`, `core=0`, `partitions=[{ umem=0, count=1 }]`.
+Default: one worker with `id=0`, `core=0`, `partitions=[{ umem=0, count=1 }]`, and `no_turbo` omitted.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `id` | integer | **yes** | Unique worker identifier. |
 | `core` | integer | **yes** | Logical CPU core to pin this worker to. Must be < total available cores. |
 | `partitions` | array of objects | no | UMEM partition requests (see below). Default `[]`. |
+| `no_turbo` | boolean or string | no | `true` locks frequency at base; `false` restores turbo-capable limits; omitted leaves current limits unchanged. See below. |
 
 Each element of `partitions`:
 
@@ -151,6 +152,40 @@ workers = [
     { id = 1, core = 10, partitions = [{ umem = 0, count = 1 }, { umem = 1, count = 1 }] },
 ]
 ```
+
+#### Worker CPU frequency settings
+
+Each worker can optionally specify `no_turbo`:
+
+```toml
+workers = [
+    { id = 0, core = 2, no_turbo = true },
+    { id = 1, core = 3, no_turbo = false },
+    { id = 2, core = 4 },
+]
+```
+
+- `true` sets both `scaling_min_freq` and `scaling_max_freq` to the CPU's
+  `base_frequency`.
+- `false` restores `scaling_min_freq` and `scaling_max_freq` from
+  `cpuinfo_min_freq` and `cpuinfo_max_freq`. This removes a previous Wabrix
+  base-frequency cap and allows turbo when the system and firmware permit it.
+- An omitted setting leaves the current frequency limits unchanged. Omission
+  does not undo a cap established by an earlier run.
+
+Both TOML booleans and strings (`"true"` and `"false"`) are accepted. Default
+workers and workers created by the generator configuration helper omit the
+setting.
+
+The limits apply to the whole Linux cpufreq policy, which can include multiple
+logical CPUs. Workers sharing a policy should use consistent settings.
+System-wide boost controls and BIOS settings are unchanged. Driver support and
+write permissions are required; failures are logged during worker startup.
+
+These settings are applied before the worker enters its packet-processing loop.
+Changing worker settings through `apply` triggers a full data-plane restart so
+the new policy is applied. Wabrix leaves the resulting frequency limits in place
+when workers stop.
 
 ---
 

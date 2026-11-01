@@ -67,7 +67,7 @@ fn default_workers() -> Vec<WorkerConfig> {
         id: 0,
         core: 0,
         partitions: vec![PartitionRequest { umem: 0, count: 1 }],
-        no_turbo: false,
+        no_turbo: None,
     }]
 }
 
@@ -276,11 +276,19 @@ pub struct WorkerConfig {
     pub core: usize,
     #[serde(default)]
     pub partitions: Vec<PartitionRequest>,
-    #[serde(default, deserialize_with = "deserialize_bool_or_string")]
-    pub no_turbo: bool,
+    /// None preserves the current policy; true locks to base, false restores turbo-capable limits.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_bool_or_string"
+    )]
+    #[ts(optional)]
+    pub no_turbo: Option<bool>,
 }
 
-fn deserialize_bool_or_string<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>
+fn deserialize_optional_bool_or_string<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<bool>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -291,9 +299,12 @@ where
         String(String),
     }
 
-    match BoolOrString::deserialize(deserializer)? {
-        BoolOrString::Bool(value) => Ok(value),
-        BoolOrString::String(value) => value.parse().map_err(serde::de::Error::custom),
+    match Option::<BoolOrString>::deserialize(deserializer)? {
+        Some(BoolOrString::Bool(value)) => Ok(Some(value)),
+        Some(BoolOrString::String(value)) => {
+            value.parse().map(Some).map_err(serde::de::Error::custom)
+        }
+        None => Ok(None),
     }
 }
 
@@ -570,7 +581,7 @@ pub struct PipelineInstance {
 pub struct WorkerBuilderConfig {
     pub id: u32,      // The Worker ID (unique)
     pub core_id: u32, // The CPU Core to pin to
-    pub no_turbo: bool,
+    pub no_turbo: Option<bool>,
     pub pipelines: Vec<PipelineInstance>, // List of pipelines this worker runs
 }
 
@@ -661,7 +672,7 @@ impl WabricksConfig {
                 id: worker_id,
                 core: base_core + worker_id,
                 partitions: vec![PartitionRequest { umem: 0, count: 1 }],
-                no_turbo: false,
+                no_turbo: None,
             };
             self.wabrix.workers.push(worker);
         }
@@ -1946,13 +1957,47 @@ impl WabricksConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{NodeConfig, PipelineLifecycle, WabricksConfig};
+    use super::{NodeConfig, PipelineLifecycle, WabricksConfig, WorkerConfig};
     use std::path::PathBuf;
     use ts_rs::{Config, TS};
 
     #[test]
     fn check_env() {
         println!("Exporting to: {:?}", std::env::var("TS_RS_EXPORT_DIR"));
+    }
+
+    #[test]
+    fn worker_no_turbo_distinguishes_missing_boolean_and_string_values() {
+        for (setting, expected) in [
+            ("", None),
+            ("no_turbo = true", Some(true)),
+            ("no_turbo = false", Some(false)),
+            ("no_turbo = \"true\"", Some(true)),
+            ("no_turbo = \"false\"", Some(false)),
+        ] {
+            let worker: WorkerConfig =
+                toml::from_str(&format!("id = 0\ncore = 2\n{setting}\n")).unwrap();
+            assert_eq!(worker.no_turbo, expected);
+            let serialized = toml::to_string(&worker).unwrap();
+            let round_trip: WorkerConfig = toml::from_str(&serialized).unwrap();
+            assert_eq!(round_trip.no_turbo, expected);
+            assert_eq!(serialized.contains("no_turbo"), expected.is_some());
+        }
+        assert!(WabricksConfig::default()
+            .wabrix
+            .workers
+            .iter()
+            .all(|worker| worker.no_turbo.is_none()));
+    }
+
+    #[test]
+    fn worker_no_turbo_rejects_invalid_values() {
+        for setting in ["\"invalid\"", "1"] {
+            assert!(toml::from_str::<WorkerConfig>(&format!(
+                "id = 0\ncore = 2\nno_turbo = {setting}\n"
+            ))
+            .is_err());
+        }
     }
 
     #[test]

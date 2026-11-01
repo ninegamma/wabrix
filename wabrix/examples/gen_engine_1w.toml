@@ -21,8 +21,8 @@ xsk= [
 ]
 
 workers= [
-    { id = 0, core = 2, partitions = [{ umem = 0, count = 1 }], no_turbo = "false" },
-    { id = 1, core = 3, partitions = [{ umem = 1, count = 1 }], no_turbo = "true" },
+    { id = 0, core = 2, partitions = [{ umem = 0, count = 1 }], no_turbo = true },
+    { id = 1, core = 3, partitions = [{ umem = 1, count = 1 }], no_turbo = false },
 ]
 
 
@@ -35,7 +35,8 @@ workers = [0]
 poll_frequency = 50000
 # Target lifecycle state for this pipeline
 # Valid values: "Running", "Paused",
-desired_state = "Running delay=2"
+# Delay in millis
+desired_state = "Running delay=1000"
 
 [[pipelines.nodes]]
 id = "generator_engine"
@@ -55,8 +56,8 @@ dst_mac = "44:49:88:06:63:39"
 src_ip = "10.10.10.222"
 
 [pipelines.nodes.hot_node_data]
-generation_limit = "5000M"
-generation_rate = "10000K"
+generation_limit = "2000M"
+generation_rate = "16000K"
 
 [[pipelines.nodes]]
 id = "tx_f0np0"
@@ -108,8 +109,8 @@ routes = ["drop", "drop"]
 # Node-level state override
 desired_state = "Running"
 args= { umem = "1" }
-hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/inspector_engine.wasm" }
-#hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/inspector_engine_new.wasm" }
+#hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/inspector_engine.wasm" }
+hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/inspector_engine_new.wasm" }
 
 [pipelines.nodes.node_data]
 src_ip = "10.10.10.31"

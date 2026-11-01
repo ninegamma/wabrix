@@ -42,6 +42,11 @@ pub fn reconcile_config(
     current: &WabricksConfig,
     target: &WabricksConfig,
 ) -> ReconciliationResult {
+    // Worker policies, including an explicit turbo request, are applied at startup.
+    if current.wabrix.workers != target.wabrix.workers {
+        return ReconciliationResult::FullRestart;
+    }
+
     if current.pipelines.len() != target.pipelines.len() {
         return ReconciliationResult::FullRestart;
     }
@@ -355,6 +360,27 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].opcode, StandardOpcode::SetOperationalState as u32);
         assert_eq!(events[0].payload, vec![1]);
+    }
+
+    #[test]
+    fn worker_turbo_policy_change_requires_restart() {
+        for (previous, requested) in [
+            (None, Some(false)),
+            (None, Some(true)),
+            (Some(true), Some(false)),
+            (Some(false), None),
+            (Some(true), None),
+        ] {
+            let mut current = config("TcpNode", None, None);
+            current.wabrix.workers[0].no_turbo = previous;
+            let mut target = current.clone();
+            target.wabrix.workers[0].no_turbo = requested;
+
+            assert!(matches!(
+                reconcile_config(Arc::new(SharedSystemState::default()), &current, &target),
+                ReconciliationResult::FullRestart
+            ));
+        }
     }
 
     fn wasm_config() -> WabricksConfig {

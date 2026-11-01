@@ -1616,7 +1616,7 @@ fn cpu_seconds(cycles: u64, tsc_frequency: u64) -> String {
 /// JoinHandle that resolves to aggregated statistics
 pub struct WorkerPipelineSpawnConfig {
     pub core_id: CoreId,
-    pub no_turbo: bool,
+    pub no_turbo: Option<bool>,
     pub frame_registry: wabrix_base::frame_registry::FrameRegistry,
     pub shutdown: Arc<AtomicBool>,
     pub workers_completed: Arc<AtomicUsize>,
@@ -1679,14 +1679,26 @@ pub fn spawn_worker_pipelines(
             );
         }
 
-        if no_turbo {
-            if let Err(error) = wabrix_base::system::lock_cpu_frequency_at_base(core_id.id) {
-                log::warn!(
-                    "Worker CPU {} requested no_turbo, but its frequency could not be locked at base: {}",
-                    core_id.id,
-                    error
-                );
+        match no_turbo {
+            Some(true) => {
+                if let Err(error) = wabrix_base::system::lock_cpu_frequency_at_base(core_id.id) {
+                    log::warn!(
+                        "Worker CPU {} requested no_turbo, but its frequency could not be locked at base: {}",
+                        core_id.id,
+                        error
+                    );
+                }
             }
+            Some(false) => {
+                if let Err(error) = wabrix_base::system::enable_cpu_turbo(core_id.id) {
+                    log::warn!(
+                        "Worker CPU {} requested turbo, but its frequency limits could not be restored: {}",
+                        core_id.id,
+                        error
+                    );
+                }
+            }
+            None => {}
         }
 
         let worker_id = if !runners.is_empty() {

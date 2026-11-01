@@ -2,7 +2,9 @@
 
 **The programmable, zero-copy data plane for custom network security and line-rate protocol parsing.**
 
-Wabrix is an ultra-high-performance network data plane that combines **Linux AF_XDP** (kernel bypass) with **WebAssembly (Wasm)** sandboxing. It allows you to build, deploy, and execute custom network security logic at 25-100 Gbps+ line rates with zero CPU-copy overhead.
+Wabrix is an ultra-high-performance network data plane that combines **Linux AF_XDP** (kernel bypass) with **WebAssembly (Wasm)** sandboxing. 
+It allows you to build, deploy, and execute custom network logic at 25-100 Gbps+ line rates. 
+It implements **hitless hot-reloading of stateful Wasm plugins**, .i.e., a switch-over without packet- or state-loss at full line rate.
 
 Designed for environments where standard firewalls fail—such as proprietary IoT networks and IT/OT converged infrastructure—Wabrix provides the deterministic speed of hardware appliances with the agility of dynamic software plugins.
 
