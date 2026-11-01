@@ -46,7 +46,7 @@ pub fn reconcile_config(
         return ReconciliationResult::FullRestart;
     }
 
-    let mut requires_rcu_update = false;
+    let mut rcu_updates = Vec::new();
     let mut generated_events = Vec::new();
     let empty_map = HashMap::new();
 
@@ -72,6 +72,9 @@ pub fn reconcile_config(
             return ReconciliationResult::FullRestart;
         }
 
+        let lifecycle_changed = current_pipeline.lifecycle_state != target_pipeline.lifecycle_state;
+        let mut changed_hot_nodes = Vec::new();
+
         // Transform nodes into HashMaps for deterministic ID-based lookup
         let current_nodes: HashMap<&String, &NodeConfig> =
             current_pipeline.nodes.iter().map(|n| (&n.id, n)).collect();
@@ -96,12 +99,11 @@ pub fn reconcile_config(
             // A WasmEngine artifact path is an executable update and is staged
             // on the workers. Other argument changes still require rebuilding
             // the node graph and therefore a full restart.
-            if current_node.args != target_node.args {
-                if target_node.node_type != "WasmEngine"
-                    || !args_equal_except_wasm_path(&current_node.args, &target_node.args)
-                {
-                    return ReconciliationResult::FullRestart;
-                }
+            if current_node.args != target_node.args
+                && (target_node.node_type != "WasmEngine"
+                    || !args_equal_except_wasm_path(&current_node.args, &target_node.args))
+            {
+                return ReconciliationResult::FullRestart;
             }
 
             // Startup data is consumed during construction and cannot be
@@ -130,16 +132,7 @@ pub fn reconcile_config(
 
             // Detect changes in RCU-backed declarative state
             if current_node.hot_args != target_node.hot_args {
-                requires_rcu_update = true;
-                if target_node.node_type == "WasmEngine"
-                    && current_node.effective_arg("wasm_file_path")
-                        != target_node.effective_arg("wasm_file_path")
-                {
-                    let Some(path) = target_node.effective_arg("wasm_file_path") else {
-                        return ReconciliationResult::FullRestart;
-                    };
-                    diff_updates.insert("wasm_file_path".to_string(), path.clone());
-                }
+                changed_hot_nodes.push(*target_node);
             }
 
             if target_node.node_type == "WasmEngine"
@@ -199,32 +192,34 @@ pub fn reconcile_config(
             }
         }
 
-        // Pipeline lifecycle transitions trigger RCU updates without structural rebuilds
-        if current_pipeline.lifecycle_state != target_pipeline.lifecycle_state {
-            requires_rcu_update = true;
+        // Publish only pipelines whose declarative RCU state actually changed.
+        if lifecycle_changed || !changed_hot_nodes.is_empty() {
+            rcu_updates.push((*target_pipeline, lifecycle_changed, changed_hot_nodes));
         }
     }
 
-    if !requires_rcu_update && generated_events.is_empty() {
+    if rcu_updates.is_empty() && generated_events.is_empty() {
         return ReconciliationResult::NoAction;
     }
 
     // Apply RCU mutations if required
-    if requires_rcu_update {
-        for target_pipeline in &target.pipelines {
-            let rcu = match system_state.pipelines.get(&target_pipeline.name) {
-                Some(r) => r,
-                None => {
-                    return ReconciliationResult::Error(format!(
-                        "Pipeline not found in system state: {}",
-                        target_pipeline.name
-                    ))
-                }
-            };
+    for (target_pipeline, lifecycle_changed, changed_hot_nodes) in rcu_updates {
+        let rcu = match system_state.pipelines.get(&target_pipeline.name) {
+            Some(r) => r,
+            None => {
+                return ReconciliationResult::Error(format!(
+                    "Pipeline not found in system state: {}",
+                    target_pipeline.name
+                ))
+            }
+        };
 
-            let current_ptr = rcu.load();
-            let mut offline_config = (**current_ptr).clone();
+        let current_ptr = rcu.load();
+        let mut offline_config = (**current_ptr).clone();
 
+        // Workers advance delayed startup independently of the TOML baseline.
+        // Preserve that runtime state unless a lifecycle transition was requested.
+        if lifecycle_changed {
             match target_pipeline.lifecycle_state.as_ref() {
                 Some(PipelineLifecycle::RunningDelayed(delay_ms)) => {
                     offline_config.lifecycle_state = Some(PipelineLifecycle::Paused);
@@ -237,21 +232,21 @@ pub fn reconcile_config(
                     offline_config.delayed_start_at = None;
                 }
             }
-
-            for target_node in &target_pipeline.nodes {
-                if let Some(idx) = offline_config.name_to_index.get(&target_node.id) {
-                    let dynamic_state = &mut offline_config.fast_nodes[*idx].dynamic_state;
-                    dynamic_state.update_from_strings(&target_node.hot_args);
-                } else {
-                    return ReconciliationResult::Error(format!(
-                        "Node index not found for: {}",
-                        target_node.id
-                    ));
-                }
-            }
-
-            rcu.store(Arc::new(offline_config));
         }
+
+        for target_node in changed_hot_nodes {
+            if let Some(idx) = offline_config.name_to_index.get(&target_node.id) {
+                let dynamic_state = &mut offline_config.fast_nodes[*idx].dynamic_state;
+                dynamic_state.update_from_strings(&target_node.hot_args);
+            } else {
+                return ReconciliationResult::Error(format!(
+                    "Node index not found for: {}",
+                    target_node.id
+                ));
+            }
+        }
+
+        rcu.store(Arc::new(offline_config));
     }
 
     ReconciliationResult::LiveUpdated(generated_events)
@@ -260,10 +255,14 @@ pub fn reconcile_config(
 #[cfg(test)]
 mod tests {
     use super::{reconcile_config, ReconciliationResult};
-    use crate::config::hot_config::SharedSystemState;
+    use crate::config::hot_config::{
+        HotNodeData, HotPipelineConfig, NodeDynamicState, SharedSystemState,
+    };
     use crate::toml_parser::{NodeConfig, PipelineConfig, PipelineLifecycle, WabricksConfig};
+    use arc_swap::ArcSwap;
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
     use wabrix_api::{HotWasmPayload, StandardOpcode};
 
     fn config(
@@ -356,5 +355,195 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].opcode, StandardOpcode::SetOperationalState as u32);
         assert_eq!(events[0].payload, vec![1]);
+    }
+
+    fn wasm_config() -> WabricksConfig {
+        let mut current = config("WasmEngine", None, None);
+        current.pipelines[0].lifecycle_state = Some(PipelineLifecycle::RunningDelayed(2));
+        current.pipelines[0].nodes[0]
+            .hot_args
+            .insert("wasm_file_path".into(), "old.wasm".into());
+        current
+    }
+
+    fn wasm_shared_state(config: &WabricksConfig) -> Arc<SharedSystemState> {
+        let pipelines = config
+            .pipelines
+            .iter()
+            .map(|pipeline| {
+                let hot = HotPipelineConfig {
+                    fast_nodes: pipeline
+                        .nodes
+                        .iter()
+                        .map(|node| HotNodeData {
+                            dynamic_state: NodeDynamicState::WasmEngine {
+                                wasm_file_path: node
+                                    .effective_arg("wasm_file_path")
+                                    .unwrap()
+                                    .clone(),
+                            },
+                            ..HotNodeData::default()
+                        })
+                        .collect(),
+                    name_to_index: pipeline
+                        .nodes
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, node)| (node.id.clone(), idx))
+                        .collect(),
+                    // The workers have already completed their configured startup delay.
+                    lifecycle_state: Some(PipelineLifecycle::Running),
+                    poll_frequency: pipeline.poll_frequency,
+                    ..HotPipelineConfig::default()
+                };
+                (pipeline.name.clone(), Arc::new(ArcSwap::from_pointee(hot)))
+            })
+            .collect();
+        SharedSystemState::new(pipelines)
+    }
+
+    #[test]
+    fn wasm_path_update_preserves_running_lifecycle_and_other_pipelines() {
+        let mut current = wasm_config();
+        let mut generator = current.pipelines[0].clone();
+        generator.name = "generator_pipe".into();
+        current.pipelines.push(generator);
+        let state = wasm_shared_state(&current);
+        let old_generator = state.pipelines["generator_pipe"].load_full();
+        let old_inspector = state.pipelines["p0"].load_full();
+        let mut target = current.clone();
+        target.pipelines[0].nodes[0]
+            .hot_args
+            .insert("wasm_file_path".into(), "new.wasm".into());
+
+        let ReconciliationResult::LiveUpdated(events) =
+            reconcile_config(state.clone(), &current, &target)
+        else {
+            panic!("expected a live Wasm update");
+        };
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].address_pattern, "*/p0/n0/WasmEngine");
+        assert_eq!(events[0].opcode, StandardOpcode::UpdateConfiguration as u32);
+        let payload = postcard::from_bytes::<HotWasmPayload>(&events[0].payload).unwrap();
+        assert_eq!(payload.updates.get("wasm_file_path").unwrap(), "new.wasm");
+        let new_generator = state.pipelines["generator_pipe"].load_full();
+        assert!(Arc::ptr_eq(&old_generator, &new_generator));
+        let new_inspector = state.pipelines["p0"].load_full();
+        assert!(!Arc::ptr_eq(&old_inspector, &new_inspector));
+        assert_eq!(
+            new_inspector.lifecycle_state,
+            Some(PipelineLifecycle::Running)
+        );
+        assert_eq!(new_inspector.startup_delay_ms, None);
+        assert_eq!(new_inspector.delayed_start_at, None);
+        assert!(matches!(
+            &new_inspector.fast_nodes[0].dynamic_state,
+            NodeDynamicState::WasmEngine { wasm_file_path } if wasm_file_path == "new.wasm"
+        ));
+    }
+
+    #[test]
+    fn hot_update_preserves_pending_startup_deadline() {
+        let current = wasm_config();
+        let state = wasm_shared_state(&current);
+        let deadline = Instant::now() + Duration::from_millis(2);
+        let mut waiting = (*state.pipelines["p0"].load_full()).clone();
+        waiting.lifecycle_state = Some(PipelineLifecycle::Paused);
+        waiting.startup_delay_ms = Some(2);
+        waiting.delayed_start_at = Some(deadline);
+        state.pipelines["p0"].store(Arc::new(waiting));
+        let mut target = current.clone();
+        target.pipelines[0].nodes[0]
+            .hot_args
+            .insert("wasm_file_path".into(), "new.wasm".into());
+
+        assert!(matches!(
+            reconcile_config(state.clone(), &current, &target),
+            ReconciliationResult::LiveUpdated(_)
+        ));
+
+        let hot = state.pipelines["p0"].load_full();
+        assert_eq!(hot.lifecycle_state, Some(PipelineLifecycle::Paused));
+        assert_eq!(hot.startup_delay_ms, Some(2));
+        assert_eq!(hot.delayed_start_at, Some(deadline));
+    }
+
+    #[test]
+    fn explicit_lifecycle_change_applies_new_state_and_delay() {
+        for desired in [
+            Some(PipelineLifecycle::RunningDelayed(5)),
+            Some(PipelineLifecycle::Running),
+            Some(PipelineLifecycle::Paused),
+            None,
+        ] {
+            let current = wasm_config();
+            let state = wasm_shared_state(&current);
+            let mut target = current.clone();
+            target.pipelines[0].lifecycle_state = desired.clone();
+
+            let ReconciliationResult::LiveUpdated(events) =
+                reconcile_config(state.clone(), &current, &target)
+            else {
+                panic!("expected a lifecycle update");
+            };
+
+            assert!(events.is_empty());
+            let hot = state.pipelines["p0"].load_full();
+            match desired {
+                Some(PipelineLifecycle::RunningDelayed(delay_ms)) => {
+                    assert_eq!(hot.lifecycle_state, Some(PipelineLifecycle::Paused));
+                    assert_eq!(hot.startup_delay_ms, Some(delay_ms));
+                }
+                state => {
+                    assert_eq!(hot.lifecycle_state, state);
+                    assert_eq!(hot.startup_delay_ms, None);
+                }
+            }
+            assert_eq!(hot.delayed_start_at, None);
+        }
+    }
+
+    #[test]
+    fn hot_update_preserves_unchanged_node_runtime_state() {
+        let mut current = wasm_config();
+        let mut other_node = current.pipelines[0].nodes[0].clone();
+        other_node.id = "other".into();
+        current.pipelines[0].nodes.push(other_node);
+        let state = wasm_shared_state(&current);
+        let mut hot = (*state.pipelines["p0"].load_full()).clone();
+        hot.fast_nodes[1].dynamic_state = NodeDynamicState::WasmEngine {
+            wasm_file_path: "runtime.wasm".into(),
+        };
+        state.pipelines["p0"].store(Arc::new(hot));
+        let mut target = current.clone();
+        target.pipelines[0].nodes[0]
+            .hot_args
+            .insert("wasm_file_path".into(), "new.wasm".into());
+
+        assert!(matches!(
+            reconcile_config(state.clone(), &current, &target),
+            ReconciliationResult::LiveUpdated(_)
+        ));
+
+        let hot = state.pipelines["p0"].load_full();
+        assert!(matches!(
+            &hot.fast_nodes[1].dynamic_state,
+            NodeDynamicState::WasmEngine { wasm_file_path } if wasm_file_path == "runtime.wasm"
+        ));
+    }
+
+    #[test]
+    fn unchanged_config_does_not_publish_rcu_state() {
+        let current = wasm_config();
+        let state = wasm_shared_state(&current);
+        let before = state.pipelines["p0"].load_full();
+
+        assert!(matches!(
+            reconcile_config(state.clone(), &current, &current),
+            ReconciliationResult::NoAction
+        ));
+
+        assert!(Arc::ptr_eq(&before, &state.pipelines["p0"].load_full()));
     }
 }

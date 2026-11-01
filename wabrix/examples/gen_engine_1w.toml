@@ -55,7 +55,7 @@ dst_mac = "44:49:88:06:63:39"
 src_ip = "10.10.10.222"
 
 [pipelines.nodes.hot_node_data]
-generation_limit = "10000M"
+generation_limit = "5000M"
 generation_rate = "10000K"
 
 [[pipelines.nodes]]
@@ -108,8 +108,8 @@ routes = ["drop", "drop"]
 # Node-level state override
 desired_state = "Running"
 args= { umem = "1" }
-#hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/inspector_engine.wasm" }
-hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/inspector_engine_new.wasm" }
+hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/inspector_engine.wasm" }
+#hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/inspector_engine_new.wasm" }
 
 [pipelines.nodes.node_data]
 src_ip = "10.10.10.31"

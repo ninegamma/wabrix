@@ -8,10 +8,6 @@ use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use tokio::sync::broadcast::Sender;
 use ts_rs::TS;
-pub use wabrix_api::{
-    INSPECTOR_DELAY_HISTOGRAM_BUCKETS, INSPECTOR_DELAY_HISTOGRAM_BUCKET_WIDTH_US,
-    INSPECTOR_DELAY_HISTOGRAM_FINITE_BUCKETS,
-};
 
 const SIOCETHTOOL: libc::c_ulong = 0x8946;
 const ETHTOOL_GDRVINFO: u32 = 0x0000_0003;

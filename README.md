@@ -37,8 +37,8 @@ Designed for environments where standard firewalls fail—such as proprietary Io
 
 ## 🚀 Performance Metrics (Intel© Core™ i7-14700K)
 
-* **TX Performance**: Generates **22 Mpps/core** time-stamped UDP packets using the WebAssembly generator engine
-* **RX Performance**: Evaluates **17 Mpps/core** time-stamped UDP packets using the WebAssembly inspector engine
+* **TX Performance**: Generates **22 Mpps/core** time-stamped UDP packets using the WebAssembly generator engine (turbo mode)
+* **RX Performance**: Evaluates **17 Mpps/core** time-stamped UDP packets using the WebAssembly inspector engine (turbo mode)
 * **Stateful Inspection:** High-speed, wire-speed tracking of millions of concurrent connection states (L4/L7) with a minimal, deterministic memory footprint.
 * **Efficiency:** Demonstrated setup and release of more than **1 million TCP connections/second per performance CPU core**.
 * **Latency:** Deterministic, microsecond-level processing for time-sensitive industrial control loops.

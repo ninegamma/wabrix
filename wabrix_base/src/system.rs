@@ -404,7 +404,9 @@ pub fn lock_cpu_frequency_at_base(cpu: usize) -> io::Result<u64> {
         }
     }
 
-    Err(io::Error::other("cpufreq retry loop completed without a result"))
+    Err(io::Error::other(
+        "cpufreq retry loop completed without a result",
+    ))
 }
 
 fn try_lock_cpu_frequency_at_base(cpu: usize) -> io::Result<u64> {
@@ -482,10 +484,7 @@ fn is_retryable_cpufreq_error(error: &io::Error) -> bool {
     matches!(
         error.kind(),
         io::ErrorKind::NotFound | io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-    ) || matches!(
-        error.raw_os_error(),
-        Some(libc::EBUSY) | Some(libc::EAGAIN)
-    )
+    ) || matches!(error.raw_os_error(), Some(libc::EBUSY) | Some(libc::EAGAIN))
 }
 
 fn read_cpufreq_value(path: &str) -> io::Result<u64> {

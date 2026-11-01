@@ -568,8 +568,8 @@ pub struct PipelineInstance {
 /// Configuration for a single Worker Thread.
 #[derive(Clone)]
 pub struct WorkerBuilderConfig {
-    pub id: u32,                          // The Worker ID (unique)
-    pub core_id: u32,                     // The CPU Core to pin to
+    pub id: u32,      // The Worker ID (unique)
+    pub core_id: u32, // The CPU Core to pin to
     pub no_turbo: bool,
     pub pipelines: Vec<PipelineInstance>, // List of pipelines this worker runs
 }
@@ -901,14 +901,13 @@ impl WabricksConfig {
                 ));
             }
 
-            let umem_size_bytes =
-                u64::from(umem_cfg.frame_count) * u64::from(umem_cfg.frame_size);
+            let umem_size_bytes = u64::from(umem_cfg.frame_count) * u64::from(umem_cfg.frame_size);
             if umem_size_bytes % hugepage_size_bytes != 0 {
                 let frame_count_alignment = hugepage_size_bytes
                     / gcd_u64(hugepage_size_bytes, u64::from(umem_cfg.frame_size));
-                let next_aligned_frame_count =
-                    u64::from(umem_cfg.frame_count).div_ceil(frame_count_alignment)
-                        * frame_count_alignment;
+                let next_aligned_frame_count = u64::from(umem_cfg.frame_count)
+                    .div_ceil(frame_count_alignment)
+                    * frame_count_alignment;
                 return Err(anyhow!(
                     "UMEM {}: frame_count ({}) × frame_size ({}) = {} bytes is not aligned to the system HugeTLB page size ({} bytes). With HugeTLB allocation, frame_count must be a multiple of {} for this frame_size; next aligned count is {}.",
                     umem_cfg.id,

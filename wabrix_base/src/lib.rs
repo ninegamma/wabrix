@@ -247,8 +247,7 @@ impl SystemBus {
             partition_size: map.partition_size,
             partition_size_shift: map.partition_size.trailing_zeros(),
             partition_size_is_power_of_two: map.partition_size.is_power_of_two(),
-            partition_size_reciprocal: (u64::from(u32::MAX) + 1)
-                / u64::from(map.partition_size),
+            partition_size_reciprocal: (u64::from(u32::MAX) + 1) / u64::from(map.partition_size),
             slots,
         }
     }

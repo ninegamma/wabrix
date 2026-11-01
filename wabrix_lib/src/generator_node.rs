@@ -147,11 +147,7 @@ impl GeneratorNode {
                 .build();
             let mut store = Store::new(
                 manager.engine(),
-                MyHostState {
-                    ctx: wasi_ctx,
-                    table: ResourceTable::new(),
-                    umem: partition_handle.clone(),
-                },
+                MyHostState::new(wasi_ctx, ResourceTable::new(), partition_handle.clone()),
             );
 
             let bindings = GeneratorPlugin::instantiate(&mut store, &component, manager.linker())

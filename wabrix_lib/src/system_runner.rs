@@ -9,6 +9,8 @@ use wabrix_base::frame_registry::FrameRegistry;
 use wabrix_base::system::PlatformData;
 use wabrix_base::telemetry::TelemetryRegistry;
 use wabrix_base::ControlEvent;
+#[cfg(feature = "wasm")]
+use wabrix_wasm::WasmReloadService;
 use xsk_core::Umem;
 
 /// Capture the CPUs available to an ordinary, unpinned thread before any
@@ -109,6 +111,11 @@ impl WabrixSystem {
             "CPUs allowed for Wasm housekeeping/background threads: {:?}",
             generic_cpu_affinity.0
         );
+        #[cfg(feature = "wasm")]
+        let wasm_reload_service =
+            WasmReloadService::new(generic_cpu_affinity.clone()).map_err(anyhow::Error::msg)?;
+        #[cfg(feature = "wasm")]
+        info!("Started one shared Wasm staging worker and runtime reaper");
 
         // --- SPAWN WORKER THREADS ---
 
@@ -152,7 +159,7 @@ impl WabrixSystem {
                     control_rx: worker_control_rx,
                     control_senders: worker_control_senders,
                     #[cfg(feature = "wasm")]
-                    generic_cpu_affinity: generic_cpu_affinity.clone(),
+                    wasm_reload_service: wasm_reload_service.clone(),
                 },
             );
 

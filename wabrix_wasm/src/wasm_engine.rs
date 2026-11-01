@@ -1,4 +1,4 @@
-use crate::wasm_manager::{MyHostState, WasmManager};
+use crate::wasm_manager::{MyHostState, SharedStateRegion, WasmManager};
 use crate::wasm_reloader::WasmReloadSpec;
 use core::mem::size_of;
 use std::collections::HashMap;
@@ -48,6 +48,8 @@ pub struct WasmEngine {
     worker_index: usize,
     tsc_frequency: u64,
     manager: Arc<WasmManager>,
+    /// Backing region retained across active and staged runtimes for this node.
+    shared_state: Arc<SharedStateRegion>,
     wasm_file_path: String,
     base_node_data: HashMap<String, String>,
     hot_node_data: HashMap<String, String>,
@@ -125,6 +127,46 @@ impl WasmEngine {
         platform_data: &PlatformData,
         mailbox_offset: u32,
     ) -> Result<Self, String> {
+        let shared_state = manager
+            .create_shared_state_region()
+            .map_err(|error| format!("failed to create shared-state region: {error}"))?;
+        Self::new_with_shared_state(
+            id,
+            pipeline_name,
+            worker_id,
+            worker_index,
+            manager,
+            wasm_file_path,
+            routing_table,
+            telemetry_metrics,
+            umem_id,
+            node_data,
+            base_node_data,
+            hot_node_data,
+            platform_data,
+            mailbox_offset,
+            shared_state,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_shared_state(
+        id: NodeId,
+        pipeline_name: String,
+        worker_id: usize,
+        worker_index: usize,
+        manager: Arc<WasmManager>,
+        wasm_file_path: &str,
+        routing_table: Vec<NodeId>,
+        telemetry_metrics: TelemetryMetrics,
+        umem_id: u8,
+        node_data: HashMap<String, String>,
+        base_node_data: HashMap<String, String>,
+        hot_node_data: HashMap<String, String>,
+        platform_data: &PlatformData,
+        mailbox_offset: u32,
+        shared_state: Arc<SharedStateRegion>,
+    ) -> Result<Self, String> {
         let timer_diagnostics = TimerDiagnostics::new(
             &node_data,
             &routing_table,
@@ -133,7 +175,6 @@ impl WasmEngine {
             worker_id,
             worker_index,
         );
-
         // 1. Fetch the Component from the Manager's DashMap cache
         // This takes nanoseconds if already loaded, avoiding disk I/O.
         let component = manager
@@ -147,7 +188,8 @@ impl WasmEngine {
 
         // 2. Build an instance-specific handle with a private linear mapping
         //    and an alias of the complete shared UMEM.
-        let partition_handle = manager.make_partition_handle();
+        let partition_handle =
+            manager.make_partition_handle_with_shared_state(shared_state.clone());
 
         // 3. Pre-load the partition handle into the shared XdpMemoryCreator so
         //    that Wasmtime picks it up when it calls new_memory() during instantiate().
@@ -164,11 +206,7 @@ impl WasmEngine {
         // in the background to hand out the zero-copy UMEM handle.
         let mut store = Store::new(
             manager.engine(),
-            MyHostState {
-                ctx: wasi_ctx,
-                table: ResourceTable::new(),
-                umem: partition_handle.clone(), // Host-side state also sees the partition window
-            },
+            MyHostState::new(wasi_ctx, ResourceTable::new(), partition_handle.clone()),
         );
 
         // 6. Instantiate the plugin.
@@ -229,6 +267,7 @@ impl WasmEngine {
             worker_index,
             tsc_frequency: platform_data.tsc_frequency,
             manager,
+            shared_state,
             wasm_file_path: wasm_file_path.to_string(),
             base_node_data,
             hot_node_data,
@@ -259,11 +298,13 @@ impl WasmEngine {
             telemetry_metrics: self.telemetry_metrics.clone(),
             umem_id: self.umem_id,
             mailbox_offset: self.mailbox_offset,
+            shared_state: self.shared_state.clone(),
         }
     }
 
     /// Installs only runtime-owned state; graph and node accounting remain with this node.
     pub(crate) fn install_candidate(&mut self, mut candidate: WasmEngine) -> WasmRuntime {
+        debug_assert!(Arc::ptr_eq(&self.shared_state, &candidate.shared_state));
         std::mem::swap(&mut self.runtime, &mut candidate.runtime);
         self.poisoned = false;
         self.wasm_file_path = candidate.wasm_file_path;
@@ -271,30 +312,41 @@ impl WasmEngine {
         candidate.runtime
     }
 
-    /// Transfer plugin-owned state at the runner boundary, immediately before activation.
-    /// The old runtime is not called again until this operation and the subsequent swap finish.
-    pub(crate) fn transfer_state_to_candidate(
-        &mut self,
+    /// Upgrade shared payload metadata at the runner's quiescent switchover boundary.
+    /// State bytes are already visible through the shared mapping; only declared
+    /// append-only migrations call into the staged guest.
+    pub(crate) fn upgrade_shared_state_for_candidate(
         candidate: &mut WasmEngine,
     ) -> Result<(), String> {
-        let state = tokio::task::block_in_place(|| {
-            self.runtime
-                .bindings
-                .wabrix_plugins_packet_engine()
-                .call_save_state(&mut self.runtime.store)
-        })
-        .map_err(|error| format!("old plugin trapped while saving state: {error}"))?
-        .map_err(|error| format!("old plugin could not save state: {error}"))?;
+        let Some(attachment) = candidate.runtime.store.data().shared_state_attachment else {
+            return Ok(());
+        };
+        if !attachment.upgrade_required {
+            return Ok(());
+        }
 
         tokio::task::block_in_place(|| {
             candidate
                 .runtime
                 .bindings
                 .wabrix_plugins_packet_engine()
-                .call_restore_state(&mut candidate.runtime.store, &state)
+                .call_upgrade_shared_state(
+                    &mut candidate.runtime.store,
+                    attachment.current_schema_version,
+                    attachment.current_payload_size,
+                )
         })
-        .map_err(|error| format!("replacement plugin trapped while restoring state: {error}"))?
-        .map_err(|error| format!("replacement plugin rejected state: {error}"))
+        .map_err(|error| {
+            format!("replacement plugin trapped during shared-state upgrade: {error}")
+        })?
+        .map_err(|error| format!("replacement plugin rejected shared-state upgrade: {error}"))?;
+
+        candidate
+            .runtime
+            .store
+            .data()
+            .umem
+            .commit_shared_state_upgrade(attachment)
     }
 
     /// Extracts a staged runtime so its destruction can happen on the reaper thread.

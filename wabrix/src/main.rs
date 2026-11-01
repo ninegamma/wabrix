@@ -400,7 +400,8 @@ async fn main() -> anyhow::Result<()> {
 
                                     match target_config_result {
                                         Ok(target_config) => {
-                                            print_wabrix_section(&new_path);
+                                            //print_wabrix_section(&new_path);
+
                                             match reconcile_config(system_state.clone(), &current_config, &target_config) {
                                                 ReconciliationResult::FullRestart => {
                                                     info!("Structural changes detected. Initiating full data plane restart.");

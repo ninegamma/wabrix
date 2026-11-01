@@ -58,15 +58,18 @@ compiled component when that path is loaded again.
    merged with the latest `hot_node_data` values. It must instantiate
    successfully and accept `init-data`. A false result, trap, file error, or
    compile/instantiate error rejects the candidate.
-4. **Transfer state and switch at a runner boundary.** The `PipelineRunner`
-   checks for completed candidates when it is already polling timers and control
-   events. Before swapping in a ready runtime, it asks the active plugin to
-   serialize its state and the candidate to restore it. Both calls happen at
-   this boundary, with no packet processing between them. If saving or restoring
-   fails, the candidate is rejected and the active runtime remains installed.
-   The routes, packet counters, pipeline, worker thread, and sockets remain in
-   place. Packets already processed in the current iteration use the prior
-   component; later work uses the new one.
+4. **Switch at a runner boundary.** The `PipelineRunner` checks for completed
+   candidates when it is already polling timers and control events. The active
+   and staged engine instances already map the same per-node shared-state
+   region, so matching layouts need no copy. If the candidate declares an
+   append-only upgrade from the stored schema, the runner calls its
+   `upgrade-shared-state` export at this boundary, after the old runtime has
+   stopped accessing the payload. The host commits the new schema version and
+   payload size only after the callback succeeds. A trap, rejected upgrade, or
+   incompatible layout discards the candidate and leaves the old runtime
+   installed. The routes, packet counters, pipeline, worker thread, and sockets
+   remain in place. Packets already processed in the current iteration use the
+   prior component; later work uses the new one.
 5. **Retire the old runtime.** The prior Wasmtime runtime is handed to a reaper
    thread for destruction, keeping teardown off the packet-processing path.
 
@@ -85,25 +88,24 @@ in the logs; it does not force a pipeline restart.
 ## Availability and state
 
 The handoff keeps the Wabrix worker and AF_XDP sockets running, avoiding the
-service interruption that a dataplane restart would cause. For stateless
-inspection and filtering logic, traffic continues through the handoff without
-an interface or pipeline restart. Application-session continuity still depends
-on whether the plugin relies on private state, as described below.
+service interruption that a dataplane restart would cause. Plugins that need
+state continuity opt into the shared-state API and declare a fixed-layout
+payload. The host maps that same backing region into both engine instances; it
+does not serialize or restore a state snapshot. Plugins that do not attach a
+shared region start with instance-local state after reload.
 
-The packet-engine WIT interface provides `save-state` and `restore-state`
-functions that pass an opaque byte snapshot through the host. Each plugin owns
-its serialization format and decides which state can be restored. The host
-does not copy guest memory or interpret the snapshot. A plugin that does not
-maintain transferable state can return an empty snapshot and accept only an
-empty snapshot during restore.
+The replacement attaches to the same shared backing as the old instance. For
+matching layouts, state is already present when the candidate is installed. For
+an append-only schema change, the candidate initializes appended fields at the
+switchover boundary; the host updates the header only after the callback
+succeeds.
 
-`inspector_engine` transfers its bypass setting and telemetry counters. The
-replacement still uses the `src_mac` and `dst_mac` values from its newly supplied
-startup data, and recalculates its timing scale from the current TSC frequency.
-Other plugins currently provide empty-state implementations, so their
-plugin-owned state is not preserved. A candidate is activated only when state
-restoration succeeds; plugins with state formats they cannot read should reject
-the snapshot to keep the current runtime active.
+`inspector_engine` keeps its bypass setting and telemetry counters in shared
+memory. The replacement still reads `src_mac` and `dst_mac` from its newly
+supplied startup data and recalculates its timing scale from the current TSC
+frequency. A schema change is accepted only when the new plugin declares the
+old schema compatible and its upgrade callback initializes appended fields.
+Reordering or changing existing fields requires a separate migration contract.
 
 The reload is per worker rather than a globally atomic rollout. If all workers
 must use one policy version at the same instant, this mechanism alone does not
@@ -117,5 +119,5 @@ rollout at a higher level.
   versioned path.
 - Change only the Wasm path and intended live plugin data in the target config.
 - Apply the config and watch worker logs for activation or staging failures.
-- Confirm that plugin-owned sessions can tolerate a fresh instance before
-  reloading stateful components.
+- Confirm stateful plugins attach a compatible shared-state layout, or verify
+  that they can tolerate instance-local state after reload.

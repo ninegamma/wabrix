@@ -16,7 +16,7 @@ pub(crate) use crate::{BatchRx, BatchTx};
 use crossbeam_channel::Receiver;
 use separator::Separatable;
 use wabrix_api::helpers::parse_suffixed_number;
-use wabrix_api::{StandardOpcode, MAX_BATCH_SIZE};
+use wabrix_api::{StandardOpcode, MAX_BATCH_SIZE, MAX_HISTOGRAM_BUCKETS};
 use wabrix_base::common::formatting::PreciseSeparator;
 use wabrix_base::frame_registry::{set_tsc_frequency, set_worker_frame_registry};
 use wabrix_base::node_instance_id::NodeInstanceId;
@@ -26,7 +26,7 @@ use wabrix_base::{ControlEvent, ControlEventResult, Directive, Node, NodeId};
 #[cfg(feature = "wasm")]
 use wabrix_wasm::wasm_manager::WasmManager;
 #[cfg(feature = "wasm")]
-use wabrix_wasm::{WasmEngine, WasmReloadController};
+use wabrix_wasm::{WasmEngine, WasmReloadController, WasmReloadService};
 
 /// Real-time priority used by the packet-processing workers.
 ///
@@ -793,9 +793,7 @@ impl PipelineFactory {
                         .map(|_| Arc::new(CachePadded::new(AtomicU64::new(0))))
                         .collect();
                     let tm_force_sync = Arc::new(AtomicBool::new(false));
-                    let delay_histogram = Arc::new(HistogramMetrics::new(
-                        wabrix_base::telemetry::INSPECTOR_DELAY_HISTOGRAM_BUCKETS,
-                    ));
+                    let delay_histogram = Arc::new(HistogramMetrics::new(MAX_HISTOGRAM_BUCKETS));
 
                     if let Some(registry) = telemetry_registry.as_mut() {
                         registry.register(
@@ -845,10 +843,8 @@ impl PipelineFactory {
                     if let Some(batch_size) = node_instance.node_config.args.get("batch_size") {
                         base_node_data.insert("batch_size".to_string(), batch_size.clone());
                     }
-                    if let Some(batch_size_variance) = node_instance
-                        .node_config
-                        .args
-                        .get("batch_size_variance")
+                    if let Some(batch_size_variance) =
+                        node_instance.node_config.args.get("batch_size_variance")
                     {
                         base_node_data.insert(
                             "batch_size_variance".to_string(),
@@ -1628,9 +1624,9 @@ pub struct WorkerPipelineSpawnConfig {
     pub is_one_shot: bool,
     pub control_rx: Option<Receiver<Arc<ControlEvent>>>,
     pub control_senders: Vec<crossbeam_channel::Sender<Arc<ControlEvent>>>,
-    /// CPUs available to generic threads, captured before packet workers are pinned.
+    /// Shared Wasm background workers started before packet workers.
     #[cfg(feature = "wasm")]
-    pub generic_cpu_affinity: (Vec<usize>, usize),
+    pub wasm_reload_service: WasmReloadService,
 }
 
 pub fn spawn_worker_pipelines(
@@ -1648,8 +1644,15 @@ pub fn spawn_worker_pipelines(
         mut control_rx,
         control_senders,
         #[cfg(feature = "wasm")]
-        generic_cpu_affinity,
+        wasm_reload_service,
     } = config;
+
+    #[cfg(feature = "wasm")]
+    for runner in &mut runners {
+        runner
+            .wasm_reload_controller
+            .set_service(wasm_reload_service.clone(), &runner.nodes);
+    }
 
     // Capture the TSC start timestamp
     let tsc_start: u64;
@@ -1696,16 +1699,6 @@ pub fn spawn_worker_pipelines(
         // applied to this worker thread only; lack of CAP_SYS_NICE/root
         // privileges is reported but does not prevent the data plane starting.
         set_worker_fifo_scheduling(worker_id);
-
-        // Wasm compilation and teardown run on background threads. Give those
-        // threads the unpinned controller's CPU mask so the OS can schedule
-        // them on any CPU available to generic work.
-        #[cfg(feature = "wasm")]
-        for runner in &mut runners {
-            runner
-                .wasm_reload_controller
-                .set_background_cpu_affinity(generic_cpu_affinity.clone());
-        }
 
         let tid = unsafe { libc::syscall(libc::SYS_gettid) };
 
