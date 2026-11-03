@@ -16,12 +16,12 @@ pub(crate) use crate::{BatchRx, BatchTx};
 use crossbeam_channel::Receiver;
 use separator::Separatable;
 use wabrix_api::helpers::parse_suffixed_number;
-use wabrix_api::{StandardOpcode, MAX_BATCH_SIZE, MAX_HISTOGRAM_BUCKETS};
+use wabrix_api::{StandardOpcode, MAX_BATCH_SIZE};
 use wabrix_base::common::formatting::PreciseSeparator;
 use wabrix_base::frame_registry::{set_tsc_frequency, set_worker_frame_registry};
 use wabrix_base::node_instance_id::NodeInstanceId;
 use wabrix_base::system::PlatformData;
-use wabrix_base::telemetry::{HistogramMetrics, NamedHistogramMetrics, TelemetryRegistry};
+use wabrix_base::telemetry::TelemetryRegistry;
 use wabrix_base::{ControlEvent, ControlEventResult, Directive, Node, NodeId};
 #[cfg(feature = "wasm")]
 use wabrix_wasm::wasm_manager::WasmManager;
@@ -776,56 +776,6 @@ impl PipelineFactory {
                         routing_table.push(target_id);
                     }
 
-                    let counter_names = Arc::new(RwLock::new(Vec::new()));
-                    let num_buckets =
-                        match node_instance.node_config.effective_arg("wasm_file_path") {
-                            //TODO calculate the num_buckets, or retrieve it from the wasm file
-                            Some(path) if path.contains("inspector_engine") => 8,
-                            Some(path) if path.contains("filter_engine") => 2,
-                            Some(path) if path.contains("generator_engine") => 23,
-                            Some(path) if path.contains("tcp_engine") => 23,
-                            _ => 0,
-                        };
-                    let counters_pkts: Vec<Arc<CachePadded<AtomicU64>>> = (0..num_buckets)
-                        .map(|_| Arc::new(CachePadded::new(AtomicU64::new(0))))
-                        .collect();
-                    let counters_bytes: Vec<Arc<CachePadded<AtomicU64>>> = (0..num_buckets)
-                        .map(|_| Arc::new(CachePadded::new(AtomicU64::new(0))))
-                        .collect();
-                    let tm_force_sync = Arc::new(AtomicBool::new(false));
-                    let delay_histogram = Arc::new(HistogramMetrics::new(MAX_HISTOGRAM_BUCKETS));
-
-                    if let Some(registry) = telemetry_registry.as_mut() {
-                        registry.register(
-                            format!(
-                                "{}/{}",
-                                pipeline_instance.name, node_instance.node_config.id
-                            ),
-                            counter_names.clone(),
-                            counters_pkts.clone(),
-                            counters_bytes.clone(),
-                            None,
-                            Some(tm_force_sync.clone()),
-                            vec![NamedHistogramMetrics {
-                                name: "delay".to_string(),
-                                metrics: delay_histogram.clone(),
-                            }],
-                        );
-                    }
-
-                    let telemetry_metrics = wabrix_base::telemetry::TelemetryMetrics {
-                        node_id: node_instance.node_config.id.clone(),
-                        counter_names,
-                        counters_pkts,
-                        counters_bytes,
-                        active_flag: None,
-                        force_sync_flag: Some(tm_force_sync.clone()),
-                        histograms: vec![NamedHistogramMetrics {
-                            name: "delay".to_string(),
-                            metrics: delay_histogram,
-                        }],
-                    };
-
                     let umem_info = manager.umem();
                     let mailbox_offset = umem_info.mailbox_offset(0);
 
@@ -858,7 +808,7 @@ impl PipelineFactory {
                         .unwrap_or_default();
 
                     use wabrix_wasm::WasmEngine;
-                    Box::new(WasmEngine::new(
+                    let wasm_engine = WasmEngine::new(
                         my_id.clone(),
                         pipeline_instance.name.clone(),
                         worker_id,
@@ -866,14 +816,23 @@ impl PipelineFactory {
                         manager.clone(),
                         wasm_path,
                         routing_table,
-                        telemetry_metrics,
                         umem_id as u8,
                         combined_node_data,
                         base_node_data,
                         hot_node_data,
                         platform_data,
                         mailbox_offset,
-                    )?)
+                    )?;
+                    if let Some(registry) = telemetry_registry.as_mut() {
+                        registry.register_metrics(
+                            format!(
+                                "{}/{}",
+                                pipeline_instance.name, node_instance.node_config.id
+                            ),
+                            wasm_engine.telemetry_metrics().clone(),
+                        );
+                    }
+                    Box::new(wasm_engine)
                 }
                 _ => {
                     return Err(format!(

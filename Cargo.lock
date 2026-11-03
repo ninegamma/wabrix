@@ -3222,6 +3222,7 @@ version = "0.5.1"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
+ "crossbeam-utils",
  "dashmap",
  "libc",
  "log",

@@ -315,7 +315,7 @@ impl WasmReloadSpec {
             self.manager.clone(),
             &wasm_file_path,
             self.routing_table.clone(),
-            self.telemetry_metrics.clone(),
+            Some(self.telemetry_metrics.clone()),
             self.umem_id,
             node_data,
             self.base_node_data.clone(),

@@ -14,6 +14,7 @@ dashmap = "6.1" # Using stable 6.1 instead of 7.0-rc2 for reliability
 wabrix_base = { workspace = true }
 wabrix_api = { workspace = true }
 crossbeam-channel = { workspace = true }
+crossbeam-utils = { workspace = true }
 tokio = { workspace = true }
 anyhow = "1.0.104"
 postcard = "1.1.3"

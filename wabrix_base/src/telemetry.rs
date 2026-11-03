@@ -270,6 +270,13 @@ impl TelemetryRegistry {
         });
     }
 
+    /// Registers an already constructed metrics object, replacing its node ID
+    /// with the registry's fully qualified pipeline/node label.
+    pub fn register_metrics(&mut self, node_id: String, mut metrics: TelemetryMetrics) {
+        metrics.node_id = node_id;
+        self.metrics.push(metrics);
+    }
+
     pub fn get_metrics(&self) -> &[TelemetryMetrics] {
         &self.metrics
     }

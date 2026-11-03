@@ -1,15 +1,17 @@
 use crate::wasm_manager::{MyHostState, SharedStateRegion, WasmManager};
 use crate::wasm_reloader::WasmReloadSpec;
 use core::mem::size_of;
-use std::collections::HashMap;
+use crossbeam_utils::CachePadded;
+use std::collections::{HashMap, HashSet};
 use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use wabrix_api::tcp_common::EngineTimerPlan;
 use wabrix_api::{
-    BatchMetadata, MAX_BATCH_SIZE, TIMER_KIND_NONE, TIMER_KIND_SYN, TIMER_KIND_TIMEOUT,
+    BatchMetadata, MAX_BATCH_SIZE, MAX_HISTOGRAM_BUCKETS, TIMER_KIND_NONE, TIMER_KIND_SYN,
+    TIMER_KIND_TIMEOUT,
 };
 use wasmtime::component::{bindgen, ResourceTable};
 use wasmtime::Store;
@@ -29,7 +31,7 @@ use wabrix_base::frame_registry::get_worker_frame_registry;
 use wabrix_base::interface::batch::Batch;
 use wabrix_base::interface::Pdu;
 use wabrix_base::system::PlatformData;
-use wabrix_base::telemetry::TelemetryMetrics;
+use wabrix_base::telemetry::{HistogramMetrics, NamedHistogramMetrics, TelemetryMetrics};
 use wabrix_base::{ControlEvent, ControlEventResult, Directive, Node, NodeId};
 
 // 1. Generate bindings.
@@ -40,7 +42,7 @@ bindgen!({
     // async: true,
 });
 
-use self::exports::wabrix::plugins::packet_engine::TelemetryMetric;
+use self::exports::wabrix::plugins::packet_engine::{TelemetryMetric, TelemetrySchema};
 
 pub struct WasmEngine {
     id: NodeId,
@@ -120,7 +122,6 @@ impl WasmEngine {
         manager: Arc<WasmManager>,
         wasm_file_path: &str,
         routing_table: Vec<NodeId>, // Accept any number of routes
-        telemetry_metrics: TelemetryMetrics,
         umem_id: u8,
         node_data: HashMap<String, String>,
         base_node_data: HashMap<String, String>,
@@ -139,7 +140,7 @@ impl WasmEngine {
             manager,
             wasm_file_path,
             routing_table,
-            telemetry_metrics,
+            None,
             umem_id,
             node_data,
             base_node_data,
@@ -159,7 +160,7 @@ impl WasmEngine {
         manager: Arc<WasmManager>,
         wasm_file_path: &str,
         routing_table: Vec<NodeId>,
-        telemetry_metrics: TelemetryMetrics,
+        telemetry_metrics: Option<TelemetryMetrics>,
         umem_id: u8,
         node_data: HashMap<String, String>,
         base_node_data: HashMap<String, String>,
@@ -269,6 +270,24 @@ impl WasmEngine {
             }
         }
 
+        let telemetry_schema = bindings
+            .wabrix_plugins_packet_engine()
+            .call_get_telemetry_schema(&mut store)
+            .map_err(|error| {
+                format!(
+                    "WasmEngine node {} failed to read telemetry schema: {}",
+                    id, error
+                )
+            })?;
+        validate_plugin_telemetry_schema(&telemetry_schema)?;
+        let telemetry_metrics = match telemetry_metrics {
+            Some(existing) => {
+                validate_reload_telemetry_schema(&telemetry_schema, &existing, &id)?;
+                existing
+            }
+            None => create_plugin_telemetry_metrics(&id, &telemetry_schema),
+        };
+
         let final_timer_diagnostics = FinalTimerDiagnostics {
             node_id: id.clone(),
             diagnostics: timer_diagnostics,
@@ -315,6 +334,10 @@ impl WasmEngine {
             mailbox_offset: self.mailbox_offset,
             shared_state: self.shared_state.clone(),
         }
+    }
+
+    pub fn telemetry_metrics(&self) -> &TelemetryMetrics {
+        &self.telemetry_metrics
     }
 
     /// Installs only runtime-owned state; graph and node accounting remain with this node.
@@ -410,22 +433,34 @@ impl WasmEngine {
     }
 
     fn store_oob_telemetry(&self, metrics: Vec<TelemetryMetric>) {
-        let mut counter_index = 0;
+        let counter_names = match self.telemetry_metrics.counter_names.read() {
+            Ok(names) => names,
+            Err(_) => {
+                log::error!(
+                    "NODE {}: telemetry counter schema lock is poisoned",
+                    self.id
+                );
+                return;
+            }
+        };
         for metric in metrics {
             match metric {
                 TelemetryMetric::Counter(counter) => {
-                    if let Ok(mut names) = self.telemetry_metrics.counter_names.write() {
-                        if counter_index >= names.len() {
-                            names.resize(counter_index + 1, String::new());
-                        }
-                        names[counter_index] = counter.name;
-                    }
-                    if let Some(counter_slot) =
-                        self.telemetry_metrics.counters_pkts.get(counter_index)
+                    if let Some(counter_index) =
+                        counter_names.iter().position(|name| name == &counter.name)
                     {
-                        counter_slot.store(counter.value, Ordering::Relaxed);
+                        if let Some(counter_slot) =
+                            self.telemetry_metrics.counters_pkts.get(counter_index)
+                        {
+                            counter_slot.store(counter.value, Ordering::Relaxed);
+                        }
+                    } else {
+                        log::warn!(
+                            "NODE {}: plugin emitted undeclared telemetry counter '{}'",
+                            self.id,
+                            counter.name
+                        );
                     }
-                    counter_index += 1;
                 }
                 TelemetryMetric::Hist(histogram) => {
                     if let Some(named_histogram) = self
@@ -434,10 +469,26 @@ impl WasmEngine {
                         .iter()
                         .find(|candidate| candidate.name == histogram.name)
                     {
-                        named_histogram.metrics.store_snapshot(
-                            histogram.sum,
-                            histogram.count,
-                            &histogram.buckets,
+                        if named_histogram.metrics.buckets.len() == histogram.buckets.len() {
+                            named_histogram.metrics.store_snapshot(
+                                histogram.sum,
+                                histogram.count,
+                                &histogram.buckets,
+                            );
+                        } else {
+                            log::warn!(
+                                "NODE {}: plugin emitted histogram '{}' with {} buckets; schema declares {}",
+                                self.id,
+                                histogram.name,
+                                histogram.buckets.len(),
+                                named_histogram.metrics.buckets.len()
+                            );
+                        }
+                    } else {
+                        log::warn!(
+                            "NODE {}: plugin emitted undeclared telemetry histogram '{}'",
+                            self.id,
+                            histogram.name
                         );
                     }
                 }
@@ -628,6 +679,117 @@ impl WasmEngine {
         } else {
             Directive::Split(split_branches)
         }
+    }
+}
+
+/// Checks a plugin's declared schema before the host allocates telemetry storage.
+/// Names must be nonempty and unique within each metric type, and histogram bucket
+/// counts must fit the host's supported range. The caller propagates errors with
+/// `?`, so a bad schema aborts initial node startup or rejects a staged reload.
+fn validate_plugin_telemetry_schema(schema: &TelemetrySchema) -> Result<(), String> {
+    let mut counter_names = HashSet::with_capacity(schema.counters.len());
+    for name in &schema.counters {
+        if name.is_empty() {
+            return Err("WASM telemetry schema contains an empty counter name".to_string());
+        }
+        if !counter_names.insert(name) {
+            return Err(format!(
+                "WASM telemetry schema contains duplicate counter '{}'",
+                name
+            ));
+        }
+    }
+
+    let mut histogram_names = HashSet::with_capacity(schema.histograms.len());
+    for histogram in &schema.histograms {
+        if histogram.name.is_empty() {
+            return Err("WASM telemetry schema contains an empty histogram name".to_string());
+        }
+        if !histogram_names.insert(&histogram.name) {
+            return Err(format!(
+                "WASM telemetry schema contains duplicate histogram '{}'",
+                histogram.name
+            ));
+        }
+        let bucket_count = histogram.bucket_count as usize;
+        if bucket_count == 0 || bucket_count > MAX_HISTOGRAM_BUCKETS {
+            return Err(format!(
+                "WASM telemetry histogram '{}' declares {} buckets; supported range is 1..={}",
+                histogram.name, bucket_count, MAX_HISTOGRAM_BUCKETS
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Ensures a replacement plugin matches the telemetry layout already registered
+/// for this node: counter names and order, backing-array lengths, histogram names,
+/// and bucket counts must remain stable. An error aborts candidate construction,
+/// leaving the active runtime and its registered telemetry storage in place.
+fn validate_reload_telemetry_schema(
+    schema: &TelemetrySchema,
+    existing: &TelemetryMetrics,
+    node_id: &NodeId,
+) -> Result<(), String> {
+    let existing_names = existing
+        .counter_names
+        .read()
+        .map_err(|_| format!("WASM node {} telemetry schema lock is poisoned", node_id))?;
+    if existing_names.as_slice() != schema.counters.as_slice()
+        || existing.counters_pkts.len() != schema.counters.len()
+        || existing.counters_bytes.len() != schema.counters.len()
+    {
+        return Err(format!(
+            "WASM node {} reload changes its telemetry counter schema",
+            node_id
+        ));
+    }
+
+    if existing.histograms.len() != schema.histograms.len()
+        || existing
+            .histograms
+            .iter()
+            .zip(&schema.histograms)
+            .any(|(current, replacement)| {
+                current.name != replacement.name
+                    || current.metrics.buckets.len() != replacement.bucket_count as usize
+            })
+    {
+        return Err(format!(
+            "WASM node {} reload changes its telemetry histogram schema",
+            node_id
+        ));
+    }
+
+    Ok(())
+}
+
+fn create_plugin_telemetry_metrics(node_id: &NodeId, schema: &TelemetrySchema) -> TelemetryMetrics {
+    let counter_names = Arc::new(RwLock::new(schema.counters.clone()));
+    let counters_pkts = (0..schema.counters.len())
+        .map(|_| Arc::new(CachePadded::new(AtomicU64::new(0))))
+        .collect();
+    let counters_bytes = (0..schema.counters.len())
+        .map(|_| Arc::new(CachePadded::new(AtomicU64::new(0))))
+        .collect();
+    let histograms = schema
+        .histograms
+        .iter()
+        .map(|histogram| NamedHistogramMetrics {
+            name: histogram.name.clone(),
+            metrics: Arc::new(HistogramMetrics::new(histogram.bucket_count as usize)),
+        })
+        .collect();
+
+    TelemetryMetrics {
+        node_id: node_id.to_string(),
+        counter_names,
+        counters_pkts,
+        counters_bytes,
+        active_flag: None,
+        force_sync_flag: Some(Arc::new(AtomicBool::new(false))),
+        histograms,
     }
 }
 
