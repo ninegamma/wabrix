@@ -6,6 +6,7 @@ use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Instant;
 use wabrix_api::tcp_common::EngineTimerPlan;
 use wabrix_api::{
     BatchMetadata, MAX_BATCH_SIZE, TIMER_KIND_NONE, TIMER_KIND_SYN, TIMER_KIND_TIMEOUT,
@@ -177,9 +178,11 @@ impl WasmEngine {
         );
         // 1. Fetch the Component from the Manager's DashMap cache
         // This takes nanoseconds if already loaded, avoiding disk I/O.
+        let component_load_started = Instant::now();
         let component = manager
             .get_component(wasm_file_path)
             .map_err(|e| format!("Failed to load Wasm component '{}': {}", wasm_file_path, e))?;
+        let component_load_compile_validate_ns = component_load_started.elapsed().as_nanos();
         log::debug!(
             "NODE {}: Wasm component is ready; instantiating {}",
             id,
@@ -213,13 +216,15 @@ impl WasmEngine {
         //    Wasmtime calls XdpMemoryCreator::new_memory() here, which returns
         //    the partition handle we pre-loaded in step 3.
         //    We use the Manager's shared Linker, which already has WASI registered.
-        let bindings = EnginePlugin::instantiate(&mut store, &component, manager.linker())
-            .map_err(|e| {
-                format!(
-                    "Failed to instantiate Wasm component '{}': {}",
-                    wasm_file_path, e
-                )
-            })?;
+        let component_instantiate_started = Instant::now();
+        let bindings_result = EnginePlugin::instantiate(&mut store, &component, manager.linker());
+        let component_instantiate_ns = component_instantiate_started.elapsed().as_nanos();
+        let bindings = bindings_result.map_err(|e| {
+            format!(
+                "Failed to instantiate Wasm component '{}': {}",
+                wasm_file_path, e
+            )
+        })?;
         log::debug!(
             "NODE {}: Wasm instance created; calling init-data for {}",
             id,
@@ -227,10 +232,20 @@ impl WasmEngine {
         );
 
         let data: Vec<(String, String)> = node_data.into_iter().collect();
+        let init_data_started = Instant::now();
         let init_result = bindings.wabrix_plugins_packet_engine().call_init_data(
             &mut store,
             &data,
             platform_data.tsc_frequency,
+        );
+        let init_data_ns = init_data_started.elapsed().as_nanos();
+        log::info!(
+            "NODE {}: component preparation {}: artifact_load_compile_validate={} ns, instantiate={} ns, init_data={} ns",
+            id,
+            wasm_file_path,
+            component_load_compile_validate_ns,
+            component_instantiate_ns,
+            init_data_ns
         );
         log::debug!("NODE {}: init-data returned for {}", id, wasm_file_path);
 

@@ -21,6 +21,15 @@ pub fn spawn_metrics_server(mut tm_rx: Receiver<TMLiveStats>) {
         )
         .unwrap();
 
+        let inspector_max_delay = IntGaugeVec::new(
+            Opts::new(
+                "wabrix_inspector_max_delay_us_5s",
+                "Maximum measured packet delay in the latest five telemetry intervals, in microseconds",
+            ),
+            &["tmstats_name"],
+        )
+        .unwrap();
+
         let bytes_total = IntGaugeVec::new(
             Opts::new("wabrix_bytes_total", "Total bytes processed"),
             &["tmstats_name", "data_label"],
@@ -40,6 +49,9 @@ pub fn spawn_metrics_server(mut tm_rx: Receiver<TMLiveStats>) {
         .unwrap();
 
         registry.register(Box::new(packets_total.clone())).unwrap();
+        registry
+            .register(Box::new(inspector_max_delay.clone()))
+            .unwrap();
         registry.register(Box::new(bytes_total.clone())).unwrap();
         registry.register(Box::new(pps_live.clone())).unwrap();
         registry.register(Box::new(bps_live.clone())).unwrap();
@@ -63,6 +75,15 @@ pub fn spawn_metrics_server(mut tm_rx: Receiver<TMLiveStats>) {
 
                 // Iterate over named counters and safely update the corresponding data vectors.
                 for (i, data_label) in stats.counter_names.iter().enumerate() {
+                    if data_label == "max_delay_us_5s" {
+                        if let Some(&val) = stats.counters_pkts.get(i) {
+                            inspector_max_delay
+                                .with_label_values(&[tmstats_name.as_str()])
+                                .set(val.min(i64::MAX as u64) as i64);
+                        }
+                        continue;
+                    }
+
                     let label_values = &[tmstats_name.as_str(), data_label.as_str()];
 
                     if let Some(&val) = stats.counters_pkts.get(i) {

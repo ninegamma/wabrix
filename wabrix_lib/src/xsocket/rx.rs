@@ -1301,7 +1301,7 @@ impl Drop for XSocketRx {
                         let range_end = packet_count - 1;
                         let percent = range_calls as f64 * 100.0 / successful_calls as f64;
                         if range_start == range_end {
-                            info!(
+                            debug!(
                                 "{}: RX batch size {}: {} calls ({:.1}%)",
                                 self.source_id(),
                                 range_start,
@@ -1309,7 +1309,7 @@ impl Drop for XSocketRx {
                                 percent
                             );
                         } else {
-                            info!(
+                            debug!(
                                 "{}: RX batch sizes {}–{}: {} calls ({:.1}%)",
                                 self.source_id(),
                                 range_start,
@@ -1321,7 +1321,7 @@ impl Drop for XSocketRx {
                     }
                 } else {
                     let percent = calls as f64 * 100.0 / successful_calls as f64;
-                    info!(
+                    debug!(
                         "{}: RX batch size {}: {} calls ({:.1}%)",
                         self.source_id(),
                         packet_count,

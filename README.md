@@ -109,8 +109,8 @@ traffic while the remaining workers finish staging.
 
 This preserves network connections for stateless inspection and filtering logic.
 The current Wasm interface does not migrate plugin-owned session state, so a
-stateful TCP plugin should not be hot-reloaded while it owns live sessions.
-See [Wasm Component Hot Reloading](docs/wasm_hot_reload.md) for the full reload
+stateful TCP plugin should not be hot-reloaded while it owns live sessions - 
+this is work to be done. See [Wasm Component Hot Reloading](docs/wasm_hot_reload.md) for the full reload
 lifecycle, configuration behavior, and operational limits.
 
 ## 📦 Getting Started

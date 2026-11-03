@@ -4,6 +4,7 @@ use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError, TrySendError};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use wabrix_api::{HotWasmPayload, StandardOpcode};
 use wabrix_base::system::PlatformData;
 use wabrix_base::telemetry::TelemetryMetrics;
@@ -73,9 +74,18 @@ struct StagingJob {
     spec: WasmReloadSpec,
     wasm_file_path: String,
     hot_node_data: HashMap<String, String>,
+    queued_at: Instant,
     generation: u64,
     latest_generation: Arc<AtomicU64>,
     ready: Sender<Result<WasmEngine, String>>,
+}
+
+/// A retired runtime and its label, so the background reaper can report drop time.
+struct RetiredRuntime {
+    runtime: WasmRuntime,
+    node_id: String,
+    wasm_file_path: String,
+    queued_at: Instant,
 }
 
 /// A lock-free, one-job mailbox registered for each Wasm node at worker startup.
@@ -132,7 +142,7 @@ impl ReloadMailbox {
 #[derive(Clone)]
 pub struct WasmReloadService {
     wake_tx: Sender<Arc<ReloadMailbox>>,
-    retire_tx: Sender<WasmRuntime>,
+    retire_tx: Sender<RetiredRuntime>,
 }
 
 impl WasmReloadService {
@@ -164,9 +174,32 @@ impl WasmReloadService {
                                     continue;
                                 }
 
+                                let node_id = job.spec.id.to_string();
+                                let wasm_file_path = job.wasm_file_path.clone();
+                                let queue_wait_ns = job.queued_at.elapsed().as_nanos();
+                                let staging_started = Instant::now();
                                 let staged =
                                     job.spec.instantiate(job.wasm_file_path, job.hot_node_data);
-                                if job.latest_generation.load(Ordering::Acquire) == job.generation {
+                                let staging_ns = staging_started.elapsed().as_nanos();
+                                let is_current =
+                                    job.latest_generation.load(Ordering::Acquire) == job.generation;
+                                let outcome = if !is_current {
+                                    "superseded"
+                                } else if staged.is_ok() {
+                                    "ready"
+                                } else {
+                                    "failed"
+                                };
+                                log::info!(
+                                    "NODE {}: staged Wasm component {}: queue_wait={} ns, staging={} ns, request_to_ready={} ns, outcome={}",
+                                    node_id,
+                                    wasm_file_path,
+                                    queue_wait_ns,
+                                    staging_ns,
+                                    queue_wait_ns.saturating_add(staging_ns),
+                                    outcome
+                                );
+                                if is_current {
                                     // If superseded concurrently, send returns
                                     // the candidate here so teardown stays off-runner.
                                     let _ = job.ready.send(staged);
@@ -195,7 +228,7 @@ impl WasmReloadService {
             .recv()
             .map_err(|_| "Wasm staging worker exited before setup completed".to_string())??;
 
-        let (retire_tx, retire_rx) = bounded::<WasmRuntime>(2);
+        let (retire_tx, retire_rx) = bounded::<RetiredRuntime>(2);
         let (reaper_ready_tx, reaper_ready_rx) = bounded(1);
         let reaper_affinity = affinity;
         std::thread::Builder::new()
@@ -206,8 +239,23 @@ impl WasmReloadService {
                     return;
                 }
                 let _ = reaper_ready_tx.send(Ok(()));
-                while let Ok(runtime) = retire_rx.recv() {
+                while let Ok(retired) = retire_rx.recv() {
+                    let RetiredRuntime {
+                        runtime,
+                        node_id,
+                        wasm_file_path,
+                        queued_at,
+                    } = retired;
+                    let queue_wait_ns = queued_at.elapsed().as_nanos();
+                    let destruction_started = Instant::now();
                     drop(runtime);
+                    log::info!(
+                        "NODE {}: destroyed retired Wasm component {} in {} ns (reaper queue wait {} ns)",
+                        node_id,
+                        wasm_file_path,
+                        destruction_started.elapsed().as_nanos(),
+                        queue_wait_ns
+                    );
                 }
             })
             .map_err(|error| format!("failed to start Wasm runtime reaper: {error}"))?;
@@ -307,7 +355,7 @@ pub struct WasmReloadController {
     /// Per-node generation counters used to skip superseded staging jobs.
     latest_generations: HashMap<usize, Arc<AtomicU64>>,
     /// Old runtimes retained temporarily when the bounded reaper queue is full.
-    retired_runtimes: Vec<WasmRuntime>,
+    retired_runtimes: Vec<RetiredRuntime>,
 }
 
 impl WasmReloadController {
@@ -401,6 +449,7 @@ impl WasmReloadController {
                 spec,
                 wasm_file_path: path,
                 hot_node_data: next_hot_node_data.clone(),
+                queued_at: Instant::now(),
                 generation,
                 latest_generation: latest_generation.clone(),
                 ready: ready_tx,
@@ -474,7 +523,7 @@ impl WasmReloadController {
             match self.pending[index].ready.try_recv() {
                 Ok(Ok(candidate)) => {
                     self.pending.swap_remove(index);
-                    self.queue_retired_runtime(candidate.into_runtime());
+                    self.queue_retired_engine(candidate);
                 }
                 Ok(Err(_)) | Err(TryRecvError::Disconnected) => {
                     self.pending.swap_remove(index);
@@ -515,7 +564,7 @@ impl WasmReloadController {
             let node_index = pending.node_index;
             if pending.latest_generation.load(Ordering::Acquire) != pending.generation {
                 if let Ok(candidate) = result {
-                    self.queue_retired_runtime(candidate.into_runtime());
+                    self.queue_retired_engine(candidate);
                 }
                 continue;
             }
@@ -530,31 +579,44 @@ impl WasmReloadController {
                             "Wasm reload candidate for node index {} has no WasmEngine target",
                             node_index
                         );
-                        self.queue_retired_runtime(candidate.into_runtime());
+                        self.queue_retired_engine(candidate);
                         continue;
                     };
 
-                    if let Err(error) =
-                        WasmEngine::upgrade_shared_state_for_candidate(&mut candidate)
-                    {
+                    let validation_started = Instant::now();
+                    let validation_result =
+                        WasmEngine::upgrade_shared_state_for_candidate(&mut candidate);
+                    let validation_ns = validation_started.elapsed().as_nanos();
+                    log::info!(
+                        "NODE {}: candidate state validation/upgrade took {} ns",
+                        engine.node_id(),
+                        validation_ns
+                    );
+                    if let Err(error) = validation_result {
                         log::error!(
                             "Wasm reload state upgrade failed for node {}; keeping component {} active: {}",
                             engine.node_id(),
                             engine.wasm_file_path(),
                             error
                         );
-                        self.queue_retired_runtime(candidate.into_runtime());
+                        self.queue_retired_engine(candidate);
                         continue;
                     }
 
                     let version = candidate.wasm_file_path().to_string();
+                    let previous_version = engine.wasm_file_path().to_string();
+                    let node_id = engine.node_id().to_string();
+                    let switchover_started = Instant::now();
                     let old_runtime = engine.install_candidate(candidate);
+                    let switchover_ns = switchover_started.elapsed().as_nanos();
                     log::info!(
-                        "NODE {}: activated Wasm component {} without restarting the pipeline",
-                        engine.node_id(),
-                        version
+                        "NODE {}: runtime switchover {} -> {} took {} ns",
+                        node_id,
+                        previous_version,
+                        version,
+                        switchover_ns
                     );
-                    self.queue_retired_runtime(old_runtime);
+                    self.queue_retired_runtime(old_runtime, node_id, previous_version);
                 }
                 Err(error) => {
                     let active_path = nodes
@@ -578,17 +640,34 @@ impl WasmReloadController {
         self.flush_retired_runtimes();
     }
 
-    fn queue_retired_runtime(&mut self, runtime: WasmRuntime) {
+    fn queue_retired_engine(&mut self, engine: WasmEngine) {
+        let node_id = engine.node_id().to_string();
+        let wasm_file_path = engine.wasm_file_path().to_string();
+        self.queue_retired_runtime(engine.into_runtime(), node_id, wasm_file_path);
+    }
+
+    fn queue_retired_runtime(
+        &mut self,
+        runtime: WasmRuntime,
+        node_id: String,
+        wasm_file_path: String,
+    ) {
+        let retired = RetiredRuntime {
+            runtime,
+            node_id,
+            wasm_file_path,
+            queued_at: Instant::now(),
+        };
         if let Some(service) = &self.service {
             let retire_tx = &service.retire_tx;
-            match retire_tx.try_send(runtime) {
+            match retire_tx.try_send(retired) {
                 Ok(()) => return,
-                Err(TrySendError::Full(runtime) | TrySendError::Disconnected(runtime)) => {
-                    self.retired_runtimes.push(runtime);
+                Err(TrySendError::Full(retired) | TrySendError::Disconnected(retired)) => {
+                    self.retired_runtimes.push(retired);
                 }
             }
         } else {
-            self.retired_runtimes.push(runtime);
+            self.retired_runtimes.push(retired);
         }
     }
 
@@ -599,11 +678,11 @@ impl WasmReloadController {
         let retire_tx = &service.retire_tx;
 
         let mut pending = Vec::new();
-        for runtime in self.retired_runtimes.drain(..) {
-            match retire_tx.try_send(runtime) {
+        for retired in self.retired_runtimes.drain(..) {
+            match retire_tx.try_send(retired) {
                 Ok(()) => {}
-                Err(TrySendError::Full(runtime) | TrySendError::Disconnected(runtime)) => {
-                    pending.push(runtime);
+                Err(TrySendError::Full(retired) | TrySendError::Disconnected(retired)) => {
+                    pending.push(retired);
                 }
             }
         }

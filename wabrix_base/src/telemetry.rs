@@ -342,8 +342,18 @@ pub fn spawn_pipeline_telemetry(
                     .collect::<Vec<_>>();
 
                 if let Some(entry) = seen.iter_mut().find(|(id, ..)| id == &metrics.node_id) {
-                    for (acc, v) in entry.1.iter_mut().zip(pkts.iter()) {
-                        *acc += v;
+                    for (index, (acc, v)) in entry.1.iter_mut().zip(pkts.iter()).enumerate() {
+                        if entry
+                            .3
+                            .get(index)
+                            .or_else(|| counter_names.get(index))
+                            .map(String::as_str)
+                            == Some("max_delay_us_5s")
+                        {
+                            *acc = (*acc).max(*v);
+                        } else {
+                            *acc += v;
+                        }
                     }
                     for (acc, v) in entry.2.iter_mut().zip(bytes.iter()) {
                         *acc += v;

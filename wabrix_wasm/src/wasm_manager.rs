@@ -6,6 +6,7 @@ use std::ffi::CString;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use wabrix_api::BatchMetadata;
 use wabrix_base::mailbox::MAILBOX_STRIDE;
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
@@ -854,14 +855,22 @@ impl crate::wasm_engine::wabrix::plugins::shared_state::Host for MyHostState {
             .as_slice()
             .try_into()
             .map_err(|_| "shared-state type ID must contain exactly 16 bytes".to_string())?;
-        let state = self.umem.attach_shared_state(
+        let validation_started = Instant::now();
+        let state_result = self.umem.attach_shared_state(
             type_id,
             layout.schema_version,
             layout.payload_size,
             layout.reserved_capacity,
             layout.required_alignment,
             &layout.compatible_source_versions,
-        )?;
+        );
+        log::info!(
+            "WASM shared-state layout validation took {} ns (schema {}, payload {} B)",
+            validation_started.elapsed().as_nanos(),
+            layout.schema_version,
+            layout.payload_size
+        );
+        let state = state_result?;
         self.shared_state_attachment = Some(state);
         Ok(
             crate::wasm_engine::wabrix::plugins::shared_state::StateView {

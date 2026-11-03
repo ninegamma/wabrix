@@ -780,7 +780,7 @@ impl PipelineFactory {
                     let num_buckets =
                         match node_instance.node_config.effective_arg("wasm_file_path") {
                             //TODO calculate the num_buckets, or retrieve it from the wasm file
-                            Some(path) if path.contains("inspector_engine") => 7,
+                            Some(path) if path.contains("inspector_engine") => 8,
                             Some(path) if path.contains("filter_engine") => 2,
                             Some(path) if path.contains("generator_engine") => 23,
                             Some(path) if path.contains("tcp_engine") => 23,
