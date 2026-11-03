@@ -1,5 +1,44 @@
 # Changelog
 
+## [Unreleased]
+
+Changes since `v0.5.0-alpha`.
+
+### Added
+
+- Live staged reloading of WASM plugins, including configuration reconciliation
+  and background compilation and initialization.
+- Shared per-node state for WASM reloads, with versioned layouts and
+  append-compatible state upgrades.
+- Worker-level CPU frequency controls and configurable generator batch sizes
+  and variance.
+- WASM reload timing metrics, inspector packet-delay histograms, and a Grafana
+  dashboard for observing hitless switchovers.
+- Plugin-declared telemetry schemas for packet-engine WASM plugins. The host
+  now allocates named counter and histogram storage from each initialized
+  plugin's declaration.
+
+### Changed
+
+- Frame ownership now uses UMEM-local frame tokens and compact lookup tables,
+  with support for arbitrary partition assignments across UMEM groups.
+- Split `XSocket` into dedicated RX and TX modules and improved receive
+  batching, frame recycling, and TSC diagnostics.
+- Updated timer diagnostics, memory and pipeline architecture documentation,
+  TOML examples, and benchmark guidance.
+- Bumped the WIT package to 0.2.0. WASM plugin artifacts must be rebuilt
+  against the updated interface.
+- Hot-reloaded plugins must retain the node's existing telemetry schema.
+
+### Fixed
+
+- Restored turbo-capable CPU frequency limits when `no_turbo` is `false`.
+
+### Documentation
+
+- Added the 17 Mpps latency benchmark results and refreshed the README and
+  architecture, headroom, configuration, and WASM reload documentation.
+
 ## [0.5.0] - 2026-10-11
 
 This release replaces positional and in-band plugin telemetry with named

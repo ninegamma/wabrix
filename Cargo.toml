@@ -9,12 +9,12 @@ resolver = "2"
 
 [workspace.package]
 edition = "2021"
-version = "0.5.1"
+version = "0.6.0"
 authors = ["NineGamma <contact@ninegamma.com>"]
 license-file = "LICENSE"
 
 [workspace.dependencies]
-wabrix_api = { git = "https://github.com/ninegamma/wabrix_api.git", branch = "main", version= "0.5.1", features=["host"] }
+wabrix_api = { git = "https://github.com/ninegamma/wabrix_api.git", branch = "main", version= "0.6.0", features=["host"] }
 wabrix_base = { path = "wabrix_base" }
 wabrix_wasm = { path = "wabrix_wasm" }
 libbpf-rs = "0.27.1"
