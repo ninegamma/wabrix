@@ -190,7 +190,7 @@ impl WasmReloadService {
                                 } else {
                                     "failed"
                                 };
-                                log::info!(
+                                log::debug!(
                                     "NODE {}: staged Wasm component {}: queue_wait={} ns, staging={} ns, request_to_ready={} ns, outcome={}",
                                     node_id,
                                     wasm_file_path,
@@ -249,7 +249,7 @@ impl WasmReloadService {
                     let queue_wait_ns = queued_at.elapsed().as_nanos();
                     let destruction_started = Instant::now();
                     drop(runtime);
-                    log::info!(
+                    log::debug!(
                         "NODE {}: destroyed retired Wasm component {} in {} ns (reaper queue wait {} ns)",
                         node_id,
                         wasm_file_path,
@@ -587,7 +587,7 @@ impl WasmReloadController {
                     let validation_result =
                         WasmEngine::upgrade_shared_state_for_candidate(&mut candidate);
                     let validation_ns = validation_started.elapsed().as_nanos();
-                    log::info!(
+                    log::debug!(
                         "NODE {}: candidate state validation/upgrade took {} ns",
                         engine.node_id(),
                         validation_ns

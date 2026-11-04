@@ -1,8 +1,6 @@
 # Changelog
 
-## [Unreleased]
-
-Changes since `v0.5.0-alpha`.
+## [0.6.0] - 2026-11-03
 
 ### Added
 

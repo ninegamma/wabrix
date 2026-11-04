@@ -240,7 +240,7 @@ impl WasmEngine {
             platform_data.tsc_frequency,
         );
         let init_data_ns = init_data_started.elapsed().as_nanos();
-        log::info!(
+        log::debug!(
             "NODE {}: component preparation {}: artifact_load_compile_validate={} ns, instantiate={} ns, init_data={} ns",
             id,
             wasm_file_path,

@@ -864,7 +864,7 @@ impl crate::wasm_engine::wabrix::plugins::shared_state::Host for MyHostState {
             layout.required_alignment,
             &layout.compatible_source_versions,
         );
-        log::info!(
+        log::debug!(
             "WASM shared-state layout validation took {} ns (schema {}, payload {} B)",
             validation_started.elapsed().as_nanos(),
             layout.schema_version,

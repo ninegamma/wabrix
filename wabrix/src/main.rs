@@ -6,7 +6,7 @@ use log::{debug, error, info};
 use separator::Separatable;
 use std::collections::{HashMap, HashSet};
 use std::env;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, IsTerminal};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -20,6 +20,55 @@ use wabrix_base::ControlEvent;
 use wabrix_lib::config::hot_config::SharedSystemState;
 use wabrix_lib::config::reconciliation::{reconcile_config, ReconciliationResult};
 use wabrix_lib::probe_kernel_fds;
+
+struct CliLogWriter {
+    sender: std::sync::mpsc::Sender<String>,
+    pending: Vec<u8>,
+}
+
+impl std::io::Write for CliLogWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.pending.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if !self.pending.is_empty() {
+            let message = String::from_utf8_lossy(&self.pending).into_owned();
+            self.pending.clear();
+            let _ = self.sender.send(message);
+        }
+        Ok(())
+    }
+}
+
+fn init_logging(interactive_cli: bool) -> Option<std::sync::mpsc::Receiver<String>> {
+    let env = env_logger::Env::default().default_filter_or("info");
+    if !interactive_cli {
+        env_logger::init_from_env(env);
+        return None;
+    }
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let writer = CliLogWriter {
+        sender,
+        pending: Vec::new(),
+    };
+    let write_style = match env::var(env_logger::DEFAULT_WRITE_STYLE_ENV).as_deref() {
+        Ok("never") => env_logger::WriteStyle::Never,
+        Ok("always") => env_logger::WriteStyle::Always,
+        _ if env::var_os("NO_COLOR").is_some() => env_logger::WriteStyle::Never,
+        // The streams are terminals in interactive mode. env_logger normally
+        // disables automatic coloring for custom pipe targets, so restore the
+        // terminal behavior unless coloring was explicitly disabled.
+        _ => env_logger::WriteStyle::Always,
+    };
+    env_logger::Builder::from_env(env)
+        .target(env_logger::Target::Pipe(Box::new(writer)))
+        .write_style(write_style)
+        .init();
+    Some(receiver)
+}
 
 #[derive(Debug, Parser)]
 struct Opt {
@@ -49,7 +98,15 @@ fn print_wabrix_section(path: &str) {
     }
 
     if !section.is_empty() {
-        println!("{}\n", section.join("\n"));
+        let section = section.join("\n");
+        if io::stdout().is_terminal()
+            && env::var_os("NO_COLOR").is_none()
+            && env::var_os("CLICOLOR").as_deref() != Some(std::ffi::OsStr::new("0"))
+        {
+            println!("\x1b[33m{}\x1b[0m\n", section);
+        } else {
+            println!("{}\n", section);
+        }
     }
 }
 
@@ -99,9 +156,210 @@ impl Drop for NamespaceCleanup {
     }
 }
 
+fn dispatch_cli_line(
+    line: &str,
+    cli_cmd_tx: &mpsc::Sender<SystemCommand>,
+    cli_ctrl_tx: &crossbeam_channel::Sender<Arc<ControlEvent>>,
+) -> bool {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    if parts.is_empty() {
+        return true;
+    }
+
+    match parts[0].to_lowercase().as_str() {
+        "start" => cli_cmd_tx.blocking_send(SystemCommand::Start).is_ok(),
+        "stop" => cli_cmd_tx.blocking_send(SystemCommand::Stop).is_ok(),
+        "check" => cli_cmd_tx.blocking_send(SystemCommand::Check).is_ok(),
+        "apply" => {
+            let path = parts
+                .get(1)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "wabrix.toml".to_string());
+            cli_cmd_tx.blocking_send(SystemCommand::Apply(path)).is_ok()
+        }
+        "ctrl" => {
+            let address_pattern = parts.get(1).unwrap_or(&"*").to_string();
+            let opcode = parts
+                .get(2)
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(1);
+            let payload: Vec<u8> = parts
+                .iter()
+                .skip(3)
+                .filter_map(|s| s.parse::<u8>().ok())
+                .collect();
+
+            println!(
+                "=> Broadcasting ControlEvent (address: {}, opcode: {}, payload: {:?})",
+                address_pattern, opcode, payload
+            );
+            let event = Arc::new(ControlEvent {
+                address_pattern,
+                opcode,
+                payload,
+            });
+            let _ = cli_ctrl_tx.send(event);
+            true
+        }
+        "shutdown" | "exit" | "quit" => {
+            let _ = cli_cmd_tx.blocking_send(SystemCommand::Shutdown);
+            false
+        }
+        _ => {
+            println!("Unknown command. Use: start, stop, apply <file>, check, ctrl <address> <opcode> [payload_bytes], shutdown");
+            true
+        }
+    }
+}
+
+fn spawn_rustyline_log_forwarder<P>(receiver: std::sync::mpsc::Receiver<String>, mut printer: P)
+where
+    P: rustyline::ExternalPrinter + Send + 'static,
+{
+    thread::spawn(move || {
+        for message in receiver {
+            if let Err(err) = printer.print(message) {
+                eprintln!("CLI log output error: {err}");
+            }
+        }
+    });
+}
+
+fn spawn_stderr_log_forwarder(receiver: std::sync::mpsc::Receiver<String>) {
+    thread::spawn(move || {
+        for message in receiver {
+            eprint!("{message}");
+        }
+    });
+}
+
+fn run_cli_listener(
+    cli_cmd_tx: mpsc::Sender<SystemCommand>,
+    cli_ctrl_tx: crossbeam_channel::Sender<Arc<ControlEvent>>,
+    interactive_cli: bool,
+    log_receiver: Option<std::sync::mpsc::Receiver<String>>,
+) {
+    println!("=========================================");
+    println!("Wabrix Declarative CLI Ready.");
+    println!("Prometheus Exporter: http://localhost:9090/metrics");
+    match env::current_dir() {
+        Ok(dir) => println!("Working directory is: {}", dir.display()),
+        Err(err) => println!("Working directory is unavailable ({})", err),
+    }
+    println!("Commands: start, stop, apply <file.toml>, check, ctrl <address> <opcode>, shutdown");
+    println!("=========================================");
+
+    if interactive_cli {
+        run_interactive_cli(cli_cmd_tx, cli_ctrl_tx, log_receiver);
+    } else {
+        run_piped_cli(cli_cmd_tx, cli_ctrl_tx);
+    }
+}
+
+fn run_interactive_cli(
+    cli_cmd_tx: mpsc::Sender<SystemCommand>,
+    cli_ctrl_tx: crossbeam_channel::Sender<Arc<ControlEvent>>,
+    log_receiver: Option<std::sync::mpsc::Receiver<String>>,
+) {
+    let mut editor = match rustyline::DefaultEditor::new() {
+        Ok(editor) => editor,
+        Err(err) => {
+            eprintln!("Could not initialize interactive CLI ({err}); using basic input.");
+            if let Some(receiver) = log_receiver {
+                spawn_stderr_log_forwarder(receiver);
+            }
+            run_piped_cli(cli_cmd_tx, cli_ctrl_tx);
+            return;
+        }
+    };
+
+    match editor.create_external_printer() {
+        Ok(printer) => {
+            if let Some(receiver) = log_receiver {
+                spawn_rustyline_log_forwarder(receiver, printer);
+            }
+        }
+        Err(err) => {
+            eprintln!("Could not connect CLI log output to the prompt ({err}); using basic input.");
+            if let Some(receiver) = log_receiver {
+                spawn_stderr_log_forwarder(receiver);
+            }
+            run_piped_cli(cli_cmd_tx, cli_ctrl_tx);
+            return;
+        }
+    }
+
+    let history_path = env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .map(|home| home.join(".wabrix_history"));
+    let history_file = history_path
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned());
+    if let Some(path) = history_file.as_deref() {
+        // A missing history file is expected on first use.
+        let _ = editor.load_history(path);
+    }
+
+    let prompt = if env::var_os("NO_COLOR").is_none()
+        && env::var_os("CLICOLOR").as_deref() != Some(std::ffi::OsStr::new("0"))
+    {
+        "\x1b[94mwabrix>\x1b[0m "
+    } else {
+        "wabrix> "
+    };
+
+    loop {
+        match editor.readline(prompt) {
+            Ok(line) => {
+                if !line.trim().is_empty() {
+                    let _ = editor.add_history_entry(line.as_str());
+                }
+                if !dispatch_cli_line(&line, &cli_cmd_tx, &cli_ctrl_tx) {
+                    break;
+                }
+            }
+            Err(rustyline::error::ReadlineError::Interrupted) => {
+                let _ = cli_cmd_tx.blocking_send(SystemCommand::Shutdown);
+                break;
+            }
+            Err(rustyline::error::ReadlineError::Eof) => break,
+            Err(err) => {
+                eprintln!("CLI input error: {err}");
+                break;
+            }
+        }
+    }
+
+    if let Some(path) = history_file.as_deref() {
+        if let Err(err) = editor.save_history(path) {
+            eprintln!("Could not save CLI history: {err}");
+        }
+    }
+}
+
+fn run_piped_cli(
+    cli_cmd_tx: mpsc::Sender<SystemCommand>,
+    cli_ctrl_tx: crossbeam_channel::Sender<Arc<ControlEvent>>,
+) {
+    for line in io::stdin().lock().lines() {
+        let line = match line {
+            Ok(line) => line,
+            Err(err) => {
+                eprintln!("CLI input error: {}", err);
+                break;
+            }
+        };
+        if !dispatch_cli_line(&line, &cli_cmd_tx, &cli_ctrl_tx) {
+            break;
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
+    let interactive_cli =
+        io::stdin().is_terminal() && io::stdout().is_terminal() && io::stderr().is_terminal();
+    let cli_log_receiver = init_logging(interactive_cli);
     let mut terminate_signal =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .context("failed to install SIGTERM handler")?;
@@ -167,73 +425,7 @@ async fn main() -> anyhow::Result<()> {
     let cli_ctrl_tx = ctrl_tx.clone();
 
     thread::spawn(move || {
-        println!("=========================================");
-        println!("Wabrix Declarative CLI Ready.");
-        println!("Prometheus Exporter: http://localhost:9090/metrics");
-        match env::current_dir() {
-            Ok(dir) => println!("Working directory is: {}", dir.display()),
-            Err(err) => println!("Working directory is unavailable ({})", err),
-        }
-        println!(
-            "Commands: start, stop, apply <file.toml>, check, ctrl <address> <opcode>, shutdown"
-        );
-        println!("=========================================");
-
-        let stdin = io::stdin();
-        for line in stdin.lock().lines() {
-            let line = match line {
-                Ok(line) => line,
-                Err(err) => {
-                    eprintln!("CLI input error: {}", err);
-                    break;
-                }
-            };
-
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.is_empty() {
-                continue;
-            }
-
-            match parts[0].to_lowercase().as_str() {
-                "start" => {
-                    if cli_cmd_tx.blocking_send(SystemCommand::Start).is_err() {
-                        break;
-                    }
-                }
-                "stop" => {
-                    if cli_cmd_tx.blocking_send(SystemCommand::Stop).is_err() {
-                        break;
-                    }
-                }
-                "check" => {
-                    if cli_cmd_tx.blocking_send(SystemCommand::Check).is_err() {
-                        break;
-                    }
-                }
-                "apply" => {
-                    let path = parts.get(1).map(|s| s.to_string()).unwrap_or_else(|| "wabrix.toml".to_string());
-                    if cli_cmd_tx.blocking_send(SystemCommand::Apply(path)).is_err() {
-                        break;
-                    }
-                }
-                "ctrl" => {
-                    let address_pattern = parts.get(1).unwrap_or(&"*").to_string();
-                    let opcode = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
-                    let payload: Vec<u8> = parts.iter().skip(3)
-                        .filter_map(|s| s.parse::<u8>().ok())
-                        .collect();
-
-                    println!("=> Broadcasting ControlEvent (address: {}, opcode: {}, payload: {:?})", address_pattern, opcode, payload);
-                    let event = Arc::new(ControlEvent { address_pattern, opcode, payload });
-                    let _ = cli_ctrl_tx.send(event);
-                }
-                "shutdown" | "exit" | "quit" => {
-                    let _ = cli_cmd_tx.blocking_send(SystemCommand::Shutdown);
-                    break;
-                }
-                _ => println!("Unknown command. Use: start, stop, apply <file>, check, ctrl <address> <opcode> [payload_bytes], shutdown"),
-            }
-        }
+        run_cli_listener(cli_cmd_tx, cli_ctrl_tx, interactive_cli, cli_log_receiver)
     });
 
     loop {
