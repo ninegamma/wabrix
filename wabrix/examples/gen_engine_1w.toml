@@ -56,8 +56,8 @@ dst_mac = "44:49:88:06:63:39"
 src_ip = "10.10.10.222"
 
 [pipelines.nodes.hot_node_data]
-generation_limit = "3000M"
-generation_rate = "10000K"
+generation_limit = "1000M"
+generation_rate = "11000K"
 
 [[pipelines.nodes]]
 id = "tx_f0np0"
