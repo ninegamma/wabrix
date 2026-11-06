@@ -607,16 +607,33 @@ impl WasmReloadController {
                     let previous_version = engine.wasm_file_path().to_string();
                     let node_id = engine.node_id().to_string();
                     let switchover_started = Instant::now();
-                    let old_runtime = engine.install_candidate(candidate);
-                    let switchover_ns = switchover_started.elapsed().as_nanos();
-                    log::info!(
-                        "NODE {}: runtime switchover {} -> {} took {} ns",
-                        node_id,
-                        previous_version,
-                        version,
-                        switchover_ns
-                    );
-                    self.queue_retired_runtime(old_runtime, node_id, previous_version);
+                    match engine.install_candidate(&mut candidate) {
+                        Ok(()) => {
+                            let switchover_ns = switchover_started.elapsed().as_nanos();
+                            log::info!(
+                                "NODE {}: runtime switchover {} -> {} took {} ns",
+                                node_id,
+                                previous_version,
+                                version,
+                                switchover_ns
+                            );
+                            // The candidate now owns the previous runtime because it was swapped during install_candidate.
+                            // It must be destroyed by the background reaper.
+                            self.queue_retired_engine(candidate);
+                        }
+                        Err(error) => {
+                            log::error!(
+                                "Wasm reload switchover failed for node {}; keeping component {} active and retiring candidate {}: {}",
+                                node_id,
+                                previous_version,
+                                version,
+                                error
+                            );
+                            // Installation leaves the candidate intact on failure. Retire
+                            // its runtime off the worker thread and keep the active engine.
+                            self.queue_retired_engine(candidate);
+                        }
+                    }
                 }
                 Err(error) => {
                     let active_path = nodes

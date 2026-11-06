@@ -652,8 +652,10 @@ mod tests {
         let partitions = [partition];
         let bus = Arc::new(SystemBus {
             bus_senders: vec![queue.clone()],
-            partition_directory: SystemBus::partition_directory(&partitions),
-            frame_partition_maps: SystemBus::frame_partition_maps(&partitions, &[1], &[1]),
+            partition_directory: SystemBus::partition_directory(&partitions)
+                .expect("valid test partition directory"),
+            frame_partition_maps: SystemBus::frame_partition_maps(&partitions, &[1], &[1])
+                .expect("valid test frame partition maps"),
             umem_addr: [None; MAX_UMEM],
         });
         let mut registry = FrameRegistry::new(

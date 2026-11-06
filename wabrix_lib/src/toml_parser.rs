@@ -1253,16 +1253,30 @@ impl WabricksConfig {
 
                 // Validate Rx/Tx nodes have queues array matching workers array length
                 if node.node_type == "BatchRxNode" || node.node_type == "BatchTxNode" {
-                    if let Some(queues) = &node.queues {
-                        if queues.len() != pipeline.workers.len() {
-                            return Err(anyhow!(
-                                "Pipeline '{}': node '{}' queues array length ({}) must match workers array length ({})",
-                                pipeline.name,
-                                node.id,
-                                queues.len(),
-                                pipeline.workers.len()
-                            ));
-                        }
+                    let queues = node.queues.as_ref().ok_or_else(|| {
+                        anyhow!(
+                            "Pipeline '{}': node '{}' ({}) requires a 'queues' array",
+                            pipeline.name,
+                            node.id,
+                            node.node_type
+                        )
+                    })?;
+                    if queues.is_empty() {
+                        return Err(anyhow!(
+                            "Pipeline '{}': node '{}' ({}) queues array cannot be empty",
+                            pipeline.name,
+                            node.id,
+                            node.node_type
+                        ));
+                    }
+                    if queues.len() != pipeline.workers.len() {
+                        return Err(anyhow!(
+                            "Pipeline '{}': node '{}' queues array length ({}) must match workers array length ({})",
+                            pipeline.name,
+                            node.id,
+                            queues.len(),
+                            pipeline.workers.len()
+                        ));
                     }
 
                     // Validate referenced interface is defined in ifaces array

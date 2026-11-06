@@ -341,13 +341,22 @@ impl WasmEngine {
     }
 
     /// Installs only runtime-owned state; graph and node accounting remain with this node.
-    pub(crate) fn install_candidate(&mut self, mut candidate: WasmEngine) -> WasmRuntime {
-        debug_assert!(Arc::ptr_eq(&self.shared_state, &candidate.shared_state));
+    pub(crate) fn install_candidate(
+        &mut self,
+        candidate: &mut WasmEngine,
+    ) -> Result<(), String> {
+        if !Arc::ptr_eq(&self.shared_state, &candidate.shared_state) {
+            return Err(format!(
+                "Wasm reload candidate for node {} does not share the active engine's shared-state region",
+                self.id
+            ));
+        }
+
         std::mem::swap(&mut self.runtime, &mut candidate.runtime);
         self.poisoned = false;
-        self.wasm_file_path = candidate.wasm_file_path;
-        self.hot_node_data = candidate.hot_node_data;
-        candidate.runtime
+        std::mem::swap(&mut self.wasm_file_path, &mut candidate.wasm_file_path);
+        std::mem::swap(&mut self.hot_node_data, &mut candidate.hot_node_data);
+        Ok(())
     }
 
     /// Upgrade shared payload metadata at the runner's quiescent switchover boundary.
@@ -810,11 +819,21 @@ impl Node for WasmEngine {
         #[cfg(feature = "profiling")]
         let start_cycles = unsafe { std::arch::x86_64::_rdtsc() };
 
-        debug_assert!(
-            batch.iter().all(|pdu| pdu.umem_id() == Some(self.umem_id)),
-            "NODE {}: PDU from wrong Umem arrived",
-            self.id
-        );
+        let unexpected_umem_id = batch.iter().find_map(|pdu| {
+            let umem_id = pdu.umem_id();
+            (umem_id != Some(self.umem_id)).then_some(umem_id)
+        });
+        if let Some(unexpected_umem_id) = unexpected_umem_id {
+            log::error!(
+                "NODE {}: received PDU from UMEM {:?}, expected {}; rejecting batch and disabling this Wasm engine",
+                self.id,
+                unexpected_umem_id,
+                self.umem_id
+            );
+            self.poisoned = true;
+            batch.clear();
+            return Directive::Stop;
+        }
 
         // Normal ingress must never inherit a timer classification from a
         // recycled UMEM frame. Timer batches are explicitly marked in

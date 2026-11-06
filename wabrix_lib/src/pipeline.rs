@@ -208,9 +208,22 @@ impl PipelineFactory {
                             node_instance.node_config.id
                         ))?;
 
-                    assert!(node_instance.node_config.queues.is_some());
-                    assert_eq!(node_instance.node_config.queues.as_ref().unwrap().len(), 1);
-                    let queue_id = node_instance.node_config.queues.as_ref().unwrap()[0] as usize;
+                    let queues = node_instance.node_config.queues.as_ref().ok_or_else(|| {
+                        format!(
+                            "Pipeline '{}' node '{}' (BatchRxNode) is missing a queue assignment",
+                            pipeline_instance.name, node_instance.node_config.id
+                        )
+                    })?;
+                    if queues.len() != 1 {
+                        return Err(format!(
+                            "Pipeline '{}' node '{}' (BatchRxNode) must have exactly one queue for worker {}, got {}",
+                            pipeline_instance.name,
+                            node_instance.node_config.id,
+                            worker_id,
+                            queues.len()
+                        ));
+                    }
+                    let queue_id = queues[0] as usize;
 
                     // Parse batch_size from args (default: 64, max: MAX_BATCH_SIZE)
                     let batch_size = node_instance
@@ -571,9 +584,22 @@ impl PipelineFactory {
                             node_instance.node_config.id
                         ))?;
 
-                    assert!(node_instance.node_config.queues.is_some());
-                    assert_eq!(node_instance.node_config.queues.as_ref().unwrap().len(), 1);
-                    let queue_id = node_instance.node_config.queues.as_ref().unwrap()[0] as usize;
+                    let queues = node_instance.node_config.queues.as_ref().ok_or_else(|| {
+                        format!(
+                            "Pipeline '{}' node '{}' (BatchTxNode) is missing a queue assignment",
+                            pipeline_instance.name, node_instance.node_config.id
+                        )
+                    })?;
+                    if queues.len() != 1 {
+                        return Err(format!(
+                            "Pipeline '{}' node '{}' (BatchTxNode) must have exactly one queue for worker {}, got {}",
+                            pipeline_instance.name,
+                            node_instance.node_config.id,
+                            worker_id,
+                            queues.len()
+                        ));
+                    }
+                    let queue_id = queues[0] as usize;
 
                     // Take ownership of the TX component of the socket
                     let tx_sink = xsocket_mgr

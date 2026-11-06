@@ -1,8 +1,12 @@
 use crossbeam_utils::CachePadded;
-use std::mem::{replace, size_of, MaybeUninit};
+use std::mem::{replace, MaybeUninit};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::vec::Vec;
+use network_types::eth::EthHdr;
+use network_types::ip::Ipv4Hdr;
+use network_types::tcp::TcpHdr;
+use zerocopy::FromBytes;
 
 use wabrix_base::frame_registry::get_worker_frame_registry;
 use wabrix_base::interface::batch::Batch;
@@ -12,17 +16,17 @@ use wabrix_base::{ControlEvent, ControlEventResult, Directive, Node, NodeId};
 use wabrix_api::connections::{ConnectionPool, FlowKey, TcpState};
 use wabrix_api::engine_common::{apply_tcp_configuration_update, parse_tcp_engine_config};
 use wabrix_api::exports::Pdu0;
-use wabrix_api::headers::{IpHeader, MacHeader, TcpHeader};
 use wabrix_api::packet::Packet;
 use wabrix_api::MAX_BATCH_SIZE;
 use wabrix_api::{OperationalState, PluginOpcode, StandardOpcode};
 
 use wabrix_api::tcp_common::{
-    run_tcp_state_machine, tcp_telemetry, write_tcp_packet, EngineTimerPlan, PacketGenerator,
-    TcpEngineConfig, TimeoutStack, FLAG_ACK, FLAG_FIN, FLAG_RST, FLAG_SYN, PORT_END_RANGE,
-    PORT_START_RANGE, STAT_COUNT, STAT_DROP, STAT_RECV_RST, STAT_RECV_SYN, STAT_SENT_FIN,
-    STAT_SENT_RST, STAT_SENT_SYN, STAT_SENT_SYNACK, STAT_TO_LINUX, STAT_UNEXPECTED,
-    TCP_ROUTE_DROP as ROUTE_DROP, TCP_ROUTE_LINUX as ROUTE_LINUX, TCP_ROUTE_TX as ROUTE_TX,
+    run_tcp_state_machine, tcp_flags, tcp_telemetry, write_tcp_packet, EngineTimerPlan,
+    PacketGenerator, TcpEngineConfig, TimeoutStack, FLAG_ACK, FLAG_FIN, FLAG_RST, FLAG_SYN,
+    PORT_END_RANGE, PORT_START_RANGE, STAT_COUNT, STAT_DROP, STAT_RECV_RST, STAT_RECV_SYN,
+    STAT_SENT_FIN, STAT_SENT_RST, STAT_SENT_SYN, STAT_SENT_SYNACK, STAT_TO_LINUX,
+    STAT_UNEXPECTED, TCP_ROUTE_DROP as ROUTE_DROP, TCP_ROUTE_LINUX as ROUTE_LINUX,
+    TCP_ROUTE_TX as ROUTE_TX,
 };
 
 const MAX_CONNECTIONS: usize = 524_288;
@@ -283,7 +287,7 @@ impl Node for TcpNode {
                 pdu.parse_fast();
 
                 // Align with Wasm plugin: Use fingerprint instead of manual field checks
-                if pdu.header_stack.fingerprint() != wabrix_api::packet::Packet::TCP_OVER_IPV4 {
+                if pdu.header_stack.fingerprint() != Packet::TCP_OVER_IPV4 {
                     self.stats[STAT_TO_LINUX] += 1;
 
                     // Align with Wasm plugin: Route non-TCP traffic to Linux instead of Drop
@@ -296,7 +300,7 @@ impl Node for TcpNode {
                 }
 
                 let current_tsc = self.current_tsc;
-                let route = handle_tcp_packet(
+                let route = process_tcp_packet(
                     &mut pdu,
                     &mut self.connections,
                     &self.config,
@@ -632,10 +636,78 @@ impl Node for TcpNode {
     }
 }
 
+struct TcpPacketFields {
+    incoming_src_mac: [u8; 6],
+    incoming_dst_mac: [u8; 6],
+    src_ip: u32,
+    dst_ip: u32,
+    src_port: u16,
+    dst_port: u16,
+    tcp_flags: u8,
+    seq_num: u32,
+    ack_num: u32,
+    ip_total_len: u32,
+    ip_hdr_len: u32,
+    tcp_hdr_len: u32,
+}
+
+#[inline]
+fn extract_tcp_packet_fields(pdu: &Pdu) -> Option<TcpPacketFields> {
+    let data_ptr = pdu.data_address(0);
+    let data_len = pdu.data_len() as usize;
+    // SAFETY: `pdu` refers to a live UMEM frame and `data_len` is bounded by its descriptor.
+    let data = unsafe { std::slice::from_raw_parts(data_ptr.cast_const(), data_len) };
+
+    let mac = EthHdr::ref_from_bytes(data.get(..EthHdr::LEN)?).ok()?;
+
+    let ip_start = EthHdr::LEN;
+    let ip_end = ip_start.checked_add(Ipv4Hdr::LEN)?;
+    let ip = Ipv4Hdr::ref_from_bytes(data.get(ip_start..ip_end)?).ok()?;
+    let ip_hdr_len = ip.ihl() as usize;
+    let ip_total_len = ip.tot_len() as usize;
+    if ip_hdr_len < Ipv4Hdr::LEN || ip_total_len < ip_hdr_len {
+        return None;
+    }
+    let ip_packet_end = ip_start.checked_add(ip_total_len)?;
+    if ip_packet_end > data.len() {
+        return None;
+    }
+
+    let tcp_start = ip_start.checked_add(ip_hdr_len)?;
+    let tcp_base_end = tcp_start.checked_add(TcpHdr::LEN)?;
+    if tcp_base_end > ip_packet_end {
+        return None;
+    }
+    let tcp = TcpHdr::ref_from_bytes(data.get(tcp_start..tcp_base_end)?).ok()?;
+    let tcp_hdr_len = (tcp.doff() as usize).checked_mul(4)?;
+    if tcp_hdr_len < TcpHdr::LEN {
+        return None;
+    }
+    let tcp_end = tcp_start.checked_add(tcp_hdr_len)?;
+    if tcp_end > ip_packet_end {
+        return None;
+    }
+
+    Some(TcpPacketFields {
+        incoming_src_mac: mac.src_addr,
+        incoming_dst_mac: mac.dst_addr,
+        src_ip: u32::from(ip.src_addr()),
+        dst_ip: u32::from(ip.dst_addr()),
+        src_port: u16::from_be_bytes(tcp.source),
+        dst_port: u16::from_be_bytes(tcp.dest),
+        tcp_flags: tcp_flags(tcp),
+        seq_num: u32::from_be_bytes(tcp.seq),
+        ack_num: u32::from_be_bytes(tcp.ack_seq),
+        ip_total_len: ip_total_len as u32,
+        ip_hdr_len: ip_hdr_len as u32,
+        tcp_hdr_len: tcp_hdr_len as u32,
+    })
+}
+
 /// Extracts TCP header fields, runs the state machine, and writes the reply
 /// back into the same frame. Returns `ROUTE_TX` if a reply was written,
 /// `ROUTE_DROP` otherwise.
-unsafe fn handle_tcp_packet(
+unsafe fn process_tcp_packet(
     pdu: &mut Pdu,
     pool: &mut ConnectionPool,
     config: &TcpEngineConfig,
@@ -648,12 +720,7 @@ unsafe fn handle_tcp_packet(
         };
     }
 
-    let data = pdu.data_address(0);
-    let mac_size = size_of::<MacHeader>();
-    let ip_size = size_of::<IpHeader>();
-
-    // Extract all header values before any write so there is no aliasing.
-    let (
+    let Some(TcpPacketFields {
         incoming_src_mac,
         incoming_dst_mac,
         src_ip,
@@ -666,24 +733,9 @@ unsafe fn handle_tcp_packet(
         ip_total_len,
         ip_hdr_len,
         tcp_hdr_len,
-    ) = unsafe {
-        let mac = &*(data as *const MacHeader);
-        let ip = &*(data.add(mac_size) as *const IpHeader);
-        let tcp = &*(data.add(mac_size + ip_size) as *const TcpHeader);
-        (
-            mac.src.into_array(),
-            mac.dst.into_array(),
-            ip.src(),
-            ip.dst(),
-            tcp.src_port(),
-            tcp.dst_port(),
-            tcp.flags(),
-            tcp.seq_num(),
-            tcp.ack_num(),
-            ip.length() as u32,
-            (ip.ihl() * 4) as u32,
-            (tcp.data_offset() * 4) as u32,
-        )
+    }) = extract_tcp_packet_fields(pdu) else {
+        inc_stat!(STAT_DROP);
+        return ROUTE_DROP;
     };
 
     let flow_key = FlowKey(src_ip, src_port, dst_ip, dst_port);

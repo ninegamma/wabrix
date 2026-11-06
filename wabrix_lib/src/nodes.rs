@@ -458,8 +458,9 @@ impl Node for FastParserNode {
 
         for i in 0..len {
             // 1. Pre-fetch the data for a future PDU in the batch
-            if i + prefetch_dist < len {
-                let future_pdu = batch.get(i + prefetch_dist);
+            if let Some(future_pdu) = batch.get(i + prefetch_dist) {
+                // SAFETY: The PDU belongs to this live batch; prefetch only hints
+                // at its mapped packet data and does not dereference it.
                 unsafe {
                     let future_addr = future_pdu.data_address(0);
                     _mm_prefetch(future_addr as *const i8, _MM_HINT_T0);
@@ -467,7 +468,9 @@ impl Node for FastParserNode {
             }
 
             // 2. Parse the current PDU
-            let current_pdu = batch.get_mut(i);
+            // The loop bounds guarantee a live PDU; slice indexing also lets
+            // the compiler eliminate the redundant per-packet bounds check.
+            let current_pdu = &mut batch[i];
             current_pdu.parse_fast();
 
             log::trace!("Current Pdu: {}", current_pdu);

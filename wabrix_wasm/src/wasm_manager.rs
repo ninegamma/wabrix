@@ -96,18 +96,24 @@ impl UmemHandle {
     /// Raw pointer to this instance's mailbox in its private Wasm memory.
     ///
     /// # Safety
-    /// Caller must ensure exclusive access to this instance's mailbox slice and that
-    /// the linear memory has already been created for this instance.
+    /// Caller must ensure this instance's linear-memory mapping stays alive and that
+    /// it has exclusive access to the mailbox slice for the pointer's use. Returns
+    /// an error if no mapping is currently published for this handle.
     #[inline]
-    pub unsafe fn mailbox_ptr(&self, instance_idx: u32) -> *mut BatchMetadata {
+    pub unsafe fn mailbox_ptr(
+        &self,
+        instance_idx: u32,
+    ) -> std::result::Result<*mut BatchMetadata, &'static str> {
         let base = self.linear_base.load(Ordering::Acquire);
-        debug_assert_ne!(base, 0, "Wasm linear memory has not been created");
+        if base == 0 {
+            return Err("Wasm linear memory has not been created");
+        }
         // SAFETY: the MemoryCreator maps the mailbox offset inside this
         // instance's private linear-memory mapping before the Wasm instance is
         // exposed to the host.
-        unsafe {
+        Ok(unsafe {
             (base as *mut u8).add(self.mailbox_offset(instance_idx) as usize) as *mut BatchMetadata
-        }
+        })
     }
 
     /// Positive Wasm-linear offset where the shared UMEM begins.
@@ -117,13 +123,20 @@ impl UmemHandle {
     }
 
     /// Guest-linear offset of this instance's shared-state mapping, if present.
-    pub fn shared_state_offset(&self) -> Option<u32> {
-        let shared_state = self.shared_state.as_ref()?;
-        let aligned_umem_size = align_up(self.size, WASM_PAGE_BYTES).ok()?;
-        let offset = MAX_WASM_HEAP_BYTES.checked_add(aligned_umem_size)?;
-        let offset = u32::try_from(offset).ok()?;
-        debug_assert!(shared_state.mapping_size > 0);
-        Some(offset)
+    pub fn shared_state_offset(&self) -> std::result::Result<Option<u32>, String> {
+        let Some(shared_state) = self.shared_state.as_ref() else {
+            return Ok(None);
+        };
+        if shared_state.mapping_size == 0 {
+            return Err("shared-state mapping size must be greater than zero".to_string());
+        }
+        let aligned_umem_size = align_up(self.size, WASM_PAGE_BYTES)?;
+        let offset = MAX_WASM_HEAP_BYTES
+            .checked_add(aligned_umem_size)
+            .ok_or_else(|| "shared-state offset overflow".to_string())?;
+        let offset = u32::try_from(offset)
+            .map_err(|_| "shared-state offset exceeds the guest address range".to_string())?;
+        Ok(Some(offset))
     }
 
     /// Payload capacity reserved in the dedicated shared-state mapping.
@@ -186,7 +199,8 @@ impl UmemHandle {
         }
         let region_offset = self
             .shared_state_offset()
-            .ok_or_else(|| "shared-state offset exceeds the guest address range".to_string())?;
+            .map_err(|error| format!("invalid shared-state offset: {error}"))?
+            .ok_or_else(|| "this Wasm instance has no shared-state region".to_string())?;
         let payload_offset = region_offset
             .checked_add(SHARED_STATE_HEADER_BYTES as u32)
             .ok_or_else(|| "shared-state payload offset overflow".to_string())?;
@@ -339,7 +353,8 @@ impl UmemHandle {
         }
         let region_offset = self
             .shared_state_offset()
-            .ok_or_else(|| "shared-state offset exceeds the guest address range".to_string())?;
+            .map_err(|error| format!("invalid shared-state offset: {error}"))?
+            .ok_or_else(|| "this Wasm instance has no shared-state region".to_string())?;
         let region_ptr = (linear_base as *mut u8).wrapping_add(region_offset as usize);
         let mut header = [0u8; SHARED_STATE_HEADER_BYTES];
         // SAFETY: The memory creator mapped the complete shared-state region at
@@ -947,8 +962,7 @@ impl WasmManager {
         wasm_engine::EnginePlugin::add_to_linker::<MyHostState, HasSelf<MyHostState>>(
             &mut linker,
             |state| state,
-        )
-        .expect("Failed to link EnginePlugin world");
+        )?;
 
         Ok(Self {
             engine,

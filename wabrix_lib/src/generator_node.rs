@@ -2,7 +2,9 @@ use crate::config::hot_config::{NodeDynamicState, SharedSystemState};
 use crossbeam_utils::CachePadded;
 use log::{info, warn};
 use macaddr::MacAddr6;
-use network_types::eth::EtherType;
+use network_types::eth::{EthHdr, EtherType};
+use network_types::ip::{IpProto, Ipv4Hdr};
+use network_types::tcp::TcpHdr;
 use rand::prelude::SmallRng;
 use rand::TryRng;
 use serde::{Deserialize, Serialize};
@@ -11,7 +13,7 @@ use std::mem::MaybeUninit;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use wabrix_api::headers::{EndOffset, Header, IpHeader, MacHeader, TcpHeader};
+use wabrix_api::headers::HeaderPtr;
 use wabrix_base::frame_registry::get_worker_frame_registry;
 use wabrix_base::interface::batch::Batch;
 use wabrix_base::interface::Pdu;
@@ -215,57 +217,83 @@ impl GeneratorNode {
     /// without consuming headroom. This leaves headroom available for future header additions.
     fn initialize_pdu(&mut self, pdu: &mut Pdu, seqn: u32, dst_port: u16) -> anyhow::Result<()> {
         // Create headers
-        let mut mac = MacHeader::new();
-        mac.src = self.src_mac;
-        mac.dst = self.dst_mac;
-        mac.set_ethertype(EtherType::Ipv4);
+        let mac = EthHdr::new(
+            self.dst_mac.into_array(),
+            self.src_mac.into_array(),
+            EtherType::Ipv4,
+        );
 
-        let mut ip = IpHeader::new();
-        ip.set_src(self.rng.try_next_u32()?);
-        ip.set_dst_address(self.dst_ip);
-        ip.set_ttl(128);
-        ip.set_version(4);
-        ip.set_protocol(6); //tcp
-        ip.set_ihl(5);
-        ip.set_length(40);
-        ip.set_flags(0x2); // DF=1, MF=0 flag: don't fragment
+        let mut ip = Ipv4Hdr {
+            vihl: 0,
+            tos: 0,
+            tot_len: [0; 2],
+            id: [0; 2],
+            frags: [0; 2],
+            ttl: 0,
+            proto: 0,
+            check: [0; 2],
+            src_addr: [0; 4],
+            dst_addr: [0; 4],
+        };
+        ip.set_src_addr(Ipv4Addr::from(self.rng.try_next_u32()?));
+        ip.set_dst_addr(self.dst_ip);
+        ip.ttl = 128;
+        ip.set_vihl(4, Ipv4Hdr::LEN as u8);
+        ip.set_proto(IpProto::Tcp);
+        ip.set_tot_len((Ipv4Hdr::LEN + TcpHdr::LEN) as u16);
+        ip.set_frags(0x2, 0); // DF=1, MF=0: don't fragment
 
-        let mut tcp = TcpHeader::new();
-        tcp.set_syn_flag();
-        tcp.set_src_port(111);
-        tcp.set_dst_port(dst_port);
-        tcp.set_data_offset(5);
-        tcp.set_seq_num(seqn);
+        let mut tcp = TcpHdr {
+            source: [0; 2],
+            dest: [0; 2],
+            seq: [0; 4],
+            ack_seq: [0; 4],
+            _bitfield_align_1: [],
+            _bitfield_1: TcpHdr::new_bitfield_1(0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            window: [0; 2],
+            check: [0; 2],
+            urg_ptr: [0; 2],
+        };
+        tcp.set_syn(1);
+        tcp.source = 111u16.to_be_bytes();
+        tcp.dest = dst_port.to_be_bytes();
+        tcp.set_doff(5);
+        tcp.seq = seqn.to_be_bytes();
 
         // Calculate total packet size
-        let mac_size = MacHeader::size();
-        let ip_size = IpHeader::size();
-        let tcp_size = TcpHeader::size();
+        let mac_size = EthHdr::LEN;
+        let ip_size = Ipv4Hdr::LEN;
+        let tcp_size = TcpHdr::LEN;
         let total_size = mac_size + ip_size + tcp_size;
 
         let umem_addr = pdu.umem_addr();
+        let frame_base_addr = pdu.base_addr();
         // Write headers directly into the frame at current data pointer
         let data_ptr = pdu.data_ptr(umem_addr);
 
+        // SAFETY: `pdu` owns a live UMEM frame large enough for these fixed-size
+        // Ethernet, IPv4, and TCP headers. Each destination is within `total_size`,
+        // and the HeaderStack offsets are calculated relative to this frame's base.
         unsafe {
             // Write MAC header
-            let mac_ptr = data_ptr as *mut MacHeader;
-            std::ptr::copy_nonoverlapping(&mac as *const MacHeader, mac_ptr, 1);
+            let mac_ptr = data_ptr as *mut EthHdr;
+            std::ptr::copy_nonoverlapping(&mac as *const EthHdr, mac_ptr, 1);
 
             // Write IP header
-            let ip_ptr = data_ptr.add(mac_size) as *mut IpHeader;
-            std::ptr::copy_nonoverlapping(&ip as *const IpHeader, ip_ptr, 1);
+            let ip_ptr = data_ptr.add(mac_size) as *mut Ipv4Hdr;
+            std::ptr::copy_nonoverlapping(&ip as *const Ipv4Hdr, ip_ptr, 1);
 
             // Write TCP header
-            let tcp_ptr = data_ptr.add(mac_size + ip_size) as *mut TcpHeader;
-            std::ptr::copy_nonoverlapping(&tcp as *const TcpHeader, tcp_ptr, 1);
+            let tcp_ptr = data_ptr.add(mac_size + ip_size) as *mut TcpHdr;
+            std::ptr::copy_nonoverlapping(&tcp as *const TcpHdr, tcp_ptr, 1);
 
             // Initialize HeaderStack with the correct offsets
             pdu.headers_mut()
-                .push(umem_addr, Header::Mac(&mut *mac_ptr));
-            pdu.headers_mut().push(umem_addr, Header::Ip(&mut *ip_ptr));
+                .push(frame_base_addr, HeaderPtr::Eth(mac_ptr));
             pdu.headers_mut()
-                .push(umem_addr, Header::Tcp(&mut *tcp_ptr));
+                .push(frame_base_addr, HeaderPtr::Ip(ip_ptr));
+            pdu.headers_mut()
+                .push(frame_base_addr, HeaderPtr::Tcp(tcp_ptr));
         }
 
         // Update PDU data length

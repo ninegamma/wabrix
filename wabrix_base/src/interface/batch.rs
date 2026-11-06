@@ -4,7 +4,7 @@ use core::mem::MaybeUninit;
 use core::ops::{Bound, RangeBounds};
 use core::ptr;
 use log::trace;
-use std::cell::RefCell;
+use std::cell::UnsafeCell;
 use wabrix_api::MAX_BATCH_SIZE;
 
 type PacketStorage = Vec<MaybeUninit<Pdu>>;
@@ -14,37 +14,100 @@ type PacketStorage = Vec<MaybeUninit<Pdu>>;
 // after downstream processing drops them.
 const BATCH_STORAGE_POOL_CAPACITY: usize = 16;
 
+
 thread_local! {
-    static BATCH_STORAGE_POOL: RefCell<Vec<PacketStorage>> =
-        RefCell::new(Vec::with_capacity(BATCH_STORAGE_POOL_CAPACITY));
+    static BATCH_STORAGE_POOL: UnsafeCell<Vec<PacketStorage>> =
+        UnsafeCell::new(Vec::with_capacity(BATCH_STORAGE_POOL_CAPACITY));
 }
 
 fn allocate_packet_storage() -> PacketStorage {
-    BATCH_STORAGE_POOL
-        .try_with(|pool| pool.borrow_mut().pop())
-        .ok()
-        .flatten()
+    BATCH_STORAGE_POOL.with(|pool| {
+        unsafe { &mut *pool.get() }.pop()
+    })
         .unwrap_or_else(|| {
-            // Allocate uninitialized packet slots without zeroing the 32 KiB
-            // backing store. The vector length is fixed for every Batch.
             let mut packets = Vec::with_capacity(MAX_BATCH_SIZE);
-            // SAFETY: `MaybeUninit<Pdu>` is valid for every bit pattern, and
-            // the vector owns capacity for at least MAX_BATCH_SIZE elements.
-            unsafe {
-                packets.set_len(MAX_BATCH_SIZE);
-            }
+            unsafe { packets.set_len(MAX_BATCH_SIZE); }
             packets
         })
 }
 
 fn recycle_packet_storage(packets: PacketStorage) {
-    let _ = BATCH_STORAGE_POOL.try_with(|pool| {
-        let mut pool = pool.borrow_mut();
+    BATCH_STORAGE_POOL.with(|pool| {
+        let pool = unsafe { &mut *pool.get() };
         if pool.len() < BATCH_STORAGE_POOL_CAPACITY {
             pool.push(packets);
         }
-        // `packets` is dropped here when the bounded cache is full.
     });
+}
+
+
+
+/// Optimized bulk release of PDUs back to the UMEM for a specific memory slice.
+///
+/// # Safety
+/// The caller must ensure that the `count` elements starting at `ptr` are valid,
+/// initialized `Pdu` instances, and that they are logically considered dropped
+/// after this function returns.
+#[inline]
+unsafe fn bulk_drop_slice(ptr: *mut MaybeUninit<Pdu>, count: usize) {
+    if count == 0 {
+        return;
+    }
+
+    let registry_ptr = get_worker_frame_registry();
+    if !registry_ptr.is_null() {
+        let registry = &mut *registry_ptr;
+
+        // Branchless check to determine if the entire slice belongs to the local worker
+        let mut all_local = true;
+        for i in 0..count {
+            let pdu_ptr = ptr.add(i) as *const Pdu;
+            if (*pdu_ptr).worker_id() as usize != registry.worker_id {
+                all_local = false;
+                break;
+            }
+        }
+
+        if all_local {
+            // Fast path: Uninterrupted loop without worker_id branching per packet
+            for i in 0..count {
+                let pdu_ptr = ptr.add(i) as *mut Pdu;
+                let pdu = &*pdu_ptr;
+                if pdu.try_umem_addr().is_some() {
+                    let frame_token = pdu.to_frame_token();
+                    trace!("bulk_drop_slice: Returning frame {} to local stash", frame_token);
+                    registry.release_local(frame_token);
+                } else {
+                    log::error!(
+                        "bulk_drop_slice: invalid UMEM frame group={}, index={}",
+                        pdu.umem_group_id(),
+                        pdu.frame_index()
+                    );
+                    ptr::drop_in_place(pdu_ptr);
+                }
+            }
+        } else {
+            // Slow path: Mixed worker IDs, requiring per-packet verification
+            for i in 0..count {
+                let pdu_ptr = ptr.add(i) as *mut Pdu;
+                let pdu = &*pdu_ptr;
+                if registry.worker_id == pdu.worker_id() as usize {
+                    if pdu.try_umem_addr().is_some() {
+                        registry.release_local(pdu.to_frame_token());
+                    } else {
+                        ptr::drop_in_place(pdu_ptr);
+                    }
+                } else {
+                    ptr::drop_in_place(pdu_ptr);
+                }
+            }
+        }
+    } else {
+        // Fallback to standard individual drop if no registry is found
+        for i in 0..count {
+            ptr::drop_in_place(ptr.add(i) as *mut Pdu);
+        }
+    }
 }
 
 pub struct Batch {
@@ -54,6 +117,39 @@ pub struct Batch {
     packets: PacketStorage,
     /// Number of packets currently in the batch
     count: usize,
+}
+
+use core::ops::{Deref, DerefMut};
+use core::slice;
+
+impl Deref for Batch {
+    type Target = [Pdu];
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: The elements from 0 to `self.count` are guaranteed to be
+        // fully initialized `Pdu`s. `MaybeUninit<Pdu>` has the exact same
+        // memory layout as `Pdu`.
+        unsafe {
+            slice::from_raw_parts(
+                self.packets.as_ptr() as *const Pdu,
+                self.count,
+            )
+        }
+    }
+}
+
+impl DerefMut for Batch {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: Same as above, but providing mutable access.
+        unsafe {
+            slice::from_raw_parts_mut(
+                self.packets.as_mut_ptr() as *mut Pdu,
+                self.count,
+            )
+        }
+    }
 }
 
 impl Default for Batch {
@@ -82,6 +178,14 @@ impl Batch {
         } else {
             Err(pdu)
         }
+    }
+
+    /// Adds a PDU to the batch without bounds checking.
+    /// SAFETY: The caller must guarantee `self.count < MAX_BATCH_SIZE`.
+    #[inline]
+    pub unsafe fn push_unchecked(&mut self, pdu: Pdu) {
+        self.packets.get_unchecked_mut(self.count).write(pdu);
+        self.count += 1;
     }
 
     /// Remove and return the last PDU from the batch
@@ -129,20 +233,6 @@ impl Batch {
             }
         }
         self.count = 0;
-    }
-
-    /// Access a Pdu reference
-    #[inline]
-    pub fn get(&self, index: usize) -> &Pdu {
-        debug_assert!(index < self.count);
-        unsafe { &*self.packets[index].as_ptr() }
-    }
-
-    /// Access a mutable Pdu reference
-    #[inline]
-    pub fn get_mut(&mut self, index: usize) -> &mut Pdu {
-        debug_assert!(index < self.count);
-        unsafe { &mut *self.packets[index].as_mut_ptr() }
     }
 
     /// Takes the Pdu out of the slot and shifts remaining elements left.
@@ -198,17 +288,18 @@ impl Batch {
         let mut write_idx = 0;
         for read_idx in 0..self.count {
             unsafe {
-                let pdu_ref = &*self.packets[read_idx].as_ptr();
-                let keep = predicate(pdu_ref);
-
-                if keep {
+                let pdu_ptr = self.packets[read_idx].as_mut_ptr();
+                if predicate(&*pdu_ptr) {
                     if read_idx != write_idx {
-                        self.packets.swap(read_idx, write_idx);
+                        ptr::copy_nonoverlapping(
+                            pdu_ptr,
+                            self.packets[write_idx].as_mut_ptr(),
+                            1
+                        );
                     }
                     write_idx += 1;
                 } else {
-                    // Drop the Pdu, which returns the frame to XSocket
-                    ptr::drop_in_place(self.packets[read_idx].as_mut_ptr());
+                    ptr::drop_in_place(pdu_ptr);
                 }
             }
         }
@@ -343,49 +434,12 @@ impl Batch {
         self.count = write_idx;
     }
 
+
     /// Optimized bulk release of PDUs back to the UMEM.
     /// This bypasses the individual Drop overhead for each PDU.
     pub fn bulk_drop(&mut self) {
-        if self.count == 0 {
-            return;
-        }
-
-        // SAFETY: Live batch entries are initialized PDUs. Their SystemBus pointers are
-        // installed by the host and remain valid; `try_umem_addr` handles null defaults.
         unsafe {
-            let registry_ptr = get_worker_frame_registry();
-            if !registry_ptr.is_null() {
-                let registry = &mut *registry_ptr;
-
-                // Group by worker_id for efficient cross-thread returns if needed
-                // But for now, let's assume local release as it's the 99% case
-                for i in 0..self.count {
-                    let pdu = &*self.packets[i].as_ptr();
-                    if registry.worker_id == pdu.worker_id() as usize {
-                        if pdu.try_umem_addr().is_some() {
-                            let frame_token = pdu.to_frame_token();
-                            trace!("bulk_drop: Returning frame {} to local stash", frame_token);
-                            registry.release_local(frame_token);
-                        } else {
-                            log::error!(
-                                "bulk_drop: invalid UMEM frame group={}, index={}",
-                                pdu.umem_group_id(),
-                                pdu.frame_index()
-                            );
-                            ptr::drop_in_place(self.packets[i].as_mut_ptr());
-                        }
-                    } else {
-                        // Slow path: Individual cross-thread release
-                        // This still uses the drop logic for consistency
-                        ptr::drop_in_place(self.packets[i].as_mut_ptr());
-                    }
-                }
-            } else {
-                // Fallback to standard individual drop if no registry found
-                for i in 0..self.count {
-                    ptr::drop_in_place(self.packets[i].as_mut_ptr());
-                }
-            }
+            bulk_drop_slice(self.packets.as_mut_ptr(), self.count);
         }
         self.count = 0;
     }
@@ -434,9 +488,15 @@ impl<'a> Iterator for Drain<'a> {
 
 impl<'a> Drop for Drain<'a> {
     fn drop(&mut self) {
-        // 1. Drop any un-consumed elements in the drained range
-        for pdu in self.by_ref() {
-            drop(pdu);
+        // 1. Drop any un-consumed elements in the drained range using the optimized fast-path
+        let unconsumed_count = self.end - self.current;
+        if unconsumed_count > 0 {
+            unsafe {
+                bulk_drop_slice(
+                    self.batch.packets.as_mut_ptr().add(self.current),
+                    unconsumed_count,
+                );
+            }
         }
 
         // 2. Shift the tail elements left into the gap created by the drain

@@ -19,6 +19,7 @@ xsk-core = { workspace = true }
 libbpf-rs = { workspace = true }
 libbpf-sys = { workspace = true }
 network-types = { workspace = true }
+zerocopy = { workspace = true }
 ipnet = "2.12"
 macaddr = { workspace = true }
 

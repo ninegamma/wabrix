@@ -220,14 +220,16 @@ impl SystemBuilder {
             .map(|config| config.as_ref().map_or(0, |config| config.partitions))
             .collect();
 
+        let partition_directory = SystemBus::partition_directory(&all_partitions)?;
+        let frame_partition_maps = SystemBus::frame_partition_maps(
+            &all_partitions,
+            &frame_counts,
+            &partition_counts,
+        )?;
         let system_bus = Arc::new(SystemBus {
             bus_senders: bus_senders.clone(),
-            partition_directory: SystemBus::partition_directory(&all_partitions),
-            frame_partition_maps: SystemBus::frame_partition_maps(
-                &all_partitions,
-                &frame_counts,
-                &partition_counts,
-            ),
+            partition_directory,
+            frame_partition_maps,
             umem_addr,
         });
 
@@ -605,9 +607,11 @@ mod tests {
             .collect();
 
         let system_bus = Arc::get_mut(bus).unwrap();
-        system_bus.partition_directory = SystemBus::partition_directory(partitions);
+        system_bus.partition_directory =
+            SystemBus::partition_directory(partitions).expect("valid test partition directory");
         system_bus.frame_partition_maps =
-            SystemBus::frame_partition_maps(partitions, &frame_counts, &partition_counts);
+            SystemBus::frame_partition_maps(partitions, &frame_counts, &partition_counts)
+                .expect("valid test frame partition maps");
     }
 
     #[test]

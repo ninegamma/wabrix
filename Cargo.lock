@@ -1865,11 +1865,10 @@ dependencies = [
 [[package]]
 name = "network-types"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b2a639fbb002e28c2db28571f31aacc167fe7b36b33eaf650412b8d5efff26a"
 dependencies = [
  "num-derive",
  "num-traits",
+ "zerocopy 0.8.63",
 ]
 
 [[package]]
@@ -2072,7 +2071,7 @@ version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
- "zerocopy",
+ "zerocopy 0.8.56",
 ]
 
 [[package]]
@@ -3236,8 +3235,7 @@ dependencies = [
 
 [[package]]
 name = "wabrix_api"
-version = "0.6.0"
-source = "git+https://github.com/ninegamma/wabrix_api.git?branch=main#0e9ad2451e5de563fc49ba4d113c79c2a385b543"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -3248,6 +3246,7 @@ dependencies = [
  "network-types",
  "postcard",
  "serde",
+ "zerocopy 0.8.63",
 ]
 
 [[package]]
@@ -3304,6 +3303,7 @@ dependencies = [
  "wasmtime",
  "wasmtime-wasi",
  "xsk-core",
+ "zerocopy 0.8.63",
 ]
 
 [[package]]
@@ -4222,7 +4222,15 @@ version = "0.8.56"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "556764e583adb45a9f8d413c2a147fa7e8d821e48e12b14fd560b607998b75eb"
 dependencies = [
- "zerocopy-derive",
+ "zerocopy-derive 0.8.56",
+]
+
+[[package]]
+name = "zerocopy"
+version = "0.8.63"
+source = "git+https://github.com/google/zerocopy#f61435de34bb62c67497bb3510225c5bc5f659be"
+dependencies = [
+ "zerocopy-derive 0.8.63",
 ]
 
 [[package]]
@@ -4230,6 +4238,16 @@ name = "zerocopy-derive"
 version = "0.8.56"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2ab42fc20575779bd240faa45f94a74256f755c0fa9e89f0ede20d91d0cdfc1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "zerocopy-derive"
+version = "0.8.63"
+source = "git+https://github.com/google/zerocopy#f61435de34bb62c67497bb3510225c5bc5f659be"
 dependencies = [
  "proc-macro2",
  "quote",

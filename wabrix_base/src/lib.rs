@@ -144,31 +144,39 @@ pub struct SystemBus {
 
 impl SystemBus {
     /// Builds the fixed-index directory for the supplied stable partitions.
-    pub fn partition_directory(partitions: &[UmemPartition]) -> Vec<Option<UmemPartition>> {
+    pub fn partition_directory(
+        partitions: &[UmemPartition],
+    ) -> Result<Vec<Option<UmemPartition>>, String> {
         let mut directory = vec![None; MAX_PARTITIONS];
         for partition in partitions {
-            assert!(
-                partition.partition_id < MAX_PARTITIONS,
-                "partition ID exceeds directory capacity"
-            );
-            assert!(
-                partition.local_end >= partition.local_start,
-                "partition range is inverted"
-            );
-            assert!(
-                directory[partition.partition_id].is_none(),
-                "duplicate partition ID"
-            );
+            if partition.partition_id >= MAX_PARTITIONS {
+                return Err(format!(
+                    "partition ID {} exceeds directory capacity {}",
+                    partition.partition_id, MAX_PARTITIONS
+                ));
+            }
+            if partition.local_end < partition.local_start {
+                return Err(format!(
+                    "partition {} has an inverted local range [{}, {})",
+                    partition.partition_id, partition.local_start, partition.local_end
+                ));
+            }
+            if directory[partition.partition_id].is_some() {
+                return Err(format!(
+                    "duplicate partition ID {}",
+                    partition.partition_id
+                ));
+            }
             directory[partition.partition_id] = Some(*partition);
         }
-        directory
+        Ok(directory)
     }
 
     pub fn frame_partition_maps(
         partitions: &[UmemPartition],
         frame_counts: &[u32],
         partition_counts: &[u32],
-    ) -> Vec<UmemPartitionMap> {
+    ) -> Result<Vec<UmemPartitionMap>, String> {
         let mut maps: Vec<UmemPartitionMap> = frame_counts
             .iter()
             .enumerate()
@@ -186,6 +194,13 @@ impl SystemBus {
             .collect();
 
         for partition in partitions {
+            if partition.partition_id >= MAX_PARTITIONS {
+                return Err(format!(
+                    "partition ID {} exceeds directory capacity {}",
+                    partition.partition_id, MAX_PARTITIONS
+                ));
+            }
+
             let Some(map) = maps.get_mut(partition.umem_group_id) else {
                 continue;
             };
@@ -200,23 +215,23 @@ impl SystemBus {
                 continue;
             }
 
-            assert!(
-                partition.partition_id < MAX_PARTITIONS,
-                "partition ID exceeds directory capacity"
-            );
-
             let first_slot = (local_start / map.partition_size) as usize;
             let end_slot = local_end.div_ceil(map.partition_size) as usize;
             for slot in first_slot..end_slot.min(map.partition_ids.len()) {
-                assert!(
-                    map.partition_ids[slot].is_none(),
-                    "logical UMEM partition is assigned to multiple registry partitions"
-                );
+                if let Some(existing_partition_id) = map.partition_ids[slot] {
+                    return Err(format!(
+                        "logical UMEM group {} slot {} is assigned to registry partitions {} and {}",
+                        partition.umem_group_id,
+                        slot,
+                        existing_partition_id,
+                        partition.partition_id
+                    ));
+                }
                 map.partition_ids[slot] = Some(partition.partition_id as u8);
             }
         }
 
-        maps
+        Ok(maps)
     }
 
     /// Builds the compact ownership lookup used by an RX socket for every
