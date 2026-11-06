@@ -249,32 +249,15 @@ impl TelemetryRegistry {
         }
     }
 
-    pub fn register(
-        &mut self,
-        node_id: String,
-        counter_names: Arc<RwLock<Vec<String>>>,
-        counters_pkts: Vec<Arc<CachePadded<AtomicU64>>>,
-        counters_bytes: Vec<Arc<CachePadded<AtomicU64>>>,
-        active_flag: Option<Arc<AtomicBool>>,
-        force_sync_flag: Option<Arc<AtomicBool>>,
-        histograms: Vec<NamedHistogramMetrics>,
-    ) {
-        self.metrics.push(TelemetryMetrics {
-            node_id,
-            counter_names,
-            counters_pkts,
-            counters_bytes,
-            active_flag,
-            force_sync_flag,
-            histograms,
-        });
+    pub fn register(&mut self, metrics: TelemetryMetrics) {
+        self.metrics.push(metrics);
     }
 
     /// Registers an already constructed metrics object, replacing its node ID
     /// with the registry's fully qualified pipeline/node label.
     pub fn register_metrics(&mut self, node_id: String, mut metrics: TelemetryMetrics) {
         metrics.node_id = node_id;
-        self.metrics.push(metrics);
+        self.register(metrics);
     }
 
     pub fn get_metrics(&self) -> &[TelemetryMetrics] {

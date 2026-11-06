@@ -59,7 +59,7 @@ fn generic_thread_cpu_affinity() -> anyhow::Result<(Vec<usize>, usize)> {
             continue;
         }
 
-        return Err(error).map_err(Into::into);
+        return Err(error.into());
     }
 }
 
@@ -82,8 +82,7 @@ pub struct WabrixSystem {
     pub(crate) frame_registries: Vec<Option<FrameRegistry>>,
     pub telemetry_registry: Arc<TelemetryRegistry>,
     /// Indexed by worker_id (0..num_workers).
-    pub(crate) worker_runners:
-        Vec<Option<(CoreId, Option<bool>, Vec<crate::pipeline::PipelineRunner>)>>,
+    pub(crate) worker_runners: Vec<Option<WorkerRunner>>,
     pub(crate) platform_data: PlatformData,
     pub shared_state: Arc<crate::config::hot_config::SharedSystemState>,
     /// All live UMEM handles indexed by umem_id (0..MAX_UMEM). None = not used.
@@ -91,6 +90,8 @@ pub struct WabrixSystem {
     pub(crate) control_rx: Option<Receiver<Arc<ControlEvent>>>,
     pub(crate) control_senders: Vec<Sender<Arc<ControlEvent>>>,
 }
+
+pub(crate) type WorkerRunner = (CoreId, Option<bool>, Vec<crate::pipeline::PipelineRunner>);
 
 impl WabrixSystem {
     /// returns handles of all spawned worker threads, telemetry logger thread, and dst port stats

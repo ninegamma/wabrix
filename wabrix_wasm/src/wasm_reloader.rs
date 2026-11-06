@@ -678,7 +678,7 @@ impl WasmReloadController {
         if let Some(service) = &self.service {
             let retire_tx = &service.retire_tx;
             match retire_tx.try_send(retired) {
-                Ok(()) => return,
+                Ok(()) => (),
                 Err(TrySendError::Full(retired) | TrySendError::Disconnected(retired)) => {
                     self.retired_runtimes.push(retired);
                 }

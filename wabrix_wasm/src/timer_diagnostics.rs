@@ -56,7 +56,7 @@ impl TimerDiagnostics {
                 .position(|route| route.id == "shared_tx_sink")
                 .unwrap_or(0);
 
-            return Self {
+            Self {
                 requested_frames: 0,
                 allocated_frames: 0,
                 routed_frames: 0,
@@ -77,7 +77,7 @@ impl TimerDiagnostics {
                 worker_id,
                 #[cfg(feature = "runtime-diagnostics")]
                 worker_index,
-            };
+            }
         }
 
         #[cfg(not(feature = "profiling"))]

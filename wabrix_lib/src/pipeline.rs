@@ -21,7 +21,7 @@ use wabrix_base::common::formatting::PreciseSeparator;
 use wabrix_base::frame_registry::{set_tsc_frequency, set_worker_frame_registry};
 use wabrix_base::node_instance_id::NodeInstanceId;
 use wabrix_base::system::PlatformData;
-use wabrix_base::telemetry::TelemetryRegistry;
+use wabrix_base::telemetry::{TelemetryMetrics, TelemetryRegistry};
 use wabrix_base::{ControlEvent, ControlEventResult, Directive, Node, NodeId};
 #[cfg(feature = "wasm")]
 use wabrix_wasm::wasm_manager::WasmManager;
@@ -499,28 +499,28 @@ impl PipelineFactory {
                     let tm_is_running = Arc::new(AtomicBool::new(false));
                     let tm_force_sync = Arc::new(AtomicBool::new(false));
                     if let Some(ref mut reg) = telemetry_registry {
-                        reg.register(
-                            format!(
+                        reg.register(TelemetryMetrics {
+                            node_id: format!(
                                 "{}/{}",
                                 pipeline_instance.name, node_instance.node_config.id
                             ),
-                            Arc::new(RwLock::new(vec![
+                            counter_names: Arc::new(RwLock::new(vec![
                                 "total_generated".to_string(),
                                 "pkts_this_run".to_string(),
                                 "total_cycles".to_string(),
                                 "pps_last_run".to_string(),
                             ])),
-                            vec![
+                            counters_pkts: vec![
                                 tm_total.clone(),
                                 tm_this_run.clone(),
                                 tm_avg_cycles.clone(),
                                 tm_pps.clone(),
                             ],
-                            vec![Arc::new(CachePadded::new(AtomicU64::new(0)))],
-                            Some(tm_is_running.clone()),
-                            Some(tm_force_sync.clone()),
-                            vec![],
-                        );
+                            counters_bytes: vec![Arc::new(CachePadded::new(AtomicU64::new(0)))],
+                            active_flag: Some(tm_is_running.clone()),
+                            force_sync_flag: Some(tm_force_sync.clone()),
+                            histograms: vec![],
+                        });
                     }
 
                     // =========================================================
@@ -616,18 +616,18 @@ impl PipelineFactory {
                 "DropNode" => {
                     let dropped_pkts = Arc::new(CachePadded::new(AtomicU64::new(0)));
                     if let Some(ref mut reg) = telemetry_registry {
-                        reg.register(
-                            format!(
+                        reg.register(TelemetryMetrics {
+                            node_id: format!(
                                 "{}/{}",
                                 pipeline_instance.name, node_instance.node_config.id
                             ),
-                            Arc::new(RwLock::new(vec!["dropped".to_string()])),
-                            vec![dropped_pkts.clone()],
-                            vec![Arc::new(CachePadded::new(AtomicU64::new(0)))],
-                            None,
-                            None,
-                            vec![],
-                        );
+                            counter_names: Arc::new(RwLock::new(vec!["dropped".to_string()])),
+                            counters_pkts: vec![dropped_pkts.clone()],
+                            counters_bytes: vec![Arc::new(CachePadded::new(AtomicU64::new(0)))],
+                            active_flag: None,
+                            force_sync_flag: None,
+                            histograms: vec![],
+                        });
                     }
                     Box::new(DropNode::new(my_id.clone(), Some(dropped_pkts)))
                 }
@@ -712,18 +712,18 @@ impl PipelineFactory {
                         .collect();
                     let tm_force_sync = Arc::new(AtomicBool::new(false));
                     if let Some(registry) = telemetry_registry.as_mut() {
-                        registry.register(
-                            format!(
+                        registry.register(TelemetryMetrics {
+                            node_id: format!(
                                 "{}/{}",
                                 pipeline_instance.name, node_instance.node_config.id
                             ),
                             counter_names,
-                            counters_pkts.clone(),
+                            counters_pkts: counters_pkts.clone(),
                             counters_bytes,
-                            None,
-                            Some(tm_force_sync.clone()),
-                            vec![],
-                        );
+                            active_flag: None,
+                            force_sync_flag: Some(tm_force_sync.clone()),
+                            histograms: vec![],
+                        });
                     }
 
                     Box::new(TcpNode::new(

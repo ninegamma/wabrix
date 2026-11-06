@@ -1865,6 +1865,7 @@ dependencies = [
 [[package]]
 name = "network-types"
 version = "0.2.0"
+source = "git+https://github.com/ninegamma/network-types.git?branch=zerocopy#c95ff07bf91e859ce6e460bcc6dd3608b740654d"
 dependencies = [
  "num-derive",
  "num-traits",
@@ -3236,6 +3237,7 @@ dependencies = [
 [[package]]
 name = "wabrix_api"
 version = "0.6.1"
+source = "git+https://github.com/ninegamma/wabrix_api.git?branch=main#84ac33b38d54e8820a72229e18fe444bddda7864"
 dependencies = [
  "anyhow",
  "byteorder",

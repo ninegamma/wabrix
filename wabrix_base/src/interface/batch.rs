@@ -181,7 +181,10 @@ impl Batch {
     }
 
     /// Adds a PDU to the batch without bounds checking.
-    /// SAFETY: The caller must guarantee `self.count < MAX_BATCH_SIZE`.
+    ///
+    /// # Safety
+    /// The caller must guarantee `self.len() < MAX_BATCH_SIZE` so the next
+    /// packet slot is allocated and does not contain a live PDU.
     #[inline]
     pub unsafe fn push_unchecked(&mut self, pdu: Pdu) {
         self.packets.get_unchecked_mut(self.count).write(pdu);
@@ -451,7 +454,7 @@ impl Drop for Batch {
         self.bulk_drop();
         // SAFETY: `bulk_drop` leaves no live PDUs in the storage, so it can be
         // safely returned to the pool and reused by a future Batch.
-        let packets = core::mem::replace(&mut self.packets, Vec::new());
+        let packets = core::mem::take(&mut self.packets);
         recycle_packet_storage(packets);
     }
 }

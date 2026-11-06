@@ -528,7 +528,7 @@ impl StitchedLinearMemory {
         // guarantees host-page alignment. Over-reserve, then trim the padding
         // so each instance retains only the stitched Wasm range.
         let hugepage_size = default_hugepage_size_bytes()?;
-        if handle.size % hugepage_size != 0 {
+        if !handle.size.is_multiple_of(hugepage_size) {
             return Err(format!(
                 "AF_XDP UMEM size {} is not aligned to HugeTLB page size {}",
                 handle.size, hugepage_size
