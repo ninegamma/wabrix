@@ -697,7 +697,7 @@ impl PipelineFactory {
                         .collect();
 
                     let counter_names = Arc::new(RwLock::new(
-                        wabrix_api::tcp_common::TCP_STAT_NAMES
+                        wabrix_plugins::tcp_common::TCP_STAT_NAMES
                             .iter()
                             .map(|name| name.to_string())
                             .chain(std::iter::once("watermark".to_string()))

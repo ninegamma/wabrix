@@ -13,15 +13,15 @@ use wabrix_base::interface::batch::Batch;
 use wabrix_base::interface::Pdu;
 use wabrix_base::{ControlEvent, ControlEventResult, Directive, Node, NodeId};
 
-use wabrix_api::connections::{ConnectionPool, FlowKey, TcpState};
-use wabrix_api::engine_common::{apply_tcp_configuration_update, parse_tcp_engine_config};
+use wabrix_plugins::connections::{ConnectionPool, FlowKey, TcpState};
+use wabrix_plugins::engine_common::{apply_tcp_configuration_update, parse_tcp_engine_config};
 use wabrix_api::exports::Pdu0;
 use wabrix_api::packet::Packet;
-use wabrix_api::MAX_BATCH_SIZE;
+use wabrix_api::{EngineTimerPlan, MAX_BATCH_SIZE};
 use wabrix_api::{OperationalState, PluginOpcode, StandardOpcode};
 
-use wabrix_api::tcp_common::{
-    run_tcp_state_machine, tcp_flags, tcp_telemetry, write_tcp_packet, EngineTimerPlan,
+use wabrix_plugins::tcp_common::{
+    run_tcp_state_machine, tcp_flags, tcp_telemetry, write_tcp_packet,
     PacketGenerator, TcpEngineConfig, TimeoutStack, FLAG_ACK, FLAG_FIN, FLAG_RST, FLAG_SYN,
     PORT_END_RANGE, PORT_START_RANGE, STAT_COUNT, STAT_DROP, STAT_RECV_RST, STAT_RECV_SYN,
     STAT_SENT_FIN, STAT_SENT_RST, STAT_SENT_SYN, STAT_SENT_SYNACK, STAT_TO_LINUX,
@@ -177,7 +177,7 @@ impl TcpNode {
         for (i, counter) in self.counters_pkts.iter().enumerate() {
             let val = match i {
                 i if i < STAT_COUNT => self.stats[i],
-                wabrix_api::tcp_common::TCP_WATERMARK_INDEX => self.connections.watermark as u64,
+                wabrix_plugins::tcp_common::TCP_WATERMARK_INDEX => self.connections.watermark as u64,
                 _ => break,
             };
             counter.store(val, Ordering::Relaxed);

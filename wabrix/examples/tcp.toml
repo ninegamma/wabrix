@@ -51,7 +51,7 @@ id = "tcp_engine"
 type = "WasmEngine"
 routes = ["shared_tx_sink", "veth_sink", "drop"]
 args= { umem = "0"  }
-hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/tcp_engine.wasm" }
+hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_plugins/target/wasm32-wasip2/release/tcp_engine.wasm" }
 
 # Cold Data: Passed exactly once to `init-data()` during instantiation.
 # Changes here require a FullRestart (ReconciliationAction).

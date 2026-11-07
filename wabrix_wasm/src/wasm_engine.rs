@@ -8,7 +8,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
-use wabrix_api::tcp_common::EngineTimerPlan;
+use wabrix_api::EngineTimerPlan;
 use wabrix_api::{
     BatchMetadata, MAX_BATCH_SIZE, MAX_HISTOGRAM_BUCKETS, TIMER_KIND_NONE, TIMER_KIND_SYN,
     TIMER_KIND_TIMEOUT,

@@ -3237,7 +3237,6 @@ dependencies = [
 [[package]]
 name = "wabrix_api"
 version = "0.6.1"
-source = "git+https://github.com/ninegamma/wabrix_api.git?branch=main#84ac33b38d54e8820a72229e18fe444bddda7864"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -3246,7 +3245,6 @@ dependencies = [
  "log",
  "macaddr",
  "network-types",
- "postcard",
  "serde",
  "zerocopy 0.8.63",
 ]
@@ -3301,10 +3299,23 @@ dependencies = [
  "ts-rs",
  "wabrix_api",
  "wabrix_base",
+ "wabrix_plugins",
  "wabrix_wasm",
  "wasmtime",
  "wasmtime-wasi",
  "xsk-core",
+ "zerocopy 0.8.63",
+]
+
+[[package]]
+name = "wabrix_plugins"
+version = "0.6.1"
+dependencies = [
+ "hashbrown 0.17.1",
+ "log",
+ "network-types",
+ "postcard",
+ "wabrix_api",
  "zerocopy 0.8.63",
 ]
 

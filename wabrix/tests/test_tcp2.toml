@@ -62,7 +62,7 @@ routes = ["shared_tx_sink", "veth_sink", "drop"]
 # Node-level state override
 desired_state = "Running"
 args= { umem = "0" }
-hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/tcp_engine.wasm" }
+hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_plugins/target/wasm32-wasip2/release/tcp_engine.wasm" }
 
 [pipelines.nodes.node_data]
 dst_ip = "10.10.10.31"
@@ -144,7 +144,7 @@ type = "WasmEngine"
 routes = ["shared_tx_sink", "veth_sink", "drop"]
 # Node-level state override
 desired_state = "Running"
-args= { umem = "1", wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/tcp_engine.wasm" }
+args= { umem = "1", wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_plugins/target/wasm32-wasip2/release/tcp_engine.wasm" }
 hot_args= {}
 
 [pipelines.nodes.node_data]

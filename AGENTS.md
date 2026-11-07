@@ -2,12 +2,13 @@
 
 ## 1. Project Overview & Philosophy
 
-The system is split across two repositories:
+The system is split across three repositories:
 
 * **wabrix:** This repository. The dataplane engine — the AF_XDP socket layer, pipeline engine, config parser, WASM host, and management binary.
-* **wabrix_api:** The public SDK for building WASM plugins for the Wabrix platform. Contains the `wabrix_api` crate, the `wit/wabrix.wit` interface definition, and example `plugins/`.
+* **wabrix_api:** The generic SDK and canonical `wit/wabrix.wit` interface definition.
+* **wabrix_plugins:** Independent sibling repository containing reusable TCP/generator implementations and plugin crates under `plugins/`.
 
-Sibling checkouts live next to this repo and are referenced by relative Cargo paths: `../xsk-core` (AF_XDP bindings), `../wabrix_api/wabrix_api` (host-side SDK). The prebuilt `ipblower` load generator and example endpoints live in the separate `wabrix_ep` repo.
+Sibling checkouts live next to this repo and are referenced by relative Cargo paths: `../xsk-core` (AF_XDP bindings), `../wabrix_api/wabrix_api` (host-side SDK), `../wabrix_plugins` (shared TCP/generator implementations). The prebuilt `ipblower` load generator and example endpoints live in the separate `wabrix_ep` repo.
 
 Wabrix is a high-performance, software-based networking engine/router. The system processes packets at high throughput (target: 25 Gbps – 100 Gbps) using Linux kernel-bypass via AF_XDP, and features a sandboxed WebAssembly plugin architecture for data-plane programmability.
 
@@ -39,7 +40,7 @@ There is **no `ipblower` crate in this workspace.** In-tree traffic generation i
 | Crate | Role | May depend on                                                                        |
 |---|---|--------------------------------------------------------------------------------------|
 | `wabrix_base` | Core types: `RuntimeUmemConfig`, `UmemPartition`, `SystemBus`, `Directive`, `Node` trait, `NodeId`, `FrameRegistry`, `Pdu`, `Batch`, telemetry counters | `xsk-core`, `crossbeam-queue`, `log`, `serde`, `macaddr`, `network-types`            |
-| `wabrix_lib` | AF_XDP sockets (`XSocket`/`XSocketRx`/`XSocketTx`), pipeline DAG, TOML config, BPF program loading, system builder/runner | `wabrix_base`, `xsk-core`, `libbpf-rs`, `wabrix_wasm` (behind `wasm` feature), `tokio` |
+| `wabrix_lib` | AF_XDP sockets (`XSocket`/`XSocketRx`/`XSocketTx`), pipeline DAG, TOML config, BPF program loading, system builder/runner | `wabrix_base`, `wabrix_api`, `wabrix_plugins`, `xsk-core`, `libbpf-rs`, `wabrix_wasm` (behind `wasm` feature), `tokio` |
 | `wabrix_wasm` | WASM runtime host: loads `.wasm` components, exposes host functions via WIT bindings, manages plugin lifecycle | `wabrix_base`, `wabrix_api`, `wasmtime`, `wasmtime-wasi`                             |
 | `wabrix` | Binary: CLI (`clap`), Prometheus metrics exporter (`axum` + `prometheus`), stdin command loop, config hot-reload orchestration, logging sink | `wabrix_lib`, `wabrix_base`                                                          |
 

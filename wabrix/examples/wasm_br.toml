@@ -112,7 +112,7 @@ workers = [0, 1]
 id = "pctgen"
 type = "PacketGenerator"
 routes = ["tx_sink_1"]
-args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/generator_plugin.wasm", umem = "0",   no-zerocopy = "false" }
+args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_plugins/target/wasm32-wasip2/release/generator_plugin.wasm", umem = "0",   no-zerocopy = "false" }
 
 [pipelines.nodes.hot_args]
 packet_count = "256000"

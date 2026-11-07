@@ -6,6 +6,7 @@ version.workspace = true
 [dependencies]
 wabrix_base = { workspace = true }
 wabrix_api = { workspace = true }
+wabrix_plugins = { workspace = true }
 
 # Standard Tools
 anyhow = { workspace = true }

@@ -46,7 +46,7 @@ routes = ["tx_f0np0", "drop", "drop"]
 desired_state = "Running"
 # batch_size_variance is an absolute +/- frame count; batch_size + variance must fit MAX_BATCH_SIZE.
 args= { umem = "0", batch_size = "512", batch_size_variance = "32" }
-hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/generator_engine.wasm" }
+hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_plugins/target/wasm32-wasip2/release/generator_engine.wasm" }
 
 [pipelines.nodes.node_data]
 prot = "UDP"
@@ -110,8 +110,8 @@ routes = ["drop", "drop"]
 desired_state = "Running"
 args= { umem = "1" }
 
-#hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/inspector_engine.wasm" }
-hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_api/target/wasm32-wasip2/release/inspector_engine_new.wasm" }
+#hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_plugins/target/wasm32-wasip2/release/inspector_engine.wasm" }
+hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_plugins/target/wasm32-wasip2/release/inspector_engine_new.wasm" }
 
 [pipelines.nodes.node_data]
 src_ip = "10.10.10.31"
