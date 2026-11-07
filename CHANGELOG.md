@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.6.1] - 2026-11-07
+
+### Added
+
+- Interactive terminal support with command history, colored output, and log
+  forwarding, while retaining stdin command handling for non-interactive use.
+
+### Changed
+
+- Optimized AF_XDP receive and transmit batching, fill-ring refills, frame
+  recycling, descriptor setup, wakeups, and diagnostics to reduce dataplane
+  overhead.
+- Updated packet generation, parsing, and batch handling to use zero-copy
+  packet types and more efficient bulk operations.
+- Lowered routine WASM timing messages to debug level and tuned the one-worker
+  generator example for an 11 Mpps rate and a one-billion-packet limit.
+
+### Fixed
+
+- Preserved NIC frame ownership when transmit wakeups fail and corrected
+  completion address handling for UMEM mappings larger than 4 GiB.
+- Prevented RX refill starvation on small fill rings; corrected UMEM offsets
+  and metadata bounds, and handled wakeup failures without panicking.
+- Kept active WASM runtimes available when reload validation fails and retired
+  replaced engines away from worker threads.
+- Added validation for partition and queue assignments, Wasm mappings, and
+  ingress UMEMs.
+
 ## [0.6.0] - 2026-11-03
 
 ### Added
