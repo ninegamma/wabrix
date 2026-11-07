@@ -3228,8 +3228,6 @@ dependencies = [
  "byteorder",
  "fnv",
  "hashbrown 0.17.1",
- "log",
- "macaddr",
  "network-types",
  "serde",
  "zerocopy 0.8.63",

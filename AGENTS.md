@@ -8,7 +8,7 @@ The system is split across three repositories:
 * **wabrix_api:** The generic SDK and canonical `wit/wabrix.wit` interface definition.
 * **wabrix_plugins:** Independent sibling repository containing reusable TCP/generator implementations and plugin crates under `plugins/`.
 
-Sibling checkouts live next to this repo and are referenced by relative Cargo paths: `../xsk-core` (AF_XDP bindings), `../wabrix_api/wabrix_api` (host-side SDK), `../wabrix_plugins` (shared TCP/generator implementations). The prebuilt `ipblower` load generator and example endpoints live in the separate `wabrix_ep` repo.
+Sibling checkouts live next to this repo and are referenced by relative Cargo paths: `../xsk-core` (AF_XDP bindings), `../wabrix_api` (host-side SDK), `../wabrix_plugins` (shared TCP/generator implementations). The prebuilt `ipblower` load generator and example endpoints live in the separate `wabrix_ep` repo.
 
 Wabrix is a high-performance, software-based networking engine/router. The system processes packets at high throughput (target: 25 Gbps – 100 Gbps) using Linux kernel-bypass via AF_XDP, and features a sandboxed WebAssembly plugin architecture for data-plane programmability.
 
@@ -91,7 +91,7 @@ There is **no `ipblower` crate in this workspace.** In-tree traffic generation i
 
 ### Plugin Engine (WebAssembly)
 * **Wasm Runtime:** `wasmtime` + `wasmtime-wasi` (Component Model enabled).
-* **Interface Standard:** The `.wit` interface lives in the sibling `wabrix_api` repo (`wabrix_api/wit/wabrix.wit`). Host bindings are generated via `wit-bindgen`; the host-side crate is pulled in as `wabrix_api = { path = "../wabrix_api/wabrix_api", features = ["host"] }`.
+* **Interface Standard:** The `.wit` interface lives in the sibling `wabrix_api` repo (`wabrix_api/wit/wabrix.wit`). Host bindings are generated via `wit-bindgen`; the host-side crate is pulled in as `wabrix_api = { path = "../wabrix_api", features = ["host"] }`.
 * The `wasm` feature gate controls whether the WASM runtime is compiled in. It is **on by default for `wabrix_lib`** (`default = ["profiling", "wasm"]`) but **opt-in for the `wabrix` binary** — build the binary with `--features wasm` to include it.
 
 ### Async Runtime

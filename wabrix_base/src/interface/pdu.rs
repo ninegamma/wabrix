@@ -6,13 +6,13 @@ use xsk_core::FrameDesc;
 
 use crate::frame_registry::FrameToken;
 use crate::SystemBus;
-use wabrix_api::exports::WPdu;
+use wabrix_api::PduCore;
 
 #[repr(C, align(64))]
 #[derive(Debug)]
 pub struct Pdu {
     /// [0..56] 56 Bytes: The pure Wasm-compatible core!
-    pub w: WPdu,
+    pub w: PduCore,
 
     /// [56..64] 8 Bytes: Bus Pointer
     system_bus: *const SystemBus,
@@ -21,9 +21,9 @@ pub struct Pdu {
 // This check will now successfully pass in BOTH Linux and Wasm!
 const _: () = assert!(core::mem::size_of::<Pdu>() == 64);
 
-// This lets you call `packet.parse_fast()` directly on Pdu0 in Wasm!
+// This lets you call `packet.parse_fast()` directly on SharedPdu in Wasm!
 impl core::ops::Deref for Pdu {
-    type Target = WPdu;
+    type Target = PduCore;
     #[inline(always)]
     fn deref(&self) -> &Self::Target {
         &self.w
@@ -40,7 +40,7 @@ impl core::ops::DerefMut for Pdu {
 impl Default for Pdu {
     fn default() -> Self {
         Pdu {
-            w: WPdu::default(),
+            w: PduCore::default(),
             system_bus: core::ptr::null(),
         }
     }
@@ -130,7 +130,7 @@ impl Pdu {
         system_bus: *const SystemBus,
         frame_size_log2: u8,
     ) -> Self {
-        let w = WPdu::new(
+        let w = PduCore::new(
             desc.addr(),
             desc.length(),
             desc.options(),
@@ -430,7 +430,7 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
     use core::ptr;
-    use wabrix_api::exports::Pdu0;
+    use wabrix_api::SharedPdu;
     use wabrix_api::packet::Packet;
 
     // A dummy header struct for testing purposes
@@ -481,9 +481,9 @@ mod tests {
         let header_size;
         let header;
         {
-            // SAFETY: Pdu and Pdu0 are both repr(C, align(64)) with identical layouts (WPdu + 8-byte pad).
+            // SAFETY: Pdu and SharedPdu are both repr(C, align(64)) with identical layouts (WPdu + 8-byte pad).
             let mut packet = Packet::new(
-                unsafe { &mut *(&mut pdu as *mut Pdu as *mut Pdu0) },
+                unsafe { &mut *(&mut pdu as *mut Pdu as *mut SharedPdu) },
                 umem_base as usize,
             );
 
@@ -530,7 +530,7 @@ mod tests {
 
         // SAFETY: same layout as above.
         let packet = Packet::new(
-            unsafe { &mut *(&mut pdu as *mut Pdu as *mut Pdu0) },
+            unsafe { &mut *(&mut pdu as *mut Pdu as *mut SharedPdu) },
             umem_base as usize,
         );
         // C. Verify Memory Content

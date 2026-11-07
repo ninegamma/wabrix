@@ -17,8 +17,8 @@ use wasmtime::component::{bindgen, ResourceTable};
 use wasmtime::Store;
 use wasmtime_wasi::WasiCtxBuilder;
 
-/// Host-side view of `BatchMetadata` that uses `Pdu` instead of `Pdu0`.
-/// `Pdu` and `Pdu0` are layout-identical (64 bytes: 56-byte `WPdu` core + 8-byte tail);
+/// Host-side view of `BatchMetadata` that uses `Pdu` instead of `SharedPdu`.
+/// `Pdu` and `SharedPdu` are layout-identical (64 bytes: 56-byte `WPdu` core + 8-byte tail);
 /// plugins never read/write the last 8 bytes, so the cast is safe.
 #[repr(C)]
 struct HostBatch {

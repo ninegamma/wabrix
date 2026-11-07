@@ -15,7 +15,7 @@ license-file = "LICENSE"
 
 [workspace.dependencies]
 wabrix_api = { git = "https://github.com/ninegamma/wabrix_api.git", branch = "main", version= "0.6.1", features=["host"] }
-#wabrix_api = { path = "../wabrix_api/wabrix_api", features = ["host"] }
+#wabrix_api = { path = "../wabrix_api", features = ["host"] }
 wabrix_base = { path = "wabrix_base" }
 wabrix_wasm = { path = "wabrix_wasm" }
 libbpf-rs = "0.27.1"
@@ -56,4 +56,4 @@ network-types = { git = "https://github.com/ninegamma/network-types.git", branch
 #xsk-core = { path = "../xsk-core" }
 
 [patch."https://github.com/ninegamma/wabrix_api.git"]
-wabrix_api = { path = "../wabrix_api/wabrix_api"}
+wabrix_api = { path = "../wabrix_api"}
