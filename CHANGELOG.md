@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.7.0] - 2026-11-08
+
+### Changed
+
+- Separated reusable plugin implementations and Wasm plugin crates into the
+  independent `wabrix_plugins` repository, with its own workspace, build
+  settings, and versioned WIT snapshot and sync tooling.
+- Simplified `wabrix_api` to a standalone Cargo package containing the generic
+  SDK and canonical WIT interfaces; updated the host to use API version 0.7.
+- Renamed SDK packet types from `WPdu` to `PduCore` and from `Pdu0` to
+  `SharedPdu`, exposed them at the crate root, and updated host packet and
+  Wasm mailbox access accordingly.
+- Updated example configurations to load Wasm artifacts from the
+  `wabrix_plugins` repository's build directory.
+
+### Removed
+
+- Removed the native `TcpNode`, its pipeline registration, and the native TCP
+  example, eliminating the host's dependency on `wabrix_plugins`. Configurations
+  using `TcpNode` must migrate to the `tcp_engine` Wasm plugin.
+
 ## [0.6.1] - 2026-11-07
 
 ### Added

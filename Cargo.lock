@@ -3202,7 +3202,7 @@ dependencies = [
 
 [[package]]
 name = "wabrix"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3222,7 +3222,8 @@ dependencies = [
 
 [[package]]
 name = "wabrix_api"
-version = "0.6.1"
+version = "0.7.0"
+source = "git+https://github.com/ninegamma/wabrix_api.git?branch=main#6fd02f39c5eea4e38f027065abf530415c254836"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -3235,7 +3236,7 @@ dependencies = [
 
 [[package]]
 name = "wabrix_base"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "crossbeam-queue",
@@ -3254,7 +3255,7 @@ dependencies = [
 
 [[package]]
 name = "wabrix_lib"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3289,7 +3290,7 @@ dependencies = [
 
 [[package]]
 name = "wabrix_wasm"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
