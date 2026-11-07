@@ -110,8 +110,8 @@ routes = ["drop", "drop"]
 desired_state = "Running"
 args= { umem = "1" }
 
-#hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_plugins/target/wasm32-wasip2/release/inspector_engine.wasm" }
-hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_plugins/target/wasm32-wasip2/release/inspector_engine_new.wasm" }
+hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_plugins/target/wasm32-wasip2/release/inspector_engine.wasm" }
+#hot_args= { wasm_file_path = "/home/rainer1956/wabrix_prj/wabrix_plugins/target/wasm32-wasip2/release/inspector_engine_new.wasm" }
 
 [pipelines.nodes.node_data]
 src_ip = "10.10.10.31"

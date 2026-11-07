@@ -386,20 +386,6 @@ dependencies = [
 
 [[package]]
 name = "cargo_metadata"
-version = "0.18.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d886547e41f740c616ae73108f6eb70afe6d940c7bc697cb30f13daec073037"
-dependencies = [
- "camino",
- "cargo-platform",
- "semver",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "cargo_metadata"
 version = "0.19.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd5eb614ed4c27c5d706420e4320fbe3216ab31fa1c33cd8246ac36dae4479ba"
@@ -1656,7 +1642,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b60690d8d106293050fe02e0f6d090556b3ca2a2ec9c73271eb47efd69376b12"
 dependencies = [
  "anyhow",
- "cargo_metadata 0.19.2",
+ "cargo_metadata",
  "clap",
  "libbpf-rs",
  "memmap2",
@@ -3274,13 +3260,11 @@ version = "0.6.1"
 dependencies = [
  "anyhow",
  "arc-swap",
- "cargo_metadata 0.18.1",
  "core_affinity",
  "crossbeam-channel",
  "crossbeam-queue",
  "crossbeam-utils",
  "hashbrown 0.17.1",
- "ipnet",
  "libbpf-cargo",
  "libbpf-rs",
  "libbpf-sys",
@@ -3299,24 +3283,10 @@ dependencies = [
  "ts-rs",
  "wabrix_api",
  "wabrix_base",
- "wabrix_plugins",
  "wabrix_wasm",
  "wasmtime",
  "wasmtime-wasi",
  "xsk-core",
- "zerocopy 0.8.63",
-]
-
-[[package]]
-name = "wabrix_plugins"
-version = "0.6.1"
-dependencies = [
- "hashbrown 0.17.1",
- "log",
- "network-types",
- "postcard",
- "wabrix_api",
- "zerocopy 0.8.63",
 ]
 
 [[package]]

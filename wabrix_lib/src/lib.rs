@@ -8,7 +8,6 @@ pub mod xsocket;
 //pub(crate) mod telemetry_logger;
 pub mod generator_node;
 pub(crate) mod system_runner;
-pub mod tcp_node;
 pub mod toml_parser;
 
 // Include the generated BPF skeleton code

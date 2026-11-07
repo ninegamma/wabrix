@@ -847,7 +847,7 @@ impl BatchRx for XSocketRx {
                 }
 
                 // NAPI polling has already kicked the driver on this call.
-                // Reserve the legacy periodic wakeup for userspace ring spin
+                // Reserve the .legacy_src periodic wakeup for userspace ring spin
                 // so idle NAPI does not issue a second poll syscall.
                 if !self.napi_busy_poll && self.empty_spins.is_multiple_of(128) {
                     // Use try_lock so the empty path never blocks on the fill queue.

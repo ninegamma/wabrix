@@ -11,7 +11,6 @@ use std::time::{Duration, Instant};
 
 use crate::config::hot_config::{HotNodeData, HotPipelineConfig, NodeDynamicState};
 use crate::generator_node::{GenState, GeneratorNode};
-use crate::tcp_node::TcpNode;
 pub(crate) use crate::{BatchRx, BatchTx};
 use crossbeam_channel::Receiver;
 use separator::Separatable;
@@ -649,93 +648,6 @@ impl PipelineFactory {
                     Box::new(FastParserNode::new(my_id.clone(), next_id))
                 }
 
-                // === 6. Native TcpNode ===
-                "TcpNode" => {
-                    let routing_table: Vec<NodeId> = node_instance
-                        .node_config
-                        .routes
-                        .iter()
-                        .map(|r| {
-                            id_map
-                                .get(r)
-                                .ok_or_else(|| {
-                                    format!(
-                                        "TcpNode {} points to unknown route '{}'",
-                                        node_instance.node_config.id, r
-                                    )
-                                })
-                                .cloned()
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    if routing_table.is_empty() {
-                        return Err(format!(
-                            "TcpNode {} has no routes defined",
-                            node_instance.node_config.id
-                        ));
-                    }
-
-                    let umem_group_id = node_instance
-                        .node_config
-                        .args
-                        .get("umem")
-                        .ok_or(format!(
-                            "TcpNode {} missing 'umem' in args",
-                            node_instance.node_config.id
-                        ))?
-                        .parse::<usize>()
-                        .map_err(|_| {
-                            format!(
-                                "TcpNode {} 'umem' must be a number",
-                                node_instance.node_config.id
-                            )
-                        })?;
-
-                    let config_data: Vec<(String, String)> = node_instance
-                        .node_config
-                        .startup_node_data()
-                        .into_iter()
-                        .collect();
-
-                    let counter_names = Arc::new(RwLock::new(
-                        wabrix_plugins::tcp_common::TCP_STAT_NAMES
-                            .iter()
-                            .map(|name| name.to_string())
-                            .chain(std::iter::once("watermark".to_string()))
-                            .collect::<Vec<String>>(),
-                    ));
-                    let num_buckets = counter_names.read().map(|names| names.len()).unwrap_or(0);
-                    let counters_pkts: Vec<Arc<CachePadded<AtomicU64>>> = (0..num_buckets)
-                        .map(|_| Arc::new(CachePadded::new(AtomicU64::new(0))))
-                        .collect();
-                    let counters_bytes: Vec<Arc<CachePadded<AtomicU64>>> = (0..num_buckets)
-                        .map(|_| Arc::new(CachePadded::new(AtomicU64::new(0))))
-                        .collect();
-                    let tm_force_sync = Arc::new(AtomicBool::new(false));
-                    if let Some(registry) = telemetry_registry.as_mut() {
-                        registry.register(TelemetryMetrics {
-                            node_id: format!(
-                                "{}/{}",
-                                pipeline_instance.name, node_instance.node_config.id
-                            ),
-                            counter_names,
-                            counters_pkts: counters_pkts.clone(),
-                            counters_bytes,
-                            active_flag: None,
-                            force_sync_flag: Some(tm_force_sync.clone()),
-                            histograms: vec![],
-                        });
-                    }
-
-                    Box::new(TcpNode::new(
-                        my_id.clone(),
-                        routing_table,
-                        umem_group_id,
-                        config_data,
-                        platform_data.tsc_frequency,
-                        counters_pkts,
-                        tm_force_sync,
-                    )?)
-                }
 
                 // === 7. Wasm Engine ===
                 #[cfg(feature = "wasm")]

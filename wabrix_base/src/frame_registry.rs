@@ -427,7 +427,7 @@ impl FrameRegistry {
             .sum()
     }
 
-    /* Disabled legacy API; retained for reference while allocation uses caller-provided slots.
+    /* Disabled .legacy_src API; retained for reference while allocation uses caller-provided slots.
         /// Allocates frames and creates PDUs for them
         ///
         /// # Arguments

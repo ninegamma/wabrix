@@ -6,7 +6,6 @@ version.workspace = true
 [dependencies]
 wabrix_base = { workspace = true }
 wabrix_api = { workspace = true }
-wabrix_plugins = { workspace = true }
 
 # Standard Tools
 anyhow = { workspace = true }
@@ -20,8 +19,6 @@ xsk-core = { workspace = true }
 libbpf-rs = { workspace = true }
 libbpf-sys = { workspace = true }
 network-types = { workspace = true }
-zerocopy = { workspace = true }
-ipnet = "2.12"
 macaddr = { workspace = true }
 
 # Serialization & Config
@@ -50,7 +47,6 @@ hashbrown = { version = "0.17.1", features = ["serde"] }
 
 [build-dependencies]
 anyhow = { workspace = true }
-cargo_metadata = "0.18"
 libbpf-cargo = { workspace = true }
 
 [features]
