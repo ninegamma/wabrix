@@ -953,7 +953,9 @@ impl WasmManager {
             .cranelift_opt_level(OptLevel::Speed)
             .with_host_memory(Arc::new(XdpMemoryCreator))
             // Disable mmap-based image initialization because we are using a custom hardware UMEM creator:
-            .memory_init_cow(false);
+            .memory_init_cow(false)
+            .consume_fuel(false)  // is default, but just to document it
+            .epoch_interruption(false);      // is default, but just to document it
 
         let engine = Engine::new(&config)?;
         let mut linker: Linker<MyHostState> = Linker::new(&engine);

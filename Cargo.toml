@@ -20,11 +20,11 @@ wabrix_base = { path = "wabrix_base" }
 wabrix_wasm = { path = "wabrix_wasm" }
 libbpf-rs = "0.27.1"
 libbpf-sys = { version = "1.7", default-features = false }
-xsk-core = { git = "https://github.com/ninegamma/xsk-core.git", branch = "main", version= "0.2.1" }
+xsk-core = { git = "https://github.com/ninegamma/xsk-core.git", branch = "main", version= "0.3" }
 # Add these for the Wasm side of the house:
 wit-bindgen = "0.60.0"
-wasmtime = { version = "43.0", features = ["component-model"] }
-wasmtime-wasi = "43.0"
+wasmtime = { version = "50.0.1", features = ["component-model"] }
+wasmtime-wasi = "50.0.1"
 clap = { version = "4.5", features = ["derive", "std"] }
 network-types = { version = "0.2", default-features = false, features = ["zerocopy"] }
 zerocopy = { git = "https://github.com/google/zerocopy", default-features = false, features = ["derive"] }
@@ -49,7 +49,6 @@ netlink-sys = "0.8"
 libbpf-cargo = "0.27.0"
 
 [patch.crates-io]
-libxdp-sys = { git = "https://github.com/ninegamma/libxdp-sys.git", branch = "ninegamma" }
 network-types = { git = "https://github.com/ninegamma/network-types.git", branch = "zerocopy" }
 
 [patch."https://github.com/ninegamma/xsk-core.git"]
