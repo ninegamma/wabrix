@@ -27,7 +27,7 @@ wasmtime = { version = "50.0.1", features = ["component-model"] }
 wasmtime-wasi = "50.0.1"
 clap = { version = "4.5", features = ["derive", "std"] }
 network-types = { version = "0.2", default-features = false, features = ["zerocopy"] }
-zerocopy = { git = "https://github.com/google/zerocopy", default-features = false, features = ["derive"] }
+zerocopy = { version= "0.8", default-features = false, features = ["derive"] }
 macaddr = { version = "1.0.1", default-features = false, features = ["serde"] }
 
 # Common dependencies

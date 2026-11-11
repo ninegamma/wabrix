@@ -1615,11 +1615,11 @@ dependencies = [
 [[package]]
 name = "network-types"
 version = "0.2.0"
-source = "git+https://github.com/ninegamma/network-types.git?branch=zerocopy#c95ff07bf91e859ce6e460bcc6dd3608b740654d"
+source = "git+https://github.com/ninegamma/network-types.git?branch=zerocopy#c49d9ad8739014978be9a0fff881e152a1345874"
 dependencies = [
  "num-derive",
  "num-traits",
- "zerocopy 0.8.63",
+ "zerocopy",
 ]
 
 [[package]]
@@ -1812,7 +1812,7 @@ version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
- "zerocopy 0.8.56",
+ "zerocopy",
 ]
 
 [[package]]
@@ -2841,7 +2841,7 @@ dependencies = [
 [[package]]
 name = "wabrix_api"
 version = "0.7.0"
-source = "git+https://github.com/ninegamma/wabrix_api.git?branch=main#6fd02f39c5eea4e38f027065abf530415c254836"
+source = "git+https://github.com/ninegamma/wabrix_api.git?branch=main#f8ad9f31947d03a2dbabdb08c8def4aebfac2099"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -2849,7 +2849,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "network-types",
  "serde",
- "zerocopy 0.8.63",
+ "zerocopy",
 ]
 
 [[package]]
@@ -3791,36 +3791,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.56"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "556764e583adb45a9f8d413c2a147fa7e8d821e48e12b14fd560b607998b75eb"
-dependencies = [
- "zerocopy-derive 0.8.56",
-]
-
-[[package]]
-name = "zerocopy"
 version = "0.8.63"
-source = "git+https://github.com/google/zerocopy#f61435de34bb62c67497bb3510225c5bc5f659be"
-dependencies = [
- "zerocopy-derive 0.8.63",
-]
-
-[[package]]
-name = "zerocopy-derive"
-version = "0.8.56"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2ab42fc20575779bd240faa45f94a74256f755c0fa9e89f0ede20d91d0cdfc1"
+checksum = "e5fe1f8f1b06191a00962174c61aa5005e0bb391a6d80d07e24d115c01a92ed8"
 dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
+ "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
 version = "0.8.63"
-source = "git+https://github.com/google/zerocopy#f61435de34bb62c67497bb3510225c5bc5f659be"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "863ad3ac83293fb4d740aedbfdc9240dd8d1a50c1099acd76ce80ce7c7230c7f"
 dependencies = [
  "proc-macro2",
  "quote",
