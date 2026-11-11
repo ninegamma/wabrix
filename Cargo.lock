@@ -3746,8 +3746,8 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "xdpcore-sys"
-version = "0.1.0"
-source = "git+https://github.com/ninegamma/xsk-core.git?branch=main#bd3a4d2d25562261f342886b30c55b68ba6d9e68"
+version = "0.1.1"
+source = "git+https://github.com/ninegamma/xsk-core.git?branch=main#3e950a04a108648992e2dc034e8597f42e31f562"
 dependencies = [
  "cc",
  "libbpf-sys",
@@ -3756,8 +3756,8 @@ dependencies = [
 
 [[package]]
 name = "xsk-core"
-version = "0.3.0"
-source = "git+https://github.com/ninegamma/xsk-core.git?branch=main#bd3a4d2d25562261f342886b30c55b68ba6d9e68"
+version = "0.3.1"
+source = "git+https://github.com/ninegamma/xsk-core.git?branch=main#3e950a04a108648992e2dc034e8597f42e31f562"
 dependencies = [
  "bitflags 2.13.1",
  "cfg-if",

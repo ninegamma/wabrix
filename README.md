@@ -1,41 +1,51 @@
 # Wabrix
 
-**The programmable, zero-copy data plane for custom network security and line-rate protocol parsing.**
+**Build custom, stateful network services at line rate — using WebAssembly.**
 
-Wabrix is an ultra-high-performance network data plane that combines **Linux AF_XDP** (kernel bypass) with **WebAssembly (Wasm)** sandboxing. 
-It allows you to build, deploy, and execute custom network logic at 25-100 Gbps+ line rates. 
-It implements **hitless hot-reloading of stateful Wasm plugins**, .i.e., a switch-over without packet- or state-loss at full line rate.
+Wabrix is a programmable network dataplane for developers who need application-specific packet processing at high packet rates.
 
-Designed for environments where standard firewalls fail—such as proprietary IoT networks and IT/OT converged infrastructure—Wabrix provides the deterministic speed of hardware appliances with the agility of dynamic software plugins.
+Implement your own protocol parsers, traffic inspection, connection handling, and security policies in Rust or other WebAssembly-compatible languages. Deploy them as sandboxed Wasm modules without modifying the dataplane engine.
 
-### Main Features
+Wabrix combines Linux AF_XDP with direct packet access from WebAssembly, enabling high-performance processing without copying packet data into separate plugin buffers.
 
-* **Ultra-High Performance via AF_XDP:** Achieves DPDK-like line-rate performance (up to 22 Mpps TX and 17 Mpps RX per core) using standard Linux drivers, preserving kernel control over power states and hardware.
+### Why Wabrix?
 
-
-* **Zero-Copy WebAssembly Integration:** Maps the AF_XDP UMEM directly into the Wasm linear memory space, allowing Wasm plugins to process raw packet data in-place without `memcpy` CPU overhead.
-
-
-* **Zero-Downtime Hot-Reloading:** Deploys and updates custom network security logic directly on the fast path using Wasmtime, requiring no system reboots or dropped connections.
-
-
-* **Stateful L4/L7 Inspection:** Tracks millions of concurrent connection states at wire-speed, demonstrating the setup and release of over 1 million TCP connections per second per core.
+- **Programmable:** Implement custom network protocols and application-specific processing logic.
+- **Stateful:** Maintain connection and application state across packets and live reloads.
+- **High performance:** Up to 17 million inspected UDP packets per second per core in the demonstrated benchmark.
+- **Sandboxed:** Execute custom processing logic in WebAssembly.
+- **Hot-reloadable:** Replace stateful processing modules at runtime without restarting the dataplane.
+- **Linux-native:** Built on AF_XDP and standard Linux networking drivers.
+- **No Heavy Lifting**: No learning of DPDK, nor writing of low level AF-XDP socket or eBPF code. 
 
 
-* **Deterministic Microsecond Latency:** Designed for industrial control loops, maintaining a 99th percentile latency of 100 microseconds at 17 Mpps with zero packet loss.
+### Primary Use Cases
+
+* **Bring-Your-Own-Protocol (BYOP) Parsing:** Drop-in support for proprietary, in-house, or legacy industrial protocols (IoT/Automotive/Manufacturing). Write a 50-line Rust parser, compile it to Wasm, and filter your custom UDP/TCP traffic at 25 Gbps without waiting for vendor firmware updates.
+* **Line-Rate Volumetric Mitigation:** Dynamically deploy Wasm-based heuristics to silently drop 20+ Gbps of malicious DDoS traffic on standard COTS servers before it overwhelms sensitive control systems.
 
 
-* **Programmable DAG Pipelines:** Defines network routing and security logic through a declarative, TOML-based Directed Acyclic Graph (DAG) configuration.
+### Performance demonstrated
 
+| Workload | Result |
+|---|---:|
+| UDP packet generation | 22 Mpps/core |
+| UDP packet inspection | 17 Mpps/core |
+| TCP connection setup and release | Over 1 million CPS/core |
 
-* **Scalable Shared-Nothing Architecture:** Operates with a run-to-completion model across multiple cores, supporting multiple UMEMs and concurrent virtual and physical interfaces.
+*Benchmarks performed on an Intel Core i7-14700K. See the performance section for test configuration and limitations.*
 
+### Who is Wabrix for?
 
-* **Native Telemetry & Monitoring:** Exposes real-time runtime diagnostics via Prometheus metrics endpoints, complete with integrated Grafana dashboards.
+Wabrix is intended for developers building network services with custom protocol logic, stateful processing requirements, and performance constraints that are difficult to satisfy with conventional solutions.
+Examples include:
+- Custom protocol inspection and security gateways.
+- Stateful application-aware traffic processing.
+- Specialized UDP/TCP services.
+- Programmable network visibility and traffic filtering.
 
+**Wabrix is open source and currently in alpha.**
 
-
----
 
 ## 🚀 Performance Metrics (Intel© Core™ i7-14700K)
 
@@ -51,11 +61,12 @@ workloads that require extreme throughput per core while avoiding long latency t
 
 ### 17 Mpps/core latency distribution of 500 million UDP packets
 
-This example ([`gen_engine_1w.toml`](wabrix/examples/gen_engine_1w.toml)) is tuned for high throughput using batch sizes of 512 packets. Nevertheless, the 99% percentile limit is still at 100 microseconds and the 99.9% percentile at 150 microseconds.
+This example ([`gen_engine_1w.toml`](wabrix/examples/gen_engine_1w.toml)) is tuned for high throughput with batch sizes configured to 512 packets. 
+Nevertheless, the 99% percentile limit is still at 100 microseconds and the 99.9% percentile at 150 microseconds.
 
 The generator is
 configured for 17 Mpps of UDP traffic on worker core 2. Packets leave one port
-of the Intel E830VDA2 NIC, cross a DAC to its other port, and reach the
+of the Intel E830VDA2 NIC, cross a DAC to its other port, packet headers get parsed by a native FastParserNode, and finally packets reach the
 single-core inspector on worker core 3 for latency measurement. The run is using NAPI busy polling,
 i.e., no extra cores for softirq interrupts.
 
@@ -81,16 +92,36 @@ lower-latency buckets. **There is zero packet loss and no long tail.** (See also
 
 
 ## 🏗️ Architecture
+The Wabrix project is split across three workspaces/crates: the `wabrix` core workspace, the `wabrix_api` crate, and the `wabrix_plugins` workspace. 
+The `wabrix_plugins` workspace contains some example WASM plugins, like a packet generator and a simple tcp engine. 
+The wabrix core and plugins workspaces depend both on the wabrix_api SDK crate. Plugins do not depend on the wabrix core.
+
+```mermaid
+flowchart LR
+  api["wabrix_api<br/>(SDK)"]
+  core["</br> wabrix core engine</br></br>"]
+  plugins["wabrix_plugins<br/><br/>(example plugins)"]
+  toml[".toml file<br/></br> (configuration and pipeline graphs)"]
+
+  core -->|uses| api
+  plugins -->|uses| api
+  toml -->|configures| core
+  toml -->|initializes| plugins
+```
+
+Core configuration, including pipeline graphs, and the initialization of plugins is defined in `.toml` files. 
+
 Wabrix works by bypassing the standard Linux networking stack using a modern, kernel-native approach:
 
 1. **AF_XDP (Kernel Bypass):** Packets are moved directly from the Network Interface Card (NIC) memory (UMEM) to userspace.
-    * **Wabrix vs. DPDK:** Wabrix vs. DPDK: Both frameworks utilize dedicated core polling for maximum throughput. However, DPDK requires proprietary Poll Mode Drivers (PMDs) that detach the network interface from the operating system, forcing the core into its highest power state permanently. Wabrix utilizes the Linux kernel's AF_XDP (eBPF) framework, achieving comparable line-rate performance using standard Linux drivers. This preserves standard OS networking management, reduces deployment complexity, and allows the kernel to retain control over power state transitions and hardware management.
+2. **Wabrix vs. DPDK:** Both frameworks utilize dedicated core polling for maximum throughput. 
+    However, Wabrix utilizes the Linux kernel's AF_XDP (eBPF) framework, achieving comparable line-rate performance using standard Linux drivers. 
+    This preserves standard OS networking management, reduces deployment complexity, 
+    and allows the kernel to retain control over power state transitions and hardware management.
+3. **Zero-Copy Wasm:** The UMEM is mapped directly into the linear memory space of a WebAssembly runtime. Wasm plugins process the raw packet data in-place without `memcpy` operations.
+4. **Programmable Pipeline:** Network pipelines are defined via TOML-based DAGs (Directed Acyclic Graphs), allowing for hot-reloading of networking modules without system reboots.
 
-2. **Zero-Copy Wasm:** The UMEM is mapped directly into the linear memory space of a WebAssembly runtime. Wasm plugins process the raw packet data in-place without `memcpy` operations.
-
-3. **Programmable Pipeline:** Network security logic is defined via TOML-based DAGs (Directed Acyclic Graphs), allowing for hot-reloading of security modules without system reboots.
-
-### Live Wasm policy updates
+### Stateful Live Wasm policy updates
 
 For a live `WasmEngine` update, deploy the replacement component at a new path,
 change that node's `hot_args.wasm_file_path` in a target TOML file, then apply
@@ -107,10 +138,8 @@ that worker keeps the old component active and logs the error. Workers activate
 independently, so a short rollout can have both component versions processing
 traffic while the remaining workers finish staging.
 
-This preserves network connections for stateless inspection and filtering logic.
-The current Wasm interface does not migrate plugin-owned session state, so a
-stateful TCP plugin should not be hot-reloaded while it owns live sessions - 
-this is work to be done. See [Wasm Component Hot Reloading](docs/wasm_hot_reload.md) for the full reload
+The current Wasm interface does also migrate plugin-owned session state.
+See [Wasm Component Hot Reloading](docs/wasm_hot_reload.md) for the full reload
 lifecycle, configuration behavior, and operational limits.
 
 ## 📦 Getting Started
@@ -224,14 +253,9 @@ Wabrix follows an **Open-Core** model:
 My mid-term commercial roadmap focuses on advanced plugins for **Deep-Packet Inspection (especially for proprietary/custom protocols), 
 specialized threat mitigation, and enterprise orchestration tools.**
 
-**Design Partners Wanted**
-Rather than building these enterprise features in a vacuum, I am currently looking for **1-2 exclusive Design Partners** to sponsor priority development 
-and shape the immediate roadmap. If your organization has a specific high-performance use case (like filtering a proprietary IoT protocol), reach out to discuss a collaboration.
+**Looking for Design Partners**
 
-## 💡 Primary Use Cases
-
-* **Bring-Your-Own-Protocol (BYOP) Parsing:** Drop-in support for proprietary, in-house, or legacy industrial protocols (IoT/Automotive/Manufacturing). Write a 50-line Rust parser, compile it to Wasm, and filter your custom UDP/TCP traffic at 25 Gbps without waiting for vendor firmware updates.
-* **Line-Rate Volumetric Mitigation:** Dynamically deploy Wasm-based heuristics to silently drop 20+ Gbps of malicious DDoS traffic on standard COTS servers before it overwhelms sensitive control systems.
+I'm looking for 1–2 early adopters with demanding network-processing workloads to help shape Wabrix's development. If you have a real-world application requiring high-performance, programmable packet processing, I'd like to hear from you.
 
 ## 🤝 Contributing
 Wabrix is currently in **Alpha**. I welcome contributions to the core engine, documentation, and performance tuning efforts. Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details on our open-core philosophy and pull request process.
